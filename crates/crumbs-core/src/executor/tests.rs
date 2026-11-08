@@ -21,6 +21,7 @@ fn planned(env: &Env, action: Action) -> PlannedAction {
         size,
         fingerprint: fingerprint(env, &p).unwrap(),
         scope: Scope::Home,
+        depends_on: None,
         reason: "test".into(),
         action,
     }
@@ -447,4 +448,65 @@ fn delete_refuses_target_that_is_a_mount_root() {
     let err = delete_with(&env, Path::new("/tmp/mnt"), &fake_mount).unwrap_err();
     assert_eq!(err, "refusing: /tmp/mnt contains another filesystem");
     assert!(env.sys("/tmp/mnt/inner").exists());
+}
+
+#[test]
+fn leftovers_skipped_when_appimage_file_fails() {
+    if rustix::process::getuid().is_root() {
+        return; // root ignores directory permissions
+    }
+    let t = FixtureTree::new();
+    t.appimage("home/user/Apps/Foo.AppImage");
+    t.write("home/user/.config/foo/a", b"a");
+    t.write("home/user/.cache/foo/b", b"b");
+    // A read-only Trash/info makes trashing anything fail.
+    t.mkdir("home/user/.local/share/Trash/files");
+    let info = t.mkdir("home/user/.local/share/Trash/info");
+    let env = t.env();
+    let mut actions = vec![
+        planned(&env, trash("/home/user/Apps/Foo.AppImage")),
+        planned(&env, trash("/home/user/.config/foo")),
+        planned(&env, trash("/home/user/.cache/foo")),
+    ];
+    for a in &mut actions[1..] {
+        a.depends_on = Some(0);
+    }
+    let plan = plan_of(actions);
+    fs::set_permissions(&info, fs::Permissions::from_mode(0o500)).unwrap();
+    let report = execute(&env, &Config::default(), &plan);
+    fs::set_permissions(&info, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(!report.results[0].ok);
+    for r in &report.results[1..] {
+        assert!(!r.ok);
+        assert_eq!(
+            r.error.as_deref(),
+            Some("skipped: ~/Apps/Foo.AppImage was not removed")
+        );
+    }
+    assert_eq!(report.freed, 0);
+    assert!(env.sys("/home/user/.config/foo/a").exists());
+    assert!(env.sys("/home/user/.cache/foo/b").exists());
+    let (hist, _) = read_history(&env).unwrap();
+    assert_eq!(hist.len(), 3);
+    for (h, r) in hist.iter().zip(&report.results).skip(1) {
+        assert_eq!(h.id, r.history_id);
+        assert!(!h.ok);
+        assert_eq!(h.action, HistoryAction::Trash);
+        assert_eq!(h.error, r.error);
+        assert!(h.trashed.is_none());
+    }
+}
+
+#[test]
+fn dependents_run_when_dependency_succeeds() {
+    let t = FixtureTree::new();
+    t.write("home/user/.config/foo/a", b"a");
+    t.write("home/user/.cache/foo/b", b"b");
+    let env = t.env();
+    let mut second = planned(&env, trash("/home/user/.cache/foo"));
+    second.depends_on = Some(0);
+    let plan = plan_of(vec![planned(&env, trash("/home/user/.config/foo")), second]);
+    let report = execute(&env, &Config::default(), &plan);
+    assert!(report.results.iter().all(|r| r.ok), "{report:?}");
 }

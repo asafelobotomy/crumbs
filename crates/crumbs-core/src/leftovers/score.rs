@@ -196,6 +196,30 @@ pub(crate) fn score_name(key: &NameKey, ids: &Idents) -> Option<(Confidence, Str
     None
 }
 
+/// Scores an autostart file's stem (`.desktop` removed) against an app:
+/// as a directory name ([`score_name`]), and `High` when it equals a
+/// strong identifier ignoring case (`gutcheck.desktop` for `GutCheck`).
+pub(crate) fn score_autostart_stem(stem: &str, ids: &Idents) -> Option<(Confidence, String)> {
+    let by_name = score_name(&NameKey::new(stem), ids);
+    if by_name
+        .as_ref()
+        .is_some_and(|(c, _)| *c == Confidence::High)
+    {
+        return by_name;
+    }
+    let lower = stem.to_lowercase();
+    ids.strong
+        .iter()
+        .find(|i| i.raw.to_lowercase() == lower)
+        .map(|i| {
+            (
+                Confidence::High,
+                format!("named after the {}", i.kind.label()),
+            )
+        })
+        .or(by_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -49,6 +49,10 @@ pub struct PlannedAction {
     /// Left out of the JSON when it is `Home`, as in M2.
     #[serde(default, skip_serializing_if = "Scope::is_home")]
     pub scope: Scope,
+    /// Index of an earlier action in the same plan that must have succeeded
+    /// first; the executor skips this action otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<usize>,
     pub reason: String,
 }
 
@@ -106,6 +110,7 @@ pub fn build_plan(
                 action: remove(location.clone(), opts),
                 fingerprint,
                 scope: Scope::Home,
+                depends_on: None,
                 reason: REASON_APPIMAGE.into(),
             });
             skip_path = Some(location);
@@ -135,8 +140,15 @@ pub fn build_plan(
             size,
             fingerprint: f.fingerprint,
             scope: Scope::Home,
+            depends_on: None,
             reason: f.reason.clone(),
         });
+    }
+    if skip_path.is_some() {
+        // A full AppImage uninstall: nothing else goes unless the file did.
+        for a in actions.iter_mut().skip(1) {
+            a.depends_on = Some(0);
+        }
     }
     let total_size = actions.iter().map(|a| a.size).sum();
     Ok(Plan {
@@ -349,5 +361,35 @@ mod tests {
 
         app.location = None;
         assert!(build_plan(&env, Some(&app), &fs, &PlanOptions::default()).is_err());
+    }
+
+    #[test]
+    fn appimage_leftovers_depend_on_the_file() {
+        let t = FixtureTree::new();
+        t.appimage("home/user/Applications/Foo.AppImage");
+        t.write("home/user/.config/foo/a", b"a");
+        t.write("home/user/.cache/foo/b", b"b");
+        let env = t.env();
+        let mut app = App::new(SourceKind::AppImage, "Foo.AppImage");
+        app.location = Some("/home/user/Applications/Foo.AppImage".into());
+        let fs = [
+            finding(&env, "/home/user/.config/foo", FindingKind::Config),
+            finding(&env, "/home/user/.cache/foo", FindingKind::Cache),
+        ];
+        let plan = build_plan(&env, Some(&app), &fs, &PlanOptions::default()).unwrap();
+        let deps: Vec<Option<usize>> = plan.actions.iter().map(|a| a.depends_on).collect();
+        assert_eq!(deps, [None, Some(0), Some(0)]);
+        let json = serde_json::to_value(&plan.actions[0]).unwrap();
+        assert!(json.get("depends_on").is_none());
+        let json = serde_json::to_value(&plan.actions[1]).unwrap();
+        assert_eq!(json["depends_on"], 0);
+
+        // Leftovers only: the app stays, so nothing depends on anything.
+        let opts = PlanOptions {
+            leftovers_only: true,
+            ..PlanOptions::default()
+        };
+        let plan = build_plan(&env, Some(&app), &fs, &opts).unwrap();
+        assert!(plan.actions.iter().all(|a| a.depends_on.is_none()));
     }
 }

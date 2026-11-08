@@ -43,6 +43,19 @@ pub fn restore(
     selectors: &[String],
     dry_run: bool,
 ) -> Result<Vec<RestoreOutcome>, CoreError> {
+    restore_with(env, cfg, selectors, dry_run, &history::append)
+}
+
+type Append<'a> = dyn Fn(&Env, &[HistoryEntry]) -> Result<(), CoreError> + 'a;
+
+/// [`restore`] with the history writer injected (tests fail one entry).
+fn restore_with(
+    env: &Env,
+    cfg: &Config,
+    selectors: &[String],
+    dry_run: bool,
+    append: &Append<'_>,
+) -> Result<Vec<RestoreOutcome>, CoreError> {
     let (entries, _) = history::read_history(env)?;
     let restored: HashSet<&str> = entries
         .iter()
@@ -52,7 +65,7 @@ pub fn restore(
     let batch = history::next_batch_id(env);
     let mut seen: HashSet<&str> = HashSet::new();
     let mut outcomes = Vec::new();
-    let mut logged = Vec::new();
+    let mut logged = 0usize;
     for sel in selectors {
         let matched = select(&entries, sel);
         if matched.is_empty() {
@@ -73,13 +86,15 @@ pub fn restore(
             } else {
                 restore_one(env, cfg, e, dry_run, &batch)
             };
-            let (backup, error) = match res {
+            let (backup, mut error) = match res {
                 Ok(b) => (b, None),
                 Err(e) => (None, Some(e)),
             };
+            // What happened on disk; a history failure doesn't change it.
+            let ok = error.is_none();
             if !dry_run {
-                logged.push(HistoryEntry {
-                    id: format!("{batch}-{}", logged.len()),
+                let entry = HistoryEntry {
+                    id: format!("{batch}-{logged}"),
                     batch: batch.clone(),
                     time: history::now_rfc3339(),
                     action: HistoryAction::Restore,
@@ -87,28 +102,27 @@ pub fn restore(
                     trashed: e.trashed.clone(),
                     backup,
                     size: e.size,
-                    ok: error.is_none(),
+                    ok,
                     error: error.clone(),
                     app_id: e.app_id.clone(),
                     restores: Some(e.id.clone()),
-                });
+                };
+                logged += 1;
+                // Appended right after its action, so a later failure never
+                // costs this record and a failure here costs only this one.
+                if let Err(err) = append(env, std::slice::from_ref(&entry)) {
+                    let suffix = format!("{err}; history not written");
+                    error = Some(match error {
+                        Some(prev) => format!("{prev}; {suffix}"),
+                        None => suffix,
+                    });
+                }
             }
             outcomes.push(RestoreOutcome {
                 entry_id: e.id.clone(),
                 path: e.path.clone(),
-                ok: error.is_none(),
+                ok,
                 error,
-            });
-        }
-    }
-    if !logged.is_empty()
-        && let Err(e) = history::append(env, &logged)
-    {
-        let suffix = format!("{e}; history not written");
-        for o in outcomes.iter_mut().filter(|o| !o.entry_id.is_empty()) {
-            o.error = Some(match o.error.take() {
-                Some(prev) => format!("{prev}; {suffix}"),
-                None => suffix.clone(),
             });
         }
     }
@@ -330,6 +344,7 @@ mod tests {
                 size: 1,
                 fingerprint: fingerprint(env, action.path()).unwrap(),
                 scope: crate::safety::Scope::Home,
+                depends_on: None,
                 reason: "test".into(),
                 action,
             })
@@ -387,6 +402,65 @@ mod tests {
             Some(rep.results[0].history_id.as_str())
         );
         assert_ne!(logged[0].batch, rep.batch);
+    }
+
+    /// Each Restore entry is appended right after its action, on its own, so
+    /// a failing append costs only that entry.
+    #[test]
+    fn restore_appends_per_entry() {
+        use std::cell::RefCell;
+        let t = FixtureTree::new();
+        t.write("home/user/.config/a/x", b"A");
+        t.write("home/user/.config/b/y", b"B");
+        t.write("home/user/.config/c/z", b"C");
+        let env = t.env();
+        let rep = run(
+            &env,
+            vec![
+                trash("/home/user/.config/a"),
+                trash("/home/user/.config/b"),
+                trash("/home/user/.config/c"),
+            ],
+        );
+        let calls: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+        let append = |env: &Env, entries: &[HistoryEntry]| {
+            let mut calls = calls.borrow_mut();
+            calls.push(entries.len());
+            if calls.len() == 2 {
+                return Err(CoreError::Parse {
+                    what: "history entry".into(),
+                    message: "boom".into(),
+                });
+            }
+            history::append(env, entries)
+        };
+        let out = restore_with(&env, &Config::default(), &sel(&rep.batch), false, &append).unwrap();
+        assert_eq!(*calls.borrow(), [1, 1, 1]);
+        assert!(out.iter().all(|o| o.ok), "{out:?}");
+        assert_eq!(out[0].error, None, "{out:?}");
+        assert!(
+            out[1]
+                .error
+                .as_deref()
+                .unwrap()
+                .ends_with("; history not written"),
+            "{out:?}"
+        );
+        assert_eq!(out[2].error, None, "{out:?}");
+        // The restores themselves all happened, and the other two are logged.
+        for d in ["a/x", "b/y", "c/z"] {
+            assert!(env.sys(&format!("/home/user/.config/{d}")).exists());
+        }
+        let logged = restore_entries(&env);
+        assert_eq!(logged.len(), 2);
+        assert_eq!(
+            logged[0].restores.as_deref(),
+            Some(rep.results[0].history_id.as_str())
+        );
+        assert_eq!(
+            logged[1].restores.as_deref(),
+            Some(rep.results[2].history_id.as_str())
+        );
     }
 
     #[test]

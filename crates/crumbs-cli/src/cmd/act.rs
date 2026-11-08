@@ -341,6 +341,7 @@ mod tests {
                 is_symlink: false,
             },
             scope: Scope::Home,
+            depends_on: None,
             reason: String::new(),
         }
     }

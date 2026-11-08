@@ -900,3 +900,50 @@ fn custom_xdg_crumbs_dirs_never_found() {
         "{orphans:#?}"
     );
 }
+
+#[test]
+fn autostart_name_matched() {
+    let t = FixtureTree::new();
+    t.desktop(
+        "/home/user/.config/autostart/gutcheck.desktop",
+        "[Desktop Entry]\nType=Application\nName=GutCheck\nExec=/opt/elsewhere/run --tray\n",
+    );
+    t.desktop(
+        "/home/user/.config/autostart/unrelated.desktop",
+        "[Desktop Entry]\nType=Application\nName=Other\nExec=other\n",
+    );
+    let r = Run::new(&t, vec![appimage("GutCheck-0.19.0-x86_64.AppImage")]);
+    let fs = r.find(0, true);
+    let f = must(&fs, ".config/autostart/gutcheck.desktop");
+    assert_eq!(f.kind, FindingKind::Autostart);
+    assert_eq!(f.confidence, Confidence::High);
+    assert!(f.preselected);
+    assert!(at(&fs, ".config/autostart/unrelated.desktop").is_none());
+
+    // A stoplisted stem says nothing about an app.
+    let t = FixtureTree::new();
+    t.desktop(
+        "/home/user/.config/autostart/settings.desktop",
+        "[Desktop Entry]\nType=Application\nExec=zzz\n",
+    );
+    let r = Run::new(&t, vec![pacman("settings", &[])]);
+    assert!(at(&r.find(0, true), ".config/autostart/settings.desktop").is_none());
+}
+
+#[test]
+fn orphans_no_longer_list_named_autostart() {
+    let t = FixtureTree::new();
+    t.desktop(
+        "/home/user/.config/autostart/gutcheck.desktop",
+        "[Desktop Entry]\nType=Application\nName=GutCheck\nExec=/opt/elsewhere/run\n",
+    );
+    let apps = vec![appimage("GutCheck-0.19.0-x86_64.AppImage")];
+    let fs = orphans(&t, apps, true);
+    assert!(
+        at(&fs, ".config/autostart/gutcheck.desktop").is_none(),
+        "{fs:#?}"
+    );
+    // Without the app it is an orphan again.
+    let fs = orphans(&t, Vec::new(), true);
+    must(&fs, ".config/autostart/gutcheck.desktop");
+}

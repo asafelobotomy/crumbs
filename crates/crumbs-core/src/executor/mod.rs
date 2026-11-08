@@ -46,7 +46,9 @@ struct Done {
     backup: Option<PathBuf>,
 }
 
-/// Runs every action in order. Each attempt becomes one history entry,
+/// Runs every action in order. An action whose `depends_on` action did not
+/// succeed is skipped: `ok: false`, with the reason, and recorded like any
+/// other. Each attempt becomes one history entry,
 /// appended (and synced) right after the attempt, so an interrupted run
 /// still leaves a record of what it did. When an entry can't be written,
 /// that result's error gets `"<append error>; history not written"` (its
@@ -59,9 +61,12 @@ pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
     for (i, pa) in plan.actions.iter().enumerate() {
         let id = format!("{batch}-{i}");
         let path = pa.action.path();
-        let outcome = safety::verify(env, cfg, pa.scope, path, &pa.fingerprint)
-            .map_err(|e| e.to_string())
-            .and_then(|()| act(env, &pa.action, &pa.fingerprint, &batch));
+        let outcome = match skip_reason(env, plan, &results, pa.depends_on) {
+            Some(reason) => Err(reason),
+            None => safety::verify(env, cfg, pa.scope, path, &pa.fingerprint)
+                .map_err(|e| e.to_string())
+                .and_then(|()| act(env, &pa.action, &pa.fingerprint, &batch)),
+        };
         let (ok, error, done) = match outcome {
             Ok(done) => (true, None, done),
             Err(e) => (false, Some(e), Done::default()),
@@ -109,6 +114,25 @@ pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
         results,
         freed,
     }
+}
+
+/// Why an action must not run: the earlier action it depends on failed or
+/// was itself skipped.
+fn skip_reason(
+    env: &Env,
+    plan: &Plan,
+    results: &[ActionResult],
+    depends_on: Option<usize>,
+) -> Option<String> {
+    let dep = depends_on?;
+    if results.get(dep).is_some_and(|r| r.ok) {
+        return None;
+    }
+    let shown = plan.actions.get(dep).map_or_else(
+        || format!("action {dep}"),
+        |d| display_path(env, d.action.path()),
+    );
+    Some(format!("skipped: {shown} was not removed"))
 }
 
 fn io_msg(env: &Env, in_system: &Path, e: &io::Error) -> String {

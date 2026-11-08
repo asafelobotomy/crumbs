@@ -14,7 +14,7 @@ use crate::safety::protected_paths;
 use crate::size::{DiskUsage, disk_usage};
 
 use super::candidates::{Bases, Candidate, Subject, admit, enumerate, holds_container, lexical};
-use super::score::{Idents, score_name};
+use super::score::{Idents, score_autostart_stem, score_name};
 use super::{Confidence, Finding, FindingKind};
 
 /// One app's claim on a candidate.
@@ -177,7 +177,19 @@ fn score(
         Subject::Flatpak(id) => (app.source == SourceKind::Flatpak
             && app.rdns_id.as_deref() == Some(id))
         .then(|| (Confidence::High, format!("data of the Flatpak {id}"))),
-        Subject::Launcher(e) => score_launcher(e, app, ids, appimage_launchers),
+        Subject::Launcher(e) => {
+            let by_launcher = score_launcher(e, app, ids, appimage_launchers);
+            // An autostart file is also named after its app. Not when it is
+            // another AppImage's own launcher.
+            let by_name = (c.kind == FindingKind::Autostart
+                && !appimage_launchers.contains(e.id.as_str()))
+            .then(|| score_autostart_stem(super::score::desktop_stem(&e.id), ids))
+            .flatten();
+            match (by_launcher, by_name) {
+                (Some(a), Some(b)) => Some(if b.0 > a.0 { b } else { a }),
+                (a, b) => a.or(b),
+            }
+        }
         Subject::Icon(stem) => ids
             .icon_names()
             .any(|n| n == stem)
