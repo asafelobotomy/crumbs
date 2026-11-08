@@ -1,6 +1,7 @@
 pub mod appimage;
 pub mod flatpak;
 pub mod pacman;
+pub mod unmanaged;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
