@@ -63,22 +63,41 @@ impl Action {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlannedAction {
     pub action: Action,
     pub size: u64,
-    /// Taken at scan time; the executor re-verifies against it.
-    #[serde(skip)]
+    /// Taken at scan time; the executor re-verifies against it. Not part
+    /// of the JSON.
     pub fingerprint: Fingerprint,
     /// Where the path may lie; the executor verifies it in this scope.
-    /// Left out of the JSON when it is `Home`, as in M2.
-    #[serde(default, skip_serializing_if = "Scope::is_home")]
+    /// Left out of the JSON when it is `Home` (as in M2) and for an action
+    /// without a path, where it means nothing.
     pub scope: Scope,
     /// Index of an earlier action in the same plan that must have succeeded
-    /// first; the executor skips this action otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// first; the executor skips this action otherwise. Left out of the
+    /// JSON when `None`.
     pub depends_on: Option<usize>,
     pub reason: String,
+}
+
+impl Serialize for PlannedAction {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let with_scope = self.action.path().is_some() && !self.scope.is_home();
+        let fields = 3 + usize::from(with_scope) + usize::from(self.depends_on.is_some());
+        let mut st = s.serialize_struct("PlannedAction", fields)?;
+        st.serialize_field("action", &self.action)?;
+        st.serialize_field("size", &self.size)?;
+        if with_scope {
+            st.serialize_field("scope", &self.scope)?;
+        }
+        if let Some(d) = self.depends_on {
+            st.serialize_field("depends_on", &d)?;
+        }
+        st.serialize_field("reason", &self.reason)?;
+        st.end()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -717,5 +736,50 @@ mod tests {
         assert_eq!(v["type"], "package-remove");
         assert_eq!(v["source"], "pacman");
         assert_eq!(v["names"][0], "foo");
+    }
+
+    #[test]
+    fn scope_serialised_only_for_paths_outside_home() {
+        let pa = |action: Action, scope: Scope| PlannedAction {
+            action,
+            size: 0,
+            fingerprint: Fingerprint {
+                dev: 0,
+                ino: 0,
+                is_symlink: false,
+                ctime: 0,
+                ctime_nsec: 0,
+            },
+            scope,
+            depends_on: Some(0),
+            reason: "r".into(),
+        };
+        let cmd = pa(
+            Action::PrivilegedCommand {
+                program: "flatpak".into(),
+                args: Vec::new(),
+            },
+            Scope::System,
+        );
+        let v = serde_json::to_value(&cmd).unwrap();
+        assert!(v.get("scope").is_none(), "{v}");
+        assert_eq!(v["depends_on"], 0);
+        assert_eq!(v["reason"], "r");
+        let del = pa(
+            Action::Delete {
+                path: "/var/lib/systemd/coredump/core.1".into(),
+            },
+            Scope::System,
+        );
+        let v = serde_json::to_value(&del).unwrap();
+        assert_eq!(v["scope"], serde_json::to_value(Scope::System).unwrap());
+        let home = pa(trash_action(), Scope::Home);
+        assert!(serde_json::to_value(&home).unwrap().get("scope").is_none());
+    }
+
+    fn trash_action() -> Action {
+        Action::Trash {
+            path: "/home/user/x".into(),
+        }
     }
 }

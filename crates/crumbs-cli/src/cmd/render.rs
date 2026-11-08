@@ -7,7 +7,7 @@ use crumbs_core::env::display_path;
 use crumbs_core::executor::ExecReport;
 use crumbs_core::plan::{Action, Plan};
 
-use super::manual::is_privileged;
+use super::manual::{is_privileged, root_command};
 use crate::output::{fmt_size, print_table_with_details};
 
 fn verb(a: &Action) -> &'static str {
@@ -89,11 +89,15 @@ fn also_removed(a: &Action) -> Option<String> {
     else {
         return None;
     };
+    // Every name, even one without a version: nothing may go unlisted.
     let others: Vec<String> = names
         .iter()
-        .zip(versions)
+        .enumerate()
         .skip(1)
-        .map(|(n, v)| format!("{n} {v}"))
+        .map(|(i, n)| match versions.get(i) {
+            Some(v) => format!("{n} {v}"),
+            None => n.clone(),
+        })
         .collect();
     (!others.is_empty()).then(|| sanitise(&format!("also removed: {}", others.join(", "))))
 }
@@ -138,7 +142,8 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
                     ]
                 })
                 .collect();
-            // An edit shows the exact lines it removes.
+            // An edit shows the exact lines it removes; a privileged
+            // action the exact command run as root.
             let details: Vec<Vec<String>> = plan
                 .actions
                 .iter()
@@ -146,7 +151,9 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
                     Action::EditFile { remove_lines, .. } => {
                         remove_lines.iter().map(|l| sanitise(l)).collect()
                     }
-                    _ => Vec::new(),
+                    _ => root_command(env, a)
+                        .map(|c| vec![format!("as root: {c}")])
+                        .unwrap_or_default(),
                 })
                 .collect();
             print_table_with_details(&["ACTION", "SIZE", "PATH", "REASON"], &rows, &details)?;
@@ -283,6 +290,18 @@ pub fn report(env: &Env, runs: &[(&Plan, &ExecReport)]) -> anyhow::Result<bool> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn also_removed_lists_every_name() {
+        let a = Action::PackageRemove {
+            source: crumbs_core::SourceKind::Pacman,
+            names: vec!["app".into(), "b".into(), "c".into()],
+            versions: vec!["1".into(), "2".into()],
+            program: "pacman".into(),
+            args: Vec::new(),
+        };
+        assert_eq!(also_removed(&a).as_deref(), Some("also removed: b 2, c"));
+    }
 
     #[test]
     fn only_trash_and_edit_can_be_undone() {

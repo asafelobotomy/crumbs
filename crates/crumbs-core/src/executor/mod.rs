@@ -88,7 +88,7 @@ pub fn execute_with(
     let esc = (env.root == Path::new("/") && plan.actions.iter().any(is_privileged))
         .then(|| detect_escalation(env, &SystemRunner::new()))
         .flatten();
-    run_plan(
+    run_one(
         env,
         cfg,
         plan,
@@ -138,13 +138,31 @@ pub fn execute_full(
     esc: Option<&Escalation>,
     post_check: &PostCheck<'_>,
 ) -> ExecReport {
-    run_plan(env, cfg, plan, runner, priv_runner, esc, Some(post_check))
+    run_one(env, cfg, plan, runner, priv_runner, esc, Some(post_check))
 }
 
-/// [`execute_full`], with the post-check optional. Without one, a
-/// `PackageRemove` whose step succeeded is trusted, and one whose step
-/// failed claims nothing about what was removed.
-fn run_plan(
+/// [`execute_full`] for several plans in one run: the privileged actions
+/// of every plan (in plan order, then action order) go into ONE batch, so
+/// the user is asked once. Then each plan's remaining actions run, plan
+/// by plan. Each plan keeps its own batch id (consecutive, all newer than
+/// the history) and its own `app_id` and `kind` in the history, and gets
+/// its own report, in `plans` order. `escalation_failed` is set on the
+/// reports of the plans whose privileged steps could not run.
+pub fn execute_many(
+    env: &Env,
+    cfg: &Config,
+    plans: &[Plan],
+    runner: &dyn CommandRunner,
+    priv_runner: &dyn PrivilegedRunner,
+    esc: Option<&Escalation>,
+    post_check: &PostCheck<'_>,
+) -> Vec<ExecReport> {
+    let refs: Vec<&Plan> = plans.iter().collect();
+    run_plans(env, cfg, &refs, runner, priv_runner, esc, Some(post_check))
+}
+
+/// [`run_plans`] for one plan.
+fn run_one(
     env: &Env,
     cfg: &Config,
     plan: &Plan,
@@ -153,48 +171,96 @@ fn run_plan(
     esc: Option<&Escalation>,
     post_check: Option<&PostCheck<'_>>,
 ) -> ExecReport {
-    let batch = history::next_batch_id(env);
-    let mut results: Vec<Option<ActionResult>> = vec![None; plan.actions.len()];
-    let mut freed = 0u64;
-    let (attempts, escalation_failed) =
-        run_privileged(env, cfg, plan, priv_runner, esc, post_check);
-    for (i, attempt) in attempts {
-        let pa = &plan.actions[i];
-        if attempt.outcome.is_ok() {
-            freed = freed.saturating_add(pa.size);
-        }
-        results[i] = Some(record(env, plan, &batch, i, attempt));
+    run_plans(env, cfg, &[plan], runner, priv_runner, esc, post_check)
+        .pop()
+        .unwrap_or_else(|| ExecReport {
+            batch: history::next_batch_id(env),
+            results: Vec::new(),
+            freed: 0,
+            escalation_failed: false,
+        })
+}
+
+/// `n` batch ids, consecutive from [`history::next_batch_id`].
+fn batch_ids(env: &Env, n: usize) -> Vec<String> {
+    let first = history::next_batch_id(env);
+    match first.parse::<u128>() {
+        Ok(f) => (0..n)
+            .map(|k| f.saturating_add(k as u128).to_string())
+            .collect(),
+        Err(_) => (0..n)
+            .map(|k| {
+                if k == 0 {
+                    first.clone()
+                } else {
+                    format!("{first}-{k}")
+                }
+            })
+            .collect(),
     }
-    for (i, pa) in plan.actions.iter().enumerate() {
-        if results[i].is_some() {
-            continue;
+}
+
+/// Runs plans (see [`execute_many`]), with the post-check optional.
+/// Without one, a `PackageRemove` whose step succeeded is trusted, and one
+/// whose step failed claims nothing about what was removed.
+fn run_plans(
+    env: &Env,
+    cfg: &Config,
+    plans: &[&Plan],
+    runner: &dyn CommandRunner,
+    priv_runner: &dyn PrivilegedRunner,
+    esc: Option<&Escalation>,
+    post_check: Option<&PostCheck<'_>>,
+) -> Vec<ExecReport> {
+    let batches = batch_ids(env, plans.len());
+    let (attempts, failed) = run_privileged(env, cfg, plans, priv_runner, esc, post_check);
+    let mut results: Vec<Vec<Option<ActionResult>>> =
+        plans.iter().map(|p| vec![None; p.actions.len()]).collect();
+    let mut freed = vec![0u64; plans.len()];
+    // Every privileged entry is written right after the batch.
+    for (k, plan_attempts) in attempts.into_iter().enumerate() {
+        for (i, attempt) in plan_attempts {
+            if attempt.outcome.is_ok() {
+                freed[k] = freed[k].saturating_add(plans[k].actions[i].size);
+            }
+            results[k][i] = Some(record(env, plans[k], &batches[k], i, attempt));
         }
-        let mut attempt = Attempt::new(action_target(&pa.action));
-        attempt.outcome = match skip_reason(env, plan, &results, i, pa.depends_on) {
-            Some(reason) => Err(reason),
-            // A command has no path to verify; its program is resolved in
-            // the trusted directories right now instead.
-            None if matches!(pa.action, Action::UserCommand { .. }) => run_command(
-                env,
-                &pa.action,
-                runner,
-                &mut attempt.path,
-                &mut attempt.argv,
-            ),
-            None => verify_path(env, cfg, pa, &attempt.path)
-                .and_then(|()| act(env, &pa.action, &pa.fingerprint, &batch)),
-        };
-        if attempt.outcome.is_ok() {
-            freed = freed.saturating_add(pa.size);
+    }
+    let mut reports = Vec::with_capacity(plans.len());
+    for (k, plan) in plans.iter().enumerate() {
+        let results = &mut results[k];
+        for (i, pa) in plan.actions.iter().enumerate() {
+            if results[i].is_some() {
+                continue;
+            }
+            let mut attempt = Attempt::new(action_target(&pa.action));
+            attempt.outcome = match skip_reason(env, plan, results, i, pa.depends_on) {
+                Some(reason) => Err(reason),
+                // A command has no path to verify; its program is resolved in
+                // the trusted directories right now instead.
+                None if matches!(pa.action, Action::UserCommand { .. }) => run_command(
+                    env,
+                    &pa.action,
+                    runner,
+                    &mut attempt.path,
+                    &mut attempt.argv,
+                ),
+                None => verify_path(env, cfg, pa, &attempt.path)
+                    .and_then(|()| act(env, &pa.action, &pa.fingerprint, &batches[k])),
+            };
+            if attempt.outcome.is_ok() {
+                freed[k] = freed[k].saturating_add(pa.size);
+            }
+            results[i] = Some(record(env, plan, &batches[k], i, attempt));
         }
-        results[i] = Some(record(env, plan, &batch, i, attempt));
+        reports.push(ExecReport {
+            batch: batches[k].clone(),
+            results: std::mem::take(results).into_iter().flatten().collect(),
+            freed: freed[k],
+            escalation_failed: failed[k],
+        });
     }
-    ExecReport {
-        batch,
-        results: results.into_iter().flatten().collect(),
-        freed,
-        escalation_failed,
-    }
+    reports
 }
 
 /// One action's attempt, as it goes into its history entry.
@@ -238,83 +304,92 @@ fn verify_path(
         .and_then(|()| recheck_scope(env, cfg, pa.scope, path))
 }
 
-/// Runs the privileged actions as one batch; returns their attempts in plan
-/// order (with plan indices) and whether escalation failed.
+/// Runs the privileged actions of every plan as one batch; returns, per
+/// plan, their attempts in plan order (with action indices), and per plan
+/// whether its escalation failed.
 fn run_privileged(
     env: &Env,
     cfg: &Config,
-    plan: &Plan,
+    plans: &[&Plan],
     priv_runner: &dyn PrivilegedRunner,
     esc: Option<&Escalation>,
     post_check: Option<&PostCheck<'_>>,
-) -> (Vec<(usize, Attempt)>, bool) {
-    let mut attempts: Vec<(usize, Attempt)> = Vec::new();
+) -> (Vec<Vec<(usize, Attempt)>>, Vec<bool>) {
+    let mut attempts: Vec<Vec<(usize, Attempt)>> = plans.iter().map(|_| Vec::new()).collect();
+    let mut failed = vec![false; plans.len()];
     let mut steps: Vec<Step> = Vec::new();
-    // Indices into `attempts` of the actions that became `steps`, in order.
-    let mut stepped: Vec<usize> = Vec::new();
-    for (i, pa) in plan.actions.iter().enumerate() {
-        if !is_privileged(pa) {
-            continue;
-        }
-        let mut attempt = Attempt::new(action_target(&pa.action));
-        let step = match pa.depends_on {
-            Some(dep) => Err(format!(
-                "skipped: privileged actions run first and cannot wait for {}",
-                shown_action(env, plan, dep)
-            )),
-            None => privileged_step(env, cfg, pa, &mut attempt),
-        };
-        match step {
-            Ok(step) => {
-                // Fails closed: only a marker read below can change this.
-                attempt.outcome = Err(ESCALATION_DENIED.into());
-                stepped.push(attempts.len());
-                steps.push(step);
+    // (plan, index into `attempts[plan]`) of the actions that became
+    // `steps`, in order.
+    let mut stepped: Vec<(usize, usize)> = Vec::new();
+    for (k, plan) in plans.iter().enumerate() {
+        for (i, pa) in plan.actions.iter().enumerate() {
+            if !is_privileged(pa) {
+                continue;
             }
-            Err(e) => attempt.outcome = Err(e),
+            let mut attempt = Attempt::new(action_target(&pa.action));
+            let step = match pa.depends_on {
+                Some(dep) => Err(format!(
+                    "skipped: privileged actions run first and cannot wait for {}",
+                    shown_action(env, plan, dep)
+                )),
+                None => privileged_step(env, cfg, pa, &mut attempt),
+            };
+            match step {
+                Ok(step) => {
+                    // Fails closed: only a marker read below can change this.
+                    attempt.outcome = Err(ESCALATION_DENIED.into());
+                    stepped.push((k, attempts[k].len()));
+                    steps.push(step);
+                }
+                Err(e) => attempt.outcome = Err(e),
+            }
+            attempts[k].push((i, attempt));
         }
-        attempts.push((i, attempt));
     }
     if steps.is_empty() {
-        return (attempts, false);
+        return (attempts, failed);
     }
-    let mut fail_all = |msg: &str| {
-        for &k in &stepped {
-            attempts[k].1.outcome = Err(msg.to_string());
+    let fail_all = |attempts: &mut Vec<Vec<(usize, Attempt)>>, msg: &str| {
+        for &(k, j) in &stepped {
+            attempts[k][j].1.outcome = Err(msg.to_string());
         }
     };
     let Some(esc) = esc else {
-        fail_all(NO_ESCALATION);
-        return (attempts, true);
+        fail_all(&mut attempts, NO_ESCALATION);
+        for &(k, _) in &stepped {
+            failed[k] = true;
+        }
+        return (attempts, failed);
     };
     let script = match build_script(&steps) {
         Ok(s) => s,
         Err(e) => {
-            fail_all(&e.to_string());
-            return (attempts, false);
+            fail_all(&mut attempts, &e.to_string());
+            return (attempts, failed);
         }
     };
-    let (ends, escalation_failed): (Vec<StepEnd>, bool) = match priv_runner.run(esc, &script) {
+    let ends: Vec<StepEnd> = match priv_runner.run(esc, &script) {
         Ok(stdout) => {
             let outcomes = parse_markers(&stdout, steps.len());
-            let ends: Vec<StepEnd> = (0..steps.len())
+            (0..steps.len())
                 .map(|n| match outcomes.get(n).map(|o| (o.status, o)) {
                     Some((Some(0), _)) => StepEnd::Succeeded,
                     Some((Some(status), o)) => StepEnd::Exited(status, last_line(&o.output)),
                     Some((None, _)) | None => StepEnd::NotRun(ESCALATION_DENIED.into()),
                 })
-                .collect();
-            let missing = ends.iter().any(|e| matches!(e, StepEnd::NotRun(_)));
-            (ends, missing)
+                .collect()
         }
         Err(e) => {
             let msg = format!("privilege escalation failed: {e}");
-            (vec![StepEnd::NotRun(msg); steps.len()], true)
+            vec![StepEnd::NotRun(msg); steps.len()]
         }
     };
-    for (&k, end) in stepped.iter().zip(ends) {
-        let (i, attempt) = &mut attempts[k];
-        let action = &plan.actions[*i].action;
+    for (&(k, j), end) in stepped.iter().zip(ends) {
+        if matches!(end, StepEnd::NotRun(_)) {
+            failed[k] = true;
+        }
+        let (i, attempt) = &mut attempts[k][j];
+        let action = &plans[k].actions[*i].action;
         attempt.outcome = match action {
             Action::PackageRemove { .. } => check_packages(env, action, end, post_check, attempt),
             _ => match end {
@@ -326,7 +401,7 @@ fn run_privileged(
             },
         };
     }
-    (attempts, escalation_failed)
+    (attempts, failed)
 }
 
 /// How a batch step ended.

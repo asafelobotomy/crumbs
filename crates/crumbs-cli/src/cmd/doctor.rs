@@ -57,12 +57,19 @@ fn print_human(r: &DoctorReport) -> anyhow::Result<()> {
                 EscalationKind::Pkexec => "pkexec",
                 EscalationKind::Sudo => "sudo",
             };
+            // The same rule `uninstall` uses: sudo needs a terminal.
+            let usable = super::act::usable(e);
             writeln!(
                 out,
-                "\nEscalation: {kind} ({})",
-                sanitise(&e.program.display().to_string())
+                "\nEscalation: {kind} ({}{})",
+                sanitise(&e.program.display().to_string()),
+                if usable { "" } else { ", needs a terminal" }
             )?;
-            writeln!(out, "privileged cleanup: available via {kind}")?;
+            if usable {
+                writeln!(out, "privileged cleanup: available via {kind}")?;
+            } else {
+                writeln!(out, "privileged cleanup: unavailable")?;
+            }
         }
         None => {
             writeln!(out, "\nEscalation: none")?;

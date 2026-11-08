@@ -36,7 +36,7 @@ pub enum RemovalError {
 }
 
 pub const MSG_BUSY: &str = "pacman is busy (database lock present)";
-pub const MSG_UNMANAGED: &str = "removing unmanaged apps needs M4b; use --leftovers-only";
+pub const MSG_UNMANAGED: &str = "removing unmanaged apps isn't supported yet; use --leftovers-only";
 
 /// Whether `name` is safe to hand to a package manager as one argument:
 /// `^[A-Za-z0-9@._+-]+$`, and not an option (no leading `-`).

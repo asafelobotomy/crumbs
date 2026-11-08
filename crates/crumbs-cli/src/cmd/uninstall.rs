@@ -119,10 +119,11 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
 pub const NOTE_NO_UNDO: &str = "this cannot be undone by crumbs";
 const REASON_APP: &str = "the app itself";
 
-/// Puts the actions that remove the app itself first in `plan`; every
-/// leftover then depends on the last of them, so nothing of the app's
-/// goes unless the app did. Nothing changes when there are none (an
-/// AppImage's file is already in the plan).
+/// Puts the actions that remove the app itself first in `plan`, each
+/// depending on the one before; every leftover then depends on the last of
+/// them, so nothing of the app's goes unless all of the app did. Nothing
+/// changes when there are none (an AppImage's file is already in the
+/// plan).
 fn attach_removal(plan: &mut Plan, removal: RemovalPlan) {
     let n = removal.actions.len();
     if n == 0 {
@@ -135,7 +136,8 @@ fn attach_removal(plan: &mut Plan, removal: RemovalPlan) {
     let first: Vec<PlannedAction> = removal
         .actions
         .into_iter()
-        .map(|action| PlannedAction {
+        .enumerate()
+        .map(|(k, action)| PlannedAction {
             action,
             size: 0,
             fingerprint: Fingerprint {
@@ -146,7 +148,7 @@ fn attach_removal(plan: &mut Plan, removal: RemovalPlan) {
                 ctime_nsec: 0,
             },
             scope: Scope::Home,
-            depends_on: None,
+            depends_on: k.checked_sub(1),
             reason: REASON_APP.into(),
         })
         .collect();
@@ -288,6 +290,7 @@ fn resolve<'a>(
 mod tests {
     use super::*;
     use crumbs_core::leftovers::Confidence;
+    use crumbs_core::plan::Action;
     use crumbs_core::safety::Fingerprint;
     use crumbs_core::size::DiskUsage;
     use crumbs_core::testing::FixtureTree;
@@ -310,6 +313,35 @@ mod tests {
             },
             mime_lines: Vec::new(),
         }
+    }
+
+    fn removal_plan(n: usize) -> RemovalPlan {
+        RemovalPlan {
+            actions: (0..n)
+                .map(|k| Action::PrivilegedCommand {
+                    program: "flatpak".into(),
+                    args: vec![k.to_string()],
+                })
+                .collect(),
+            ..RemovalPlan::default()
+        }
+    }
+
+    #[test]
+    fn leftovers_depend_on_every_removal_action() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        let app = App::new(SourceKind::Flatpak, "org.x.App");
+        let mut f = finding("/home/user/.var/app/org.x.App", FindingKind::Data);
+        f.size = DiskUsage::default();
+        let mut plan =
+            build_plan(&env, Some(&app), &[f.clone(), f], &PlanOptions::default()).unwrap();
+        attach_removal(&mut plan, removal_plan(2));
+        let deps: Vec<Option<usize>> = plan.actions.iter().map(|a| a.depends_on).collect();
+        // The second removal waits for the first; leftovers for the last.
+        assert_eq!(deps, [None, Some(0), Some(1), Some(1)]);
+        assert!(!plan.notes.iter().any(|n| n == NOTE_APP_STAYS));
+        assert!(plan.notes.iter().any(|n| n == NOTE_NO_UNDO));
     }
 
     #[test]

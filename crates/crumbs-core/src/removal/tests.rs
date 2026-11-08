@@ -213,7 +213,9 @@ fn unmanaged_unsupported_and_appimage_unchanged() {
     let err = plan_removal(&t.env(), &runner, &App::new(SourceKind::Unmanaged, "x")).unwrap_err();
     assert_eq!(
         err,
-        RemovalError::Unsupported("removing unmanaged apps needs M4b; use --leftovers-only".into())
+        RemovalError::Unsupported(
+            "removing unmanaged apps isn't supported yet; use --leftovers-only".into()
+        )
     );
     let plan = plan_removal(&t.env(), &runner, &App::new(SourceKind::AppImage, "x")).unwrap();
     assert!(plan.actions.is_empty());

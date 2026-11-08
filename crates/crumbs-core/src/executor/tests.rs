@@ -1560,7 +1560,7 @@ fn default_post_check_claims_nothing_on_failure() {
     let env = t.env();
     let plan = plan_of(vec![pkg_remove(&["a", "b"], &["1", "2"])]);
     let run = |pr: &dyn PrivilegedRunner| {
-        run_plan(
+        run_one(
             &env,
             &Config::default(),
             &plan,
@@ -1625,4 +1625,102 @@ fn unverifiable_removal_is_not_ok_and_records_nothing() {
     assert!(env.sys("/home/user/.config/foo/a").exists());
     let (hist, _) = read_history(&env).unwrap();
     assert!(hist.iter().all(|h| h.packages.is_none()), "{hist:?}");
+}
+
+fn app_plan(app_id: &str, actions: Vec<PlannedAction>) -> Plan {
+    let mut p = plan_of(actions);
+    p.app_id = Some(app_id.into());
+    p
+}
+
+#[test]
+fn execute_many_uses_one_batch_for_every_plan() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "", 0);
+    t.write("home/user/.config/foo/a", b"a");
+    t.write("home/user/.config/bar/a", b"a");
+    let env = t.env();
+    let mut foo_left = planned(&env, trash("/home/user/.config/foo"));
+    foo_left.depends_on = Some(0);
+    let mut bar_left = planned(&env, trash("/home/user/.config/bar"));
+    bar_left.depends_on = Some(0);
+    let plans = [
+        app_plan("pacman:foo", vec![pkg_remove(&["foo"], &["1-1"]), foo_left]),
+        app_plan("pacman:bar", vec![pkg_remove(&["bar"], &["2-1"]), bar_left]),
+    ];
+    let pr = FakePrivilegedRunner::default();
+    let reports = execute_many(
+        &env,
+        &Config::default(),
+        &plans,
+        &FakeRunner::new(),
+        &pr,
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert_eq!(reports.len(), 2);
+    let calls = pr.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "one escalation for the whole run");
+    assert_eq!(step_count(&calls[0]), 2);
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        "-Rns --noconfirm foo\n-Rns --noconfirm bar\n"
+    );
+    for r in &reports {
+        assert!(r.results.iter().all(|x| x.ok), "{r:?}");
+        assert!(!r.escalation_failed);
+    }
+    assert_ne!(reports[0].batch, reports[1].batch);
+    assert!(!env.sys("/home/user/.config/bar").exists());
+    // History keeps each plan's batch id and app.
+    let (hist, _) = read_history(&env).unwrap();
+    assert_eq!(hist.len(), 4);
+    for h in &hist {
+        let (batch, app) = if h.batch == reports[0].batch {
+            (&reports[0].batch, "pacman:foo")
+        } else {
+            (&reports[1].batch, "pacman:bar")
+        };
+        assert_eq!(&h.batch, batch);
+        assert_eq!(h.app_id.as_deref(), Some(app), "{h:?}");
+    }
+    // A later run gets a later batch id than both.
+    let next: u128 = crate::history::next_batch_id(&env).parse().unwrap();
+    assert!(next > reports[1].batch.parse::<u128>().unwrap());
+}
+
+#[test]
+fn execute_many_denied_fails_every_plan() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "", 0);
+    let env = t.env();
+    let plans = [
+        app_plan("pacman:foo", vec![pkg_remove(&["foo"], &["1-1"])]),
+        // A plan with nothing privileged is not flagged.
+        app_plan("x", Vec::new()),
+        app_plan("pacman:bar", vec![priv_cmd("pacman", &["-Rn", "bar"])]),
+    ];
+    let pr = DeniedRunner::default();
+    let reports = execute_many(
+        &env,
+        &Config::default(),
+        &plans,
+        &FakeRunner::new(),
+        &pr,
+        Some(&esc()),
+        &|_, _, names| Ok(names.to_vec()),
+    );
+    assert_eq!(*pr.calls.lock().unwrap(), 1);
+    assert!(reports[0].escalation_failed && reports[2].escalation_failed);
+    assert!(!reports[1].escalation_failed);
+    assert_eq!(
+        reports[0].results[0].error.as_deref(),
+        Some("privilege escalation was cancelled or denied; still installed: foo")
+    );
+    assert_eq!(
+        reports[2].results[0].error.as_deref(),
+        Some(ESCALATION_DENIED)
+    );
 }

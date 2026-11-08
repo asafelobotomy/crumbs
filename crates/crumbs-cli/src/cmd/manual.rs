@@ -23,38 +23,43 @@ pub fn is_privileged(pa: &PlannedAction) -> bool {
     }
 }
 
-/// `sudo <program> <args>` for each privileged action, in order. Programs
-/// are shown at their in-system trusted path (as given when not
-/// installed); every word goes through [`sh_quote`]. Lines are sanitised
-/// for the terminal.
+/// The exact command the privileged batch runs for `pa`, as one line:
+/// the program at its in-system trusted path (as given when not
+/// installed), every word through [`sh_quote`], sanitised for the
+/// terminal. `None` for an action that is not privileged.
+pub fn root_command(env: &Env, pa: &PlannedAction) -> Option<String> {
+    if !is_privileged(pa) {
+        return None;
+    }
+    let (program, args): (&str, Vec<&OsStr>) = match &pa.action {
+        Action::PrivilegedCommand { program, args }
+        | Action::PackageRemove { program, args, .. } => {
+            (program, args.iter().map(OsStr::new).collect())
+        }
+        Action::Delete { path } => (
+            "rm",
+            vec![OsStr::new("-f"), OsStr::new("--"), path.as_os_str()],
+        ),
+        _ => return None,
+    };
+    let program =
+        resolve_trusted(env, program).map_or_else(|| PathBuf::from(program), |p| env.unsys(&p));
+    let words: Vec<String> = std::iter::once(program.as_os_str())
+        .chain(args)
+        .map(|w| String::from_utf8_lossy(&sh_quote(w)).into_owned())
+        .collect();
+    Some(sanitise(&words.join(" ")))
+}
+
+/// `sudo <root command>` for each privileged action, in order.
 pub fn manual_commands<'a>(
     env: &Env,
     actions: impl IntoIterator<Item = &'a PlannedAction>,
 ) -> Vec<String> {
     actions
         .into_iter()
-        .filter(|pa| is_privileged(pa))
-        .filter_map(|pa| {
-            let (program, args): (&str, Vec<&OsStr>) = match &pa.action {
-                Action::PrivilegedCommand { program, args }
-                | Action::PackageRemove { program, args, .. } => {
-                    (program, args.iter().map(OsStr::new).collect())
-                }
-                Action::Delete { path } => (
-                    "rm",
-                    vec![OsStr::new("-f"), OsStr::new("--"), path.as_os_str()],
-                ),
-                _ => return None,
-            };
-            let program = resolve_trusted(env, program)
-                .map_or_else(|| PathBuf::from(program), |p| env.unsys(&p));
-            let mut line = String::from("sudo");
-            for word in std::iter::once(program.as_os_str()).chain(args) {
-                line.push(' ');
-                line.push_str(&String::from_utf8_lossy(&sh_quote(word)));
-            }
-            Some(sanitise(&line))
-        })
+        .filter_map(|pa| root_command(env, pa))
+        .map(|line| format!("sudo {line}"))
         .collect()
 }
 

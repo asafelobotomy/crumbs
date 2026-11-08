@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use clap::Args;
 use crumbs_core::command::{SystemRunner, USER_COMMAND_TIMEOUT};
 use crumbs_core::config::Config;
-use crumbs_core::executor::{ExecReport, execute_full, running_processes};
+use crumbs_core::executor::{ExecReport, execute_many, running_processes};
 use crumbs_core::inventory::Inventory;
 use crumbs_core::leftovers::{Finding, FindingKind};
 use crumbs_core::plan::{Action, Plan, PlannedAction};
@@ -420,9 +420,8 @@ pub fn apply(
     Ok(ExitCode::from(if all_ok { 0 } else { 3 }))
 }
 
-/// Runs each non-empty plan; `None` for an empty one. Once an escalation
-/// has failed, later plans are not asked for rights again: their
-/// privileged actions fail as if there were no way to get them.
+/// Runs every plan with [`execute_many`], so all privileged actions of
+/// the run share one batch and one prompt; `None` for an empty plan.
 fn run_plans(
     env: &Env,
     cfg: &Config,
@@ -435,30 +434,27 @@ fn run_plans(
     let post_check = |env: &Env, source: SourceKind, names: &[String]| {
         still_installed(env, &SystemRunner::new(), source, names)
     };
-    let mut refused = false;
-    plans
+    let owned: Vec<Plan> = plans.iter().map(|p| (*p).clone()).collect();
+    // The escalation program shares the terminal: Ctrl-C must not end
+    // crumbs before it has read the markers and written the history.
+    let _held = owned
         .iter()
-        .map(|p| {
-            if p.actions.is_empty() {
-                return None;
-            }
-            let esc = privilege.esc.as_ref().filter(|_| !refused);
-            // The escalation program shares the terminal: Ctrl-C must not
-            // end crumbs before it has read the markers and written the
-            // history.
-            let _held = p.actions.iter().any(is_privileged).then(signals::hold);
-            let r = execute_full(
-                env,
-                cfg,
-                p,
-                &user_runner,
-                privilege.runner.as_ref(),
-                esc,
-                &post_check,
-            );
-            refused |= r.escalation_failed;
-            Some(r)
-        })
+        .flat_map(|p| &p.actions)
+        .any(is_privileged)
+        .then(signals::hold);
+    let reports = execute_many(
+        env,
+        cfg,
+        &owned,
+        &user_runner,
+        privilege.runner.as_ref(),
+        privilege.esc.as_ref(),
+        &post_check,
+    );
+    owned
+        .iter()
+        .zip(reports)
+        .map(|(p, r)| (!p.actions.is_empty()).then_some(r))
         .collect()
 }
 
@@ -478,6 +474,12 @@ fn failed_privileged(env: &Env, plans: &[&Plan], reports: &[Option<ExecReport>])
     manual_commands(env, failed)
 }
 
+/// Whether crumbs can use `esc` now: one that needs a terminal only when
+/// stdin is one.
+pub fn usable(esc: &Escalation) -> bool {
+    !esc.requires_tty || std::io::stdin().is_terminal()
+}
+
 /// How this run gets administrator rights: the escalation program (if
 /// any) and the runner of the privileged batch.
 struct Privilege {
@@ -490,9 +492,11 @@ impl Privilege {
     /// terminal counts only when stdin is one.
     ///
     /// Debug builds never escalate for real unless
-    /// `CRUMBS_ALLOW_REAL_ESCALATION=1`; with `CRUMBS_TEST_PRIV_RUNNER=sh`
-    /// the batch runs with `/bin/sh` as the current user (`deny`: nothing
-    /// runs, as when the prompt is dismissed). Release builds ignore both.
+    /// `CRUMBS_ALLOW_REAL_ESCALATION=1`. Under a fake root (`CRUMBS_ROOT`)
+    /// only, `CRUMBS_TEST_PRIV_RUNNER=sh` runs the batch with `/bin/sh` as
+    /// the current user (`deny`: nothing runs, as when the prompt is
+    /// dismissed); on the real root it is ignored. Release builds ignore
+    /// both.
     fn for_run(env: &Env, needed: bool) -> Privilege {
         let system =
             || -> Box<dyn PrivilegedRunner> { Box::new(SystemPrivilegedRunner::new(&env.root)) };
@@ -504,7 +508,8 @@ impl Privilege {
         }
         #[cfg(debug_assertions)]
         {
-            if let Some(runner) = test_runner::from_env() {
+            let value = std::env::var("CRUMBS_TEST_PRIV_RUNNER").ok();
+            if let Some(runner) = test_runner::select(&env.root, value.as_deref()) {
                 return Privilege {
                     esc: Some(test_runner::escalation()),
                     runner,
@@ -517,8 +522,7 @@ impl Privilege {
                 };
             }
         }
-        let esc = detect_escalation(env, &SystemRunner::new())
-            .filter(|e| !e.requires_tty || std::io::stdin().is_terminal());
+        let esc = detect_escalation(env, &SystemRunner::new()).filter(usable);
         Privilege {
             esc,
             runner: system(),
@@ -532,7 +536,7 @@ impl Privilege {
 mod test_runner {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
 
     use crumbs_core::CoreError;
@@ -544,6 +548,8 @@ mod test_runner {
 
     impl PrivilegedRunner for Sh {
         fn run(&self, _esc: &Escalation, script: &[u8]) -> Result<Vec<u8>, CoreError> {
+            // Lets tests count the batches of a run.
+            eprintln!("crumbs-test: privileged batch");
             let out = Command::new("/bin/sh")
                 .arg("-c")
                 .arg(OsStr::from_bytes(script))
@@ -567,8 +573,14 @@ mod test_runner {
         }
     }
 
-    pub(super) fn from_env() -> Option<Box<dyn PrivilegedRunner>> {
-        match std::env::var("CRUMBS_TEST_PRIV_RUNNER").ok()?.as_str() {
+    /// The stand-in that `value` (of `CRUMBS_TEST_PRIV_RUNNER`) names,
+    /// only when `root` is a fake root: on the real system the fixture
+    /// stand-ins would run real programs as the user.
+    pub(super) fn select(root: &Path, value: Option<&str>) -> Option<Box<dyn PrivilegedRunner>> {
+        if root == Path::new("/") {
+            return None;
+        }
+        match value? {
             "sh" => Some(Box::new(Sh)),
             "deny" => Some(Box::new(Deny)),
             _ => None,
@@ -582,6 +594,22 @@ mod test_runner {
             requires_tty: false,
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_runner_only_under_a_fake_root() {
+            let fake = std::path::Path::new("/tmp/fixture");
+            assert!(select(std::path::Path::new("/"), Some("sh")).is_none());
+            assert!(select(std::path::Path::new("/"), Some("deny")).is_none());
+            assert!(select(fake, Some("sh")).is_some());
+            assert!(select(fake, Some("deny")).is_some());
+            assert!(select(fake, Some("other")).is_none());
+            assert!(select(fake, None).is_none());
+        }
+    }
 }
 
 /// Keeps SIGINT and SIGQUIT from ending crumbs while the privileged batch
@@ -591,11 +619,13 @@ mod test_runner {
 /// signal is reset to its default across `exec`, so the escalation program
 /// and the steps still see Ctrl-C, while an ignored one would be inherited.
 /// glibc's `signal` sets `SA_RESTART`, and std retries on `EINTR` anyway.
+/// A signal that is already ignored is left ignored.
 mod signals {
     use std::os::raw::c_int;
 
     const SIGINT: c_int = 2;
     const SIGQUIT: c_int = 3;
+    const SIG_IGN: usize = 1;
     const SIG_ERR: usize = usize::MAX;
 
     unsafe extern "C" {
@@ -613,7 +643,12 @@ mod signals {
         for sig in [SIGINT, SIGQUIT] {
             // SAFETY: `ignore` does nothing, so it is async-signal-safe.
             let old = unsafe { signal(sig, handler) };
-            if old != SIG_ERR {
+            if old == SIG_IGN {
+                // Already ignored (e.g. started under `nohup`): keep it so,
+                // children included.
+                // SAFETY: puts back the disposition `signal` returned.
+                unsafe { signal(sig, SIG_IGN) };
+            } else if old != SIG_ERR {
                 previous.push((sig, old));
             }
         }
@@ -637,18 +672,37 @@ mod signals {
             fn raise(sig: c_int) -> c_int;
         }
 
+        /// The disposition of `sig`, briefly set to ignored to read it.
+        fn current(sig: c_int) -> usize {
+            // SAFETY: puts the old disposition straight back.
+            unsafe {
+                let old = signal(sig, SIG_IGN);
+                signal(sig, old);
+                old
+            }
+        }
+
         #[test]
         fn held_signals_do_not_end_the_process() {
+            let before = current(SIGINT);
             let held = hold();
             // SAFETY: SIGINT and SIGQUIT have the no-op handler now.
             assert_eq!(unsafe { raise(SIGINT) }, 0);
             assert_eq!(unsafe { raise(SIGQUIT) }, 0);
             drop(held);
-            // Restored: the previous handler (the default) is back.
-            // SAFETY: only reads the disposition, then puts it back.
-            let current = unsafe { signal(SIGINT, 0) };
-            unsafe { signal(SIGINT, current) };
-            assert_eq!(current, 0);
+            assert_eq!(current(SIGINT), before, "restored");
+        }
+
+        #[test]
+        fn ignored_signal_stays_ignored() {
+            // SAFETY: sets SIGQUIT to ignored, restored at the end.
+            let original = unsafe { signal(SIGQUIT, SIG_IGN) };
+            let held = hold();
+            assert_eq!(current(SIGQUIT), SIG_IGN, "no handler installed");
+            drop(held);
+            assert_eq!(current(SIGQUIT), SIG_IGN);
+            // SAFETY: restores what the test found.
+            unsafe { signal(SIGQUIT, original) };
         }
     }
 }

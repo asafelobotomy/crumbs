@@ -466,7 +466,7 @@ fn uninstall_unmanaged_requires_leftovers_only_exit_2() {
         .assert()
         .code(2)
         .stderr(predicate::str::contains(
-            "removing unmanaged apps needs M4b; use --leftovers-only",
+            "removing unmanaged apps isn't supported yet; use --leftovers-only",
         ));
     assert!(real(&t, "/home/user/.cache/foo/blob").exists());
 }
@@ -2383,4 +2383,110 @@ fn doctor_shows_privileged_availability() {
         .stdout(predicate::str::contains(
             "privileged cleanup: available via run0",
         ));
+}
+
+/// Like [`PACMAN_OK`], but any other package simulates as just itself.
+const PACMAN_MULTI: &str = "#!/bin/sh\nroot=\"$(dirname \"$0\")/../..\"\ncase \"$1\" in\n-Rs) if [ \"$5\" = firefox ]; then printf 'firefox 159.0.1-1\\ngn 0.2385.1-1\\nlibjuice 1.7.3-1\\n'; else printf '%s 1.0-1\\n' \"$5\"; fi ;;\n-Rn) echo \"$@\" >> \"$root/pacman-args\"; shift 2; for p in \"$@\"; do rm -rf \"$root\"/var/lib/pacman/local/\"$p\"-*; done ;;\n*) exit 9 ;;\nesac\n";
+
+fn two_pacman_apps() -> FixtureTree {
+    let t = pacman_fixture(PACMAN_MULTI);
+    t.pacman_pkg(
+        "kate",
+        "1.0-1",
+        Some(1_000),
+        &["usr/bin/kate", "usr/share/applications/kate.desktop"],
+    );
+    t.write_exec("/usr/bin/kate", b"");
+    t.desktop(
+        "/usr/share/applications/kate.desktop",
+        "[Desktop Entry]\nType=Application\nName=Kate\nExec=/usr/bin/kate\n",
+    );
+    t.write("/home/user/.cache/kate/blob", b"k");
+    t
+}
+
+#[test]
+fn uninstall_two_apps_asks_once() {
+    let t = two_pacman_apps();
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "sh").args([
+        "uninstall",
+        "firefox",
+        "kate",
+        "--yes",
+    ]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        stderr.matches("crumbs-test: privileged batch").count(),
+        1,
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(real(&t, "/pacman-args")).unwrap(),
+        "-Rn --noconfirm firefox gn libjuice\n-Rn --noconfirm kate\n"
+    );
+    assert!(stdout.contains("✓ removed pacman: kate"), "{stdout}");
+    assert!(!real(&t, "/home/user/.cache/kate").exists());
+    // Each app keeps its own batch.
+    let h = history_json(&t);
+    assert_eq!(h["data"]["batches"].as_array().unwrap().len(), 2, "{h}");
+}
+
+#[test]
+fn uninstall_two_apps_denied_fails_both() {
+    let t = two_pacman_apps();
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "deny").args([
+        "uninstall",
+        "firefox",
+        "kate",
+        "--yes",
+    ]));
+    assert_eq!(code, 5, "{stdout}{stderr}");
+    for app in ["firefox", "kate"] {
+        assert!(
+            stdout.contains(&format!(
+                "✗ pacman: {app}: privilege escalation was cancelled or denied"
+            )),
+            "{stdout}"
+        );
+    }
+    assert!(!stdout.contains("no way to get"), "{stdout}");
+    assert!(
+        stderr.contains("sudo '/usr/bin/pacman' '-Rn' '--noconfirm' 'kate'"),
+        "{stderr}"
+    );
+    assert!(real(&t, "/home/user/.cache/kate/blob").exists());
+}
+
+#[test]
+fn preview_shows_root_command_lines() {
+    let t = fixture(FLATPAK_APPS_RECORD);
+    let (code, stdout, _) = run_out(crumbs(&t).args(["uninstall", "DOSBox-X", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains(
+            "    - as root: '/usr/bin/flatpak' 'uninstall' '--system' '-y' '--noninteractive' 'com.dosbox_x.DOSBox-X'"
+        ),
+        "{stdout}"
+    );
+    let t = pacman_fixture(PACMAN_OK);
+    let (code, stdout, _) = run_out(crumbs(&t).args(["uninstall", "firefox", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains(
+            "    - as root: '/usr/bin/pacman' '-Rn' '--noconfirm' 'firefox' 'gn' 'libjuice'"
+        ),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn doctor_sudo_without_terminal_is_unavailable() {
+    let t = fixture(FLATPAK_OK);
+    t.write_exec("/usr/bin/sudo", b"#!/bin/sh\nexit 99\n");
+    crumbs(&t)
+        .arg("doctor")
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("needs a terminal"))
+        .stdout(predicate::str::contains("privileged cleanup: unavailable"));
 }
