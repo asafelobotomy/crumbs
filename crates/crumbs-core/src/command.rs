@@ -83,12 +83,10 @@ impl SystemRunner {
             }
         }
         cmd.env("PATH", CHILD_PATH).env("LC_ALL", "C");
-        let mut child = cmd
-            .stdin(Stdio::null())
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(fail)?;
+            .stderr(Stdio::piped());
+        let mut child = spawn_when_not_busy(&mut cmd).map_err(fail)?;
         // Readers run beside the wait so a chatty child can't fill a pipe
         // and block forever.
         let out = child.stdout.take().map(read_all);
@@ -125,6 +123,28 @@ impl SystemRunner {
 impl Default for SystemRunner {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Spawns `cmd`, retrying for a short while if exec reports ETXTBSY.
+///
+/// A script that was just written may still be open for writing in a process
+/// another thread forked at that moment; exec refuses it until that fd closes
+/// on the forked child's exec, which takes milliseconds.
+fn spawn_when_not_busy(cmd: &mut Command) -> std::io::Result<Child> {
+    let mut wait = Duration::from_millis(5);
+    let deadline = Instant::now() + Duration::from_millis(500);
+    loop {
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(rustix::io::Errno::TXTBSY.raw_os_error()) => {
+                if Instant::now() >= deadline {
+                    return Err(e);
+                }
+                thread::sleep(wait);
+                wait = (wait * 2).min(Duration::from_millis(50));
+            }
+            other => return other,
+        }
     }
 }
 
@@ -176,6 +196,41 @@ mod tests {
 
     fn os(s: &str) -> OsString {
         OsString::from(s)
+    }
+
+    #[test]
+    fn system_runner_retries_while_text_file_busy() {
+        // Another thread forking while a fixture script is still open for
+        // writing makes exec fail with ETXTBSY for a moment; the runner must
+        // wait it out rather than fail.
+        let t = FixtureTree::new();
+        let script = t.write_exec("/usr/bin/busy-fixture", b"#!/bin/sh\necho ok\n");
+        let writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&script)
+            .unwrap();
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(60));
+            drop(writer);
+        });
+        let out = SystemRunner::new().run(&script, &[]).unwrap();
+        release.join().unwrap();
+        assert_eq!(out.status, 0, "{out:?}");
+        assert_eq!(out.stdout, "ok\n");
+    }
+
+    #[test]
+    fn system_runner_gives_up_on_a_file_that_stays_busy() {
+        let t = FixtureTree::new();
+        let script = t.write_exec("/usr/bin/busy-fixture", b"#!/bin/sh\necho ok\n");
+        let _writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&script)
+            .unwrap();
+        let start = Instant::now();
+        let err = SystemRunner::new().run(&script, &[]).unwrap_err();
+        assert!(err.to_string().contains("busy"), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
