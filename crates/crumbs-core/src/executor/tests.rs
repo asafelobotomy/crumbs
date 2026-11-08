@@ -380,3 +380,38 @@ fn delete_refuses_tree_with_another_filesystem() {
     delete_with(&env, Path::new("/home/user/.config/foo"), &same).unwrap();
     assert!(!env.sys("/home/user/.config/foo").exists());
 }
+
+/// Each action's history entry is its own line: one entry that can't be
+/// written (a non-UTF-8 path can't be serialised) loses only that entry.
+#[test]
+fn history_entry_failure_is_per_action() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let t = FixtureTree::new();
+    t.write("home/user/.config/a/f", b"a");
+    t.write("home/user/.config/c/f", b"c");
+    let env = t.env();
+    let bad = Path::new("/home/user/.config").join(OsStr::from_bytes(b"b\xff"));
+    fs::write(env.sys_path(&bad), b"b").unwrap();
+    let plan = plan_of(vec![
+        planned(&env, trash("/home/user/.config/a")),
+        planned(&env, Action::Trash { path: bad.clone() }),
+        planned(&env, trash("/home/user/.config/c")),
+    ]);
+    let report = execute(&env, &Config::default(), &plan);
+    assert!(report.results.iter().all(|r| r.ok), "{report:?}");
+    assert_eq!(report.results[0].error, None);
+    assert_eq!(report.results[2].error, None);
+    let err = report.results[1].error.as_deref().unwrap();
+    assert!(err.ends_with("; history not written"), "{err}");
+    let (hist, skipped) = read_history(&env).unwrap();
+    assert_eq!(skipped, 0);
+    let ids: Vec<&str> = hist.iter().map(|h| h.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            report.results[0].history_id.as_str(),
+            report.results[2].history_id.as_str()
+        ]
+    );
+}

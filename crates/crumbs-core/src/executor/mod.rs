@@ -46,14 +46,15 @@ struct Done {
     backup: Option<PathBuf>,
 }
 
-/// Runs every action in order. Each attempt becomes one history entry; all
-/// are appended in one call at the end. When that append fails, every
-/// result's error gets `"<append error>; history not written"` (the
-/// actions' `ok` values still describe what happened on disk).
+/// Runs every action in order. Each attempt becomes one history entry,
+/// appended (and synced) right after the attempt, so an interrupted run
+/// still leaves a record of what it did. When an entry can't be written,
+/// that result's error gets `"<append error>; history not written"` (its
+/// `ok` still describes what happened on disk); other entries are
+/// unaffected.
 pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
     let batch = history::next_batch_id(env);
     let mut results = Vec::with_capacity(plan.actions.len());
-    let mut entries = Vec::with_capacity(plan.actions.len());
     let mut freed = 0u64;
     for (i, pa) in plan.actions.iter().enumerate() {
         let id = format!("{batch}-{i}");
@@ -68,7 +69,7 @@ pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
         if ok {
             freed = freed.saturating_add(pa.size);
         }
-        entries.push(HistoryEntry {
+        let entry = HistoryEntry {
             id: id.clone(),
             batch: batch.clone(),
             time: history::now_rfc3339(),
@@ -85,22 +86,23 @@ pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
             error: error.clone(),
             app_id: plan.app_id.clone(),
             restores: None,
-        });
+        };
+        let error = match history::append(env, std::slice::from_ref(&entry)) {
+            Ok(()) => error,
+            Err(e) => {
+                let suffix = format!("{e}; history not written");
+                Some(match error {
+                    Some(prev) => format!("{prev}; {suffix}"),
+                    None => suffix,
+                })
+            }
+        };
         results.push(ActionResult {
             action: pa.action.clone(),
             ok,
             error,
             history_id: id,
         });
-    }
-    if let Err(e) = history::append(env, &entries) {
-        let suffix = format!("{e}; history not written");
-        for r in &mut results {
-            r.error = Some(match r.error.take() {
-                Some(prev) => format!("{prev}; {suffix}"),
-                None => suffix.clone(),
-            });
-        }
     }
     ExecReport {
         batch,

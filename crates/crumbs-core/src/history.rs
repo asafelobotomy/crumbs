@@ -77,6 +77,10 @@ fn history_path(env: &Env) -> PathBuf {
     env.state_home.join("crumbs/history.jsonl")
 }
 
+/// Appends `entries` as one write, then syncs. All or nothing: if any entry
+/// can't be serialised, nothing is written. The executor calls this with
+/// one entry per action so one bad entry never costs the others.
+///
 /// Known limitation: `PathBuf` fields holding non-UTF-8 paths cannot be
 /// serialised by serde, so appending such an entry returns an error.
 pub fn append(env: &Env, entries: &[HistoryEntry]) -> Result<(), CoreError> {
