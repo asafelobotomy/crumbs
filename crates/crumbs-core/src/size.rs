@@ -55,9 +55,10 @@ pub fn disk_usage(env: &Env, in_system: &Path) -> DiskUsage {
     usage
 }
 
-/// Whether any entry in the tree at the real path `real` lies on another
-/// mount than `real` itself (a mount point inside it, including a bind
-/// mount of the same filesystem). Does not follow symlinks and stops at the
+/// Whether the tree at the real path `real` spans more than one mount:
+/// `real` is itself a mount root (its mount differs from its parent's), or
+/// an entry below it lies on another mount (including a bind mount of the
+/// same filesystem). Does not follow symlinks and stops at the
 /// first such entry. `mount_of` gives an entry's mount ([`mount_id`]
 /// outside tests); `None` from it, like any read error, is returned as an
 /// error, so callers can fail closed.
@@ -69,6 +70,15 @@ pub(crate) fn crosses_mount(
         |p: &Path| io::Error::other(format!("cannot determine the mount of {}", p.display()));
     let meta = fs::symlink_metadata(real)?;
     let root = mount_of(real, &meta).ok_or_else(|| unknown(real))?;
+    // The target may itself be a mount root (a FUSE mount in `/tmp`, say):
+    // then it differs from its parent's mount.
+    let parent = real
+        .parent()
+        .ok_or_else(|| io::Error::other(format!("{} has no parent", real.display())))?;
+    let parent_meta = fs::symlink_metadata(parent)?;
+    if mount_of(parent, &parent_meta).ok_or_else(|| unknown(parent))? != root {
+        return Ok(true);
+    }
     if !meta.is_dir() {
         return Ok(false);
     }
@@ -223,6 +233,26 @@ mod tests {
         // An entry whose mount can't be determined fails closed.
         let unknown = |p: &Path, _: &fs::Metadata| (!p.starts_with(&bind)).then_some(3);
         assert!(crosses_mount(&root, &unknown).is_err());
+    }
+
+    #[test]
+    fn crosses_mount_detects_target_that_is_a_mount_root() {
+        let t = FixtureTree::new();
+        t.write("/tmp/mnt/inner", b"on another fs");
+        t.write("/tmp/file", b"x");
+        let mnt = t.dir.path().join("tmp/mnt");
+        // The target itself is the mount root: it and everything below it
+        // share one ID, which differs from its parent's.
+        let mounted = |p: &Path, _: &fs::Metadata| Some(if p.starts_with(&mnt) { 9 } else { 1 });
+        assert!(crosses_mount(&mnt, &mounted).unwrap());
+        // A regular file whose parent is on the same mount.
+        let file = t.dir.path().join("tmp/file");
+        assert!(!crosses_mount(&file, &mounted).unwrap());
+        // The parent's mount can't be determined: fail closed.
+        let parent = t.dir.path().join("tmp");
+        let no_parent = |p: &Path, _: &fs::Metadata| (p != parent).then_some(1);
+        assert!(crosses_mount(&file, &no_parent).is_err());
+        assert!(crosses_mount(&mnt, &no_parent).is_err());
     }
 
     #[test]

@@ -434,3 +434,17 @@ fn history_entry_failure_is_per_action() {
         ]
     );
 }
+
+/// A target that is itself a mount root (a FUSE mount in `/tmp`, say) is
+/// refused untouched: its mount differs from its parent's.
+#[test]
+fn delete_refuses_target_that_is_a_mount_root() {
+    let t = FixtureTree::new();
+    t.write("tmp/mnt/inner", b"on another fs");
+    let env = t.env();
+    let mnt = env.sys("/tmp/mnt");
+    let fake_mount = |p: &Path, _: &fs::Metadata| Some(if p.starts_with(&mnt) { 2 } else { 1 });
+    let err = delete_with(&env, Path::new("/tmp/mnt"), &fake_mount).unwrap_err();
+    assert_eq!(err, "refusing: /tmp/mnt contains another filesystem");
+    assert!(env.sys("/tmp/mnt/inner").exists());
+}
