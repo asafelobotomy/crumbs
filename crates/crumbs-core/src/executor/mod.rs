@@ -21,10 +21,10 @@ use crate::env::{Env, display_path};
 use crate::history::{self, HistoryAction, HistoryEntry};
 use crate::model::{App, SourceKind};
 use crate::plan::{Action, Plan};
+use crate::privilege::Escalation;
 use crate::privilege::batch::{
     PrivilegedRunner, Step, SystemPrivilegedRunner, build_script, parse_markers,
 };
-use crate::privilege::{Escalation, detect_escalation};
 use crate::safety::{self, Fingerprint, Scope};
 use crate::size;
 use crate::trash::{self, Trashed};
@@ -67,8 +67,9 @@ pub const ESCALATION_DENIED: &str = "privilege escalation was cancelled or denie
 /// `PackageRemove` claimed success.
 pub type PostCheck<'a> = dyn Fn(&Env, SourceKind, &[String]) -> Result<Vec<String>, String> + 'a;
 
-/// Runs every action (see [`execute_full`]) with the system runners and
-/// the escalation program [`detect_escalation`] finds.
+/// Runs every action (see [`execute_full`]) with the system runners. It
+/// never escalates: every privileged action fails as if no escalation
+/// program existed. The CLI's privilege check is the only way to root.
 pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
     execute_with(
         env,
@@ -79,27 +80,23 @@ pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
 }
 
 /// [`execute`] with the command runner injected; `UserCommand` actions run
-/// through it. The escalation program is detected (only when the plan holds
-/// privileged actions) with the query runner, and never under a fake root:
-/// there the programs are user-writable fixtures, so every privileged
-/// action fails as if no escalation program existed. There is no package
-/// post-check.
+/// through it. It never escalates (privileged actions fail with
+/// [`NO_ESCALATION`]) and there is no package post-check: running anything
+/// as root goes through [`execute_full`] or [`execute_many`] with an
+/// escalation the caller chose.
 pub fn execute_with(
     env: &Env,
     cfg: &Config,
     plan: &Plan,
     runner: &dyn CommandRunner,
 ) -> ExecReport {
-    let esc = (env.root == Path::new("/") && plan.actions.iter().any(is_privileged))
-        .then(|| detect_escalation(env, &SystemRunner::new()))
-        .flatten();
     run_one(
         env,
         cfg,
         plan,
         runner,
         &SystemPrivilegedRunner::new(&env.root),
-        esc.as_ref(),
+        None,
         None,
     )
 }
