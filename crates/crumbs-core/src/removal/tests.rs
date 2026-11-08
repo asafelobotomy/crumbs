@@ -70,7 +70,7 @@ fn pacman_simulation_lists_extras() {
             ],
             program: "pacman".into(),
             args: [
-                "-Rns",
+                "-Rn",
                 "--noconfirm",
                 "libdatachannel",
                 "libjuice",
@@ -95,11 +95,18 @@ fn pacman_simulation_lists_extras() {
 #[test]
 fn pacman_simulation_refusal_text() {
     let t = with_pacman();
-    let stderr = "error: failed to prepare transaction (could not satisfy dependencies)\n:: removing glibc breaks dependency 'glibc' required by 7zip\n";
-    let runner = sim(FakeRunner::new(), "glibc", out(1, "", stderr));
-    let err = plan_removal(&t.env(), &runner, &pacman_app("glibc")).unwrap_err();
-    assert_eq!(err, RemovalError::Refused(stderr.trim().into()));
-    assert!(err.to_string().contains("breaks dependency 'glibc'"));
+    // Real pacman: the reason on stdout, the summary on stderr.
+    let stderr = "error: failed to prepare transaction (could not satisfy dependencies)\n";
+    let stdout = ":: removing libjuice breaks dependency 'libjuice' required by libdatachannel\nnot a reason line\n";
+    let runner = sim(FakeRunner::new(), "libjuice", out(1, stdout, stderr));
+    let err = plan_removal(&t.env(), &runner, &pacman_app("libjuice")).unwrap_err();
+    assert_eq!(
+        err,
+        RemovalError::Refused(
+            "error: failed to prepare transaction (could not satisfy dependencies)\n:: removing libjuice breaks dependency 'libjuice' required by libdatachannel".into()
+        )
+    );
+    assert!(err.to_string().contains("breaks dependency 'libjuice'"));
 }
 
 #[test]
@@ -114,6 +121,15 @@ fn pacman_busy_lock() {
         RemovalError::Busy("pacman is busy (database lock present)".into())
     );
     assert!(runner.calls().is_empty());
+}
+
+#[test]
+fn dangling_symlink_lock_is_busy() {
+    let t = with_pacman();
+    t.symlink("/var/lib/pacman/db.lck", "/nonexistent");
+    let runner = FakeRunner::new();
+    let err = plan_removal(&t.env(), &runner, &pacman_app("foo")).unwrap_err();
+    assert!(matches!(err, RemovalError::Busy(_)));
 }
 
 #[test]
@@ -208,15 +224,37 @@ fn still_installed_reads_db() {
     let t = with_pacman();
     t.pacman_pkg("foo", "1.0-1", None, &[]);
     t.pacman_pkg("bar", "2.0-1", None, &[]);
+    t.write("/var/lib/pacman/local/ALPM_DB_VERSION", b"9\n");
     let names: Vec<String> = ["foo", "gone", "bar"].map(String::from).to_vec();
     let runner = FakeRunner::new();
     let got = still_installed(&t.env(), &runner, SourceKind::Pacman, &names);
-    assert_eq!(got, ["foo", "bar"]);
-    // A package whose dir name differs from %NAME% is matched on %NAME%.
+    assert_eq!(got, Ok(vec!["foo".to_string(), "bar".into()]));
     std::fs::remove_dir_all(t.dir.path().join("var/lib/pacman/local/foo-1.0-1")).unwrap();
     let got = still_installed(&t.env(), &runner, SourceKind::Pacman, &names);
-    assert_eq!(got, ["bar"]);
-    assert!(still_installed(&t.env(), &runner, SourceKind::Unmanaged, &names).is_empty());
+    assert_eq!(got, Ok(vec!["bar".to_string()]));
+    assert_eq!(
+        still_installed(&t.env(), &runner, SourceKind::Unmanaged, &names),
+        Ok(Vec::new())
+    );
+}
+
+#[test]
+fn pacman_still_installed_fails_closed() {
+    let names = vec!["foo".to_string()];
+    let runner = FakeRunner::new();
+    // No database at all.
+    let t = FixtureTree::new();
+    let e = still_installed(&t.env(), &runner, SourceKind::Pacman, &names).unwrap_err();
+    assert!(e.contains("cannot read"), "{e}");
+    // An entry without a desc.
+    let t = with_pacman();
+    t.write("/var/lib/pacman/local/foo-1.0-1/files", b"%FILES%\n");
+    let e = still_installed(&t.env(), &runner, SourceKind::Pacman, &names).unwrap_err();
+    assert!(e.contains("foo-1.0-1/desc"), "{e}");
+    // A desc without a name.
+    t.write("/var/lib/pacman/local/foo-1.0-1/desc", b"%VERSION%\n1\n");
+    let e = still_installed(&t.env(), &runner, SourceKind::Pacman, &names).unwrap_err();
+    assert!(e.contains("no %NAME%"), "{e}");
 }
 
 #[test]
@@ -231,6 +269,27 @@ fn flatpak_still_installed_lists_apps() {
     let names: Vec<String> = ["org.x.Y", "org.gone.G"].map(String::from).to_vec();
     assert_eq!(
         still_installed(&t.env(), &runner, SourceKind::Flatpak, &names),
-        ["org.x.Y"]
+        Ok(vec!["org.x.Y".to_string()])
+    );
+}
+
+#[test]
+fn flatpak_still_installed_fails_closed() {
+    let names = vec!["org.x.Y".to_string()];
+    // Missing binary.
+    let t = FixtureTree::new();
+    let r = still_installed(&t.env(), &FakeRunner::new(), SourceKind::Flatpak, &names);
+    assert!(r.unwrap_err().contains("not installed"));
+    // Runner failure and non-zero exit.
+    t.write_exec("/usr/bin/flatpak", b"");
+    assert!(still_installed(&t.env(), &FakeRunner::new(), SourceKind::Flatpak, &names).is_err());
+    let runner = FakeRunner::new().on(
+        "flatpak",
+        &["list", "--app", "--columns=application"],
+        out(1, "", "boom\n"),
+    );
+    assert_eq!(
+        still_installed(&t.env(), &runner, SourceKind::Flatpak, &names),
+        Err("boom".into())
     );
 }

@@ -71,17 +71,19 @@ pub fn plan_removal(
 
 /// Which of `names` are still installed for `source`, in `names` order.
 /// Pacman re-reads the local database; Flatpak asks `flatpak list` (used
-/// for system and custom installations). Other sources have none.
+/// for system and custom installations). Other sources have none. Anything
+/// that stops the answer from being trusted (unreadable database, missing
+/// or failing program) is an `Err`, never an empty list.
 pub fn still_installed(
     env: &Env,
     runner: &dyn CommandRunner,
     source: SourceKind,
     names: &[String],
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     match source {
         SourceKind::Pacman => pacman_still_installed(env, names),
         SourceKind::Flatpak => flatpak_still_installed(env, runner, names),
-        SourceKind::AppImage | SourceKind::Unmanaged => Vec::new(),
+        SourceKind::AppImage | SourceKind::Unmanaged => Ok(Vec::new()),
     }
 }
 

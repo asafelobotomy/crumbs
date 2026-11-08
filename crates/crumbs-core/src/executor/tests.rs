@@ -804,8 +804,8 @@ fn esc() -> Escalation {
     }
 }
 
-fn no_post_check(_: &Env, _: SourceKind, _: &[String]) -> Vec<String> {
-    Vec::new()
+fn no_post_check(_: &Env, _: SourceKind, _: &[String]) -> Result<Vec<String>, String> {
+    Ok(Vec::new())
 }
 
 /// Steps in a script: one marker `printf` per step.
@@ -1001,7 +1001,7 @@ fn escalation_denied_marks_all_failed_and_skips_dependents() {
         &pr,
         Some(&esc()),
         // Nothing ran, so the package is still there.
-        &|_, _, names| names.to_vec(),
+        &|_, _, names| Ok(names.to_vec()),
     );
     assert_eq!(*pr.calls.lock().unwrap(), 1);
     assert!(report.escalation_failed);
@@ -1180,7 +1180,7 @@ fn privileged_step_failure_reports_last_output_line() {
         &FakeRunner::new(),
         &FakePrivilegedRunner::default(),
         Some(&esc()),
-        &|_, _, names| names.to_vec(),
+        &|_, _, names| Ok(names.to_vec()),
     );
     assert_eq!(
         report.results[0].error.as_deref(),
@@ -1270,7 +1270,7 @@ fn package_remove_post_check_still_installed() {
     let seen = std::sync::Mutex::new(Vec::new());
     let post_check = |_: &Env, source: SourceKind, names: &[String]| {
         seen.lock().unwrap().push((source, names.to_vec()));
-        names.iter().filter(|n| *n == "foo").cloned().collect()
+        Ok(names.iter().filter(|n| *n == "foo").cloned().collect())
     };
     let report = execute_full(
         &env,
@@ -1474,7 +1474,7 @@ fn dependent_of_package_failing_post_check_is_skipped() {
         &FakeRunner::new(),
         &FakePrivilegedRunner::default(),
         Some(&esc()),
-        &|_, _, names| names.to_vec(),
+        &|_, _, names| Ok(names.to_vec()),
     );
     assert_eq!(
         report.results[0].error.as_deref(),
@@ -1504,7 +1504,7 @@ fn failed_package_step_reports_what_was_removed() {
     );
     let env = t.env();
     let plan = plan_of(vec![pkg_remove(&["a", "b", "c"], &["1", "2", "3"])]);
-    let still = |_: &Env, _: SourceKind, _: &[String]| vec!["c".to_string()];
+    let still = |_: &Env, _: SourceKind, _: &[String]| Ok(vec!["c".to_string()]);
     let report = execute_full(
         &env,
         &Config::default(),
@@ -1532,7 +1532,7 @@ fn failed_package_step_reports_what_was_removed() {
     let t = FixtureTree::new();
     logging_program(&t, "pacman", &log, "", 0);
     let env = t.env();
-    let none_left = |_: &Env, _: SourceKind, _: &[String]| Vec::new();
+    let none_left = |_: &Env, _: SourceKind, _: &[String]| Ok(Vec::new());
     let report = execute_full(
         &env,
         &Config::default(),
@@ -1589,4 +1589,40 @@ fn default_post_check_claims_nothing_on_failure() {
         hist.last().unwrap().packages.as_deref(),
         Some(&[("a".to_string(), "1".to_string()), ("b".into(), "2".into())][..])
     );
+}
+
+#[test]
+fn unverifiable_removal_is_not_ok_and_records_nothing() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "", 0);
+    t.write("home/user/.config/foo/a", b"a");
+    let env = t.env();
+    let mut leftover = planned(&env, trash("/home/user/.config/foo"));
+    leftover.depends_on = Some(0);
+    let plan = plan_of(vec![pkg_remove(&["foo"], &["1.0-1"]), leftover]);
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &FakePrivilegedRunner::default(),
+        Some(&esc()),
+        &|_, _, _| Err("cannot read the pacman database".into()),
+    );
+    assert!(!report.results[0].ok);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("could not verify removal: cannot read the pacman database")
+    );
+    assert!(
+        report.results[1]
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with("skipped: ")
+    );
+    assert!(env.sys("/home/user/.config/foo/a").exists());
+    let (hist, _) = read_history(&env).unwrap();
+    assert!(hist.iter().all(|h| h.packages.is_none()), "{hist:?}");
 }

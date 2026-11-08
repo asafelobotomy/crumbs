@@ -47,24 +47,28 @@ pub(super) fn plan(app: &App) -> Result<RemovalPlan, RemovalError> {
     })
 }
 
-/// The app ids of `names` that `flatpak list` still shows.
+/// The app ids of `names` that `flatpak list` still shows; any failure to
+/// ask is an error.
 pub fn flatpak_still_installed(
     env: &Env,
     runner: &dyn CommandRunner,
     names: &[String],
-) -> Vec<String> {
-    let Some(program) = resolve_trusted(env, "flatpak") else {
-        return Vec::new();
-    };
-    let Ok(out) = runner.run(&program, &["list", "--app", "--columns=application"]) else {
-        return Vec::new();
-    };
+) -> Result<Vec<String>, String> {
+    let program = resolve_trusted(env, "flatpak").ok_or("flatpak is not installed")?;
+    let out = runner
+        .run(&program, &["list", "--app", "--columns=application"])
+        .map_err(|e| e.to_string())?;
     if out.status != 0 {
-        return Vec::new();
+        let text = out.stderr.trim();
+        return Err(if text.is_empty() {
+            format!("flatpak list exited with status {}", out.status)
+        } else {
+            text.to_string()
+        });
     }
-    names
+    Ok(names
         .iter()
         .filter(|n| out.stdout.lines().any(|l| l.trim() == n.as_str()))
         .cloned()
-        .collect()
+        .collect())
 }

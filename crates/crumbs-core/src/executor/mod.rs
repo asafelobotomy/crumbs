@@ -60,7 +60,7 @@ pub const ESCALATION_DENIED: &str = "privilege escalation was cancelled or denie
 
 /// Reports which of `names` are still installed from `source`, after a
 /// `PackageRemove` claimed success.
-pub type PostCheck<'a> = dyn Fn(&Env, SourceKind, &[String]) -> Vec<String> + 'a;
+pub type PostCheck<'a> = dyn Fn(&Env, SourceKind, &[String]) -> Result<Vec<String>, String> + 'a;
 
 /// Runs every action (see [`execute_full`]) with the system runners and
 /// the escalation program [`detect_escalation`] finds.
@@ -376,7 +376,20 @@ fn check_packages(
             StepEnd::NotRun(msg) => Err(msg),
         };
     };
-    let still = post_check(env, *source, names);
+    let still = match post_check(env, *source, names) {
+        Ok(still) => still,
+        Err(reason) => {
+            // Nothing is known about what was removed: claim nothing.
+            let mut parts = Vec::new();
+            match end {
+                StepEnd::Succeeded => {}
+                StepEnd::Exited(status, line) => parts.push(exit_message(program, status, line)),
+                StepEnd::NotRun(msg) => parts.push(msg),
+            }
+            parts.push(format!("could not verify removal: {reason}"));
+            return Err(parts.join("; "));
+        }
+    };
     let removed: Vec<(String, String)> = names
         .iter()
         .enumerate()

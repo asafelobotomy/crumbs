@@ -882,7 +882,7 @@ mod tests {
             &crate::testing::FakeRunner::new(),
             &crate::testing::FakePrivilegedRunner::default(),
             Some(&esc),
-            &|_, _, _| Vec::new(),
+            &|_, _, _| Ok(Vec::new()),
         );
         assert!(rep.results.iter().all(|r| r.ok), "{rep:?}");
         let by_id = |i: usize| {

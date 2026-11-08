@@ -18,7 +18,8 @@ pub(super) fn plan(
     if !valid_name(&app.name) {
         return Err(invalid("package name", &app.name));
     }
-    if lock_path(env).exists() {
+    // Any directory entry counts, even a dangling symlink.
+    if fs::symlink_metadata(lock_path(env)).is_ok() {
         return Err(RemovalError::Busy(MSG_BUSY.into()));
     }
     let program = resolve_trusted(env, "pacman")
@@ -31,11 +32,22 @@ pub(super) fn plan(
         )
         .map_err(|e| RemovalError::Refused(e.to_string()))?;
     if out.status != 0 {
-        let text = out.stderr.trim();
-        return Err(RemovalError::Refused(if text.is_empty() {
+        // pacman prints the reason (`:: removing X breaks dependency ...`)
+        // on stdout and the summary on stderr.
+        let mut lines: Vec<&str> = Some(out.stderr.trim())
+            .filter(|l| !l.is_empty())
+            .into_iter()
+            .collect();
+        lines.extend(
+            out.stdout
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with("::")),
+        );
+        return Err(RemovalError::Refused(if lines.is_empty() {
             format!("pacman refused the removal (status {})", out.status)
         } else {
-            text.to_string()
+            lines.join("\n")
         }));
     }
 
@@ -60,7 +72,9 @@ pub(super) fn plan(
         }
     }
 
-    let mut args = vec!["-Rns".to_string(), "--noconfirm".to_string()];
+    // No -s: the full simulated list is passed, so pacman can never remove
+    // more than previewed (and refuses if the database changed).
+    let mut args = vec!["-Rn".to_string(), "--noconfirm".to_string()];
     args.extend(names.iter().cloned());
     Ok(RemovalPlan {
         actions: vec![Action::PackageRemove {
@@ -76,19 +90,28 @@ pub(super) fn plan(
 }
 
 /// Re-reads the local database: the entries of `names` whose package is
-/// still there (matched on `%NAME%`, as the source does).
-pub fn pacman_still_installed(env: &Env, names: &[String]) -> Vec<String> {
-    let installed: Vec<String> = fs::read_dir(env.sys(DB_DIR))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| fs::read(e.path().join("desc")).ok())
-        .filter_map(|b| first(&parse_sections(&String::from_utf8_lossy(&b)), "NAME"))
-        .collect();
-    names
+/// still there (matched on `%NAME%`, as the source does). Any unreadable
+/// part of the database is an error.
+pub fn pacman_still_installed(env: &Env, names: &[String]) -> Result<Vec<String>, String> {
+    let db = env.sys(DB_DIR);
+    let mut installed: Vec<String> = Vec::new();
+    for entry in fs::read_dir(&db).map_err(|e| format!("cannot read {DB_DIR}: {e}"))? {
+        let path = entry
+            .map_err(|e| format!("cannot read {DB_DIR}: {e}"))?
+            .path();
+        if !path.is_dir() {
+            continue;
+        }
+        let desc = path.join("desc");
+        let bytes = fs::read(&desc)
+            .map_err(|e| format!("cannot read {}: {e}", env.unsys(&desc).display()))?;
+        let name = first(&parse_sections(&String::from_utf8_lossy(&bytes)), "NAME")
+            .ok_or_else(|| format!("{} has no %NAME%", env.unsys(&desc).display()))?;
+        installed.push(name);
+    }
+    Ok(names
         .iter()
         .filter(|n| installed.contains(n))
         .cloned()
-        .collect()
+        .collect())
 }
