@@ -52,8 +52,8 @@ fn validate_private_dir(env: &Env, path: &Path) -> Result<(), CoreError> {
     if m.uid() != env.uid {
         return Err(bad("trash directory is not owned by the current user"));
     }
-    if m.mode() & 0o077 != 0 {
-        return Err(bad("trash directory is accessible to other users"));
+    if m.mode() & 0o022 != 0 {
+        return Err(bad("trash directory is writable by other users"));
     }
     Ok(())
 }
@@ -487,26 +487,47 @@ mod tests {
 
     #[test]
     fn trash_refuses_symlinked_trash_dir() {
+        use std::os::unix::fs::PermissionsExt;
         let t = FixtureTree::new();
         t.write("home/user/a", b"x");
-        t.mkdir("elsewhere");
-        t.symlink("home/user/.local/share/Trash", "/elsewhere");
+        let target = t.mkdir("elsewhere");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
         let env = t.env();
-        assert!(move_to_trash(&env, Path::new("/home/user/a")).is_err());
+        fs::create_dir_all(&env.data_home).unwrap();
+        std::os::unix::fs::symlink(&target, env.data_home.join("Trash")).unwrap();
+        let err = move_to_trash(&env, Path::new("/home/user/a")).unwrap_err();
+        assert!(err.to_string().contains("not a real directory"), "{err}");
         assert!(real(&env, "/home/user/a").exists());
     }
 
     #[test]
-    fn trash_refuses_open_permissions() {
+    fn trash_works_with_existing_0755_dirs() {
         use std::os::unix::fs::PermissionsExt;
         let t = FixtureTree::new();
         t.write("home/user/a", b"x");
         let env = t.env();
         let trash = env.data_home.join("Trash");
-        fs::create_dir_all(&trash).unwrap();
-        fs::set_permissions(&trash, fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(move_to_trash(&env, Path::new("/home/user/a")).is_err());
-        assert!(real(&env, "/home/user/a").exists());
+        for d in [&trash, &trash.join("files"), &trash.join("info")] {
+            fs::create_dir_all(d).unwrap();
+            fs::set_permissions(d, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let got = move_to_trash(&env, Path::new("/home/user/a")).unwrap();
+        assert!(env.sys_path(&got.files_path).exists());
+    }
+
+    #[test]
+    fn trash_refuses_writable_by_others() {
+        use std::os::unix::fs::PermissionsExt;
+        for mode in [0o777, 0o775] {
+            let t = FixtureTree::new();
+            t.write("home/user/a", b"x");
+            let env = t.env();
+            let trash = env.data_home.join("Trash");
+            fs::create_dir_all(&trash).unwrap();
+            fs::set_permissions(&trash, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(move_to_trash(&env, Path::new("/home/user/a")).is_err());
+            assert!(real(&env, "/home/user/a").exists());
+        }
     }
 
     #[test]
