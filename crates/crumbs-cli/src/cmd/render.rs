@@ -67,7 +67,7 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
             if i > 0 {
                 writeln!(out)?;
             }
-            writeln!(out, "{heading}")?;
+            writeln!(out, "{}", sanitise(heading))?;
         }
         if plan.actions.is_empty() {
             writeln!(anstream::stdout().lock(), "  nothing to remove")?;

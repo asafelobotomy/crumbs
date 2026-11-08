@@ -69,9 +69,9 @@ impl Out<'_> {
     ) -> anyhow::Result<ExitCode> {
         print_notes(causes)?;
         let mut err = anstream::stderr().lock();
-        writeln!(err, "error: {msg}")?;
+        writeln!(err, "error: {}", render::sanitise(msg))?;
         for d in details {
-            writeln!(err, "  {d}")?;
+            writeln!(err, "  {}", render::sanitise(d))?;
         }
         drop(err);
         self.envelope(msg, details, causes)?;
@@ -316,7 +316,11 @@ pub fn apply(
             continue;
         }
         let list: Vec<String> = pids.iter().map(u32::to_string).collect();
-        let msg = format!("{} is running (pid {})", app.display_name, list.join(", "));
+        let msg = format!(
+            "{} is running (pid {})",
+            render::sanitise(&app.display_name),
+            list.join(", ")
+        );
         writeln!(anstream::stderr().lock(), "{msg}")?;
         if act.force {
             continue;
@@ -326,7 +330,7 @@ pub fn apply(
         }
         if !prompt::confirm(&format!(
             "{} is running; continue anyway?",
-            app.display_name
+            render::sanitise(&app.display_name)
         ))? {
             return out.aborted();
         }

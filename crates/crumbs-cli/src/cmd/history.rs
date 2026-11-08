@@ -13,6 +13,8 @@ use serde_json::json;
 
 use crate::output::{ErrorEntry, fmt_size, print_json_entries};
 
+use super::render::sanitise;
+
 #[derive(Serialize)]
 struct Batch<'a> {
     batch: &'a str,
@@ -103,7 +105,7 @@ pub fn run(env: &Env, limit: usize, json: bool) -> anyhow::Result<ExitCode> {
             "{}  {}  {}  {} items  {}",
             b.batch,
             short_time(b.time),
-            b.label,
+            sanitise(&b.label),
             b.items,
             fmt_size(b.size)
         );

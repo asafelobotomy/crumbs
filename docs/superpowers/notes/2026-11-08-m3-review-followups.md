@@ -4,13 +4,6 @@ These came out of the milestone 3 per-task reviews and the whole-branch review. 
 
 ## Open from the final review (fix before or right after merge)
 
-- **AppImage names and IDs are printed raw (I1 residual).** An AppImage's app ID (`appimage:<path>`) and display name come from its file name, and they are printed without sanitising. A file name containing CR or ESC can garble these spots:
-  - the `uninstall` preview heading and prompt;
-  - `apps list` / `apps show`;
-  - `history` labels, including `kind` read back from history;
-  - uninstall and apps error messages.
-
-  The action rows themselves (PATH) are sanitised, so this can't hide what will be removed.
 - **`restore <batch>` on a delete-only batch** (`clean temp`/`clean trash`) says `no matching history entry` and exits 2, even though `history` lists that batch. A clearer message is needed, and the case should be documented.
 - **`--keep-data` fallbacks.** A launcher with a non-UTF-8 name, or one that can't be read, is treated as the app's own and removed along with the AppImage. It goes to the trash, so it can be restored.
 - **`--keep-data` leaves mime associations behind** that point at the removed launcher.

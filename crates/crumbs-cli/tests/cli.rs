@@ -2001,3 +2001,90 @@ fn scan_unknown_only_size_is_question_mark() {
     // A known size with unknown extras keeps its `+`.
     assert!(!text.contains("0 B+"), "{text}");
 }
+
+const EVIL_APPIMAGE: &str = "/home/user/Applications/Ev\x1b[2Jil\rX-1.0-x86_64.AppImage";
+
+/// The fixture plus an AppImage whose file name holds ESC and CR, and its id.
+fn evil_fixture() -> (FixtureTree, String) {
+    let t = fixture(FLATPAK_OK);
+    t.appimage(EVIL_APPIMAGE);
+    let j = stdout_json(crumbs(&t).args(["apps", "list", "--json"]));
+    let id = j["data"]["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap().to_string())
+        .find(|id| id.contains('\x1b'))
+        .expect("evil app listed");
+    (t, id)
+}
+
+fn assert_clean(out: &std::process::Output) {
+    for (name, bytes) in [("stdout", &out.stdout), ("stderr", &out.stderr)] {
+        let text = String::from_utf8_lossy(bytes);
+        assert!(!text.contains('\r'), "{name} has CR: {text:?}");
+        assert!(!text.contains('\x1b'), "{name} has ESC: {text:?}");
+    }
+}
+
+fn assert_shows_replacement(out: &std::process::Output) {
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains('\u{FFFD}'), "{text:?}");
+}
+
+#[test]
+fn apps_list_sanitises_names_and_ids() {
+    let (t, _) = evil_fixture();
+    let out = crumbs(&t).args(["apps", "list"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_clean(&out);
+    assert_shows_replacement(&out);
+}
+
+#[test]
+fn apps_list_json_keeps_raw_name() {
+    let (t, id) = evil_fixture();
+    assert!(id.contains('\r') || id.contains('\x1b'));
+    let j = stdout_json(crumbs(&t).args(["apps", "list", "--json"]));
+    let names: Vec<&str> = j["data"]["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["display_name"].as_str().unwrap())
+        .collect();
+    assert!(names.iter().any(|n| n.contains('\x1b')), "{names:?}");
+}
+
+#[test]
+fn apps_show_sanitises_name_and_id() {
+    let (t, id) = evil_fixture();
+    let out = crumbs(&t).args(["apps", "show", &id]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_clean(&out);
+    assert_shows_replacement(&out);
+}
+
+#[test]
+fn uninstall_dry_run_sanitises_heading() {
+    let (t, id) = evil_fixture();
+    let out = crumbs(&t)
+        .args(["uninstall", &id, "--dry-run"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_clean(&out);
+    assert_shows_replacement(&out);
+}
+
+#[test]
+fn history_sanitises_label() {
+    let (t, id) = evil_fixture();
+    crumbs(&t)
+        .args(["uninstall", &id, "--yes"])
+        .assert()
+        .code(0);
+    let out = crumbs(&t).arg("history").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_clean(&out);
+    assert_shows_replacement(&out);
+}

@@ -11,7 +11,7 @@ use crumbs_core::{App, Env, SourceKind};
 use serde_json::json;
 
 use super::context::{Context, load_cfg, print_notes};
-use super::render::shown_path;
+use super::render::{sanitise, shown_path};
 use crate::output::{
     ErrorEntry, confidence, finding_kind, fmt_size, partial_failure, print_json_entries,
     print_table,
@@ -104,11 +104,11 @@ fn list(
             .iter()
             .map(|a| {
                 vec![
-                    a.display_name.clone(),
+                    sanitise(&a.display_name),
                     a.version.clone().unwrap_or_else(|| "-".into()),
                     a.source.as_str().into(),
                     a.install_size.map_or_else(|| "-".into(), fmt_size),
-                    a.id.clone(),
+                    sanitise(&a.id),
                 ]
             })
             .collect();
@@ -160,7 +160,13 @@ fn show(env: &Env, query: &str, show_low: bool, json: bool) -> anyhow::Result<Ex
                 print_json_entries("apps show", &data, &errors)?;
             }
             for a in candidates {
-                writeln!(err, "  {}  {}  {}", a.id, a.display_name, a.source.as_str())?;
+                writeln!(
+                    err,
+                    "  {}  {}  {}",
+                    sanitise(&a.id),
+                    sanitise(&a.display_name),
+                    a.source.as_str()
+                )?;
             }
             Ok(ExitCode::from(2))
         }
@@ -202,8 +208,8 @@ fn print_app(env: &Env, a: &App) -> anyhow::Result<()> {
         }
     };
     let rows = [
-        ("Name", a.display_name.clone()),
-        ("ID", a.id.clone()),
+        ("Name", sanitise(&a.display_name)),
+        ("ID", sanitise(&a.id)),
         ("Source", a.source.as_str().to_string()),
         ("Version", a.version.clone().unwrap_or_else(|| "-".into())),
         (

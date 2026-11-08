@@ -16,6 +16,7 @@ use super::act::{
     ActFlags, Out, Target, apply, choose, drop_overlaps, plannable, precheck, refuse_source_errors,
 };
 use super::context::Context;
+use super::render::sanitise;
 
 #[derive(Args, Debug)]
 pub struct UninstallArgs {
@@ -89,7 +90,7 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
     for app in apps {
         let mut found = plannable(find_leftovers(&cx.idx, app, args.show_low));
         found.retain(|f| keeps(env, app, f, args));
-        let prompt_text = format!("Leftovers of {} to remove", app.display_name);
+        let prompt_text = format!("Leftovers of {} to remove", sanitise(&app.display_name));
         let Some(chosen) = choose(env, &prompt_text, found, args.act.interactive, |f| {
             f.preselected
         })?
@@ -97,7 +98,7 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
             return out.aborted();
         };
         targets.push(Target {
-            heading: format!("{}  {}", app.display_name, app.id),
+            heading: format!("{}  {}", sanitise(&app.display_name), sanitise(&app.id)),
             app: Some(app),
             plan: build_plan(env, Some(app), &chosen, &opts)?,
         });
