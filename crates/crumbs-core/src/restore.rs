@@ -191,6 +191,9 @@ fn restore_one(
     dry_run: bool,
     batch: &str,
 ) -> Result<Option<PathBuf>, String> {
+    if e.action == HistoryAction::PackageRemove {
+        return Err(reinstall_hint(e));
+    }
     if !e.ok {
         return Err("the original action failed; nothing to restore".into());
     }
@@ -200,22 +203,7 @@ fn restore_one(
         HistoryAction::Command | HistoryAction::PrivilegedCommand => {
             Err("commands cannot be undone".into())
         }
-        HistoryAction::PackageRemove => {
-            let names: Vec<&str> = e
-                .packages
-                .iter()
-                .flatten()
-                .map(|(name, _)| name.as_str())
-                .collect();
-            Err(if names.is_empty() {
-                "packages cannot be restored by crumbs".to_string()
-            } else {
-                format!(
-                    "packages cannot be restored by crumbs; reinstall with: pacman -S {}",
-                    names.join(" ")
-                )
-            })
-        }
+        HistoryAction::PackageRemove => Err(reinstall_hint(e)),
         HistoryAction::Trash => {
             let t = valid_trash(env, cfg, e).ok_or(INVALID_ENTRY)?;
             check_parents(env, &t.original)?;
@@ -236,6 +224,44 @@ fn restore_one(
             check_parents(env, &e.path)?;
             restore_backup(env, &e.path, backup, dry_run, batch)
         }
+    }
+}
+
+/// Why a package removal cannot be restored, with the pacman commands that
+/// reinstall what it removed (`packages`), also when the removal failed
+/// part-way. The package the entry's `app_id` names (`pacman:<name>`, the
+/// one the user asked to uninstall) is reinstalled explicitly; the others
+/// were removed as its dependencies, or as orphans, so `--asdeps` keeps
+/// them marked as dependencies.
+fn reinstall_hint(e: &HistoryEntry) -> String {
+    const CANNOT: &str = "packages cannot be restored by crumbs";
+    let asked = e.app_id.as_deref().and_then(|a| a.strip_prefix("pacman:"));
+    let (explicit, deps): (Vec<&str>, Vec<&str>) = e
+        .packages
+        .iter()
+        .flatten()
+        .map(|(name, _)| name.as_str())
+        .partition(|n| Some(*n) == asked);
+    let mut commands = Vec::new();
+    if !explicit.is_empty() {
+        commands.push(format!("pacman -S {}", explicit.join(" ")));
+    }
+    if !deps.is_empty() {
+        commands.push(format!("pacman -S --asdeps {}", deps.join(" ")));
+    }
+    let prefix = if e.ok {
+        CANNOT.to_string()
+    } else {
+        format!("the original removal only partly ran; {CANNOT}")
+    };
+    if commands.is_empty() {
+        if e.ok {
+            prefix
+        } else {
+            "the original action failed; nothing to restore".into()
+        }
+    } else {
+        format!("{prefix}; reinstall with: {}", commands.join(" && "))
     }
 }
 
@@ -897,7 +923,8 @@ mod tests {
         };
         assert_eq!(
             by_id(0),
-            "packages cannot be restored by crumbs; reinstall with: pacman -S foo libfoo"
+            "packages cannot be restored by crumbs; reinstall with: \
+             pacman -S foo && pacman -S --asdeps libfoo"
         );
         assert_eq!(by_id(1), "commands cannot be undone");
         // An entry that names no packages gives no dangling command.
@@ -909,6 +936,36 @@ mod tests {
                 Err("packages cannot be restored by crumbs".to_string())
             );
         }
+        // A removal that failed part-way still says how to reinstall what
+        // it removed; without an app (orphans) everything is a dependency.
+        let mut e = read_history(&env).unwrap().0.remove(0);
+        e.ok = false;
+        e.packages = Some(vec![("libfoo".into(), "2.0-1".into())]);
+        assert_eq!(
+            restore_one(&env, &Config::default(), &e, true, "1"),
+            Err(
+                "the original removal only partly ran; packages cannot be restored by \
+                 crumbs; reinstall with: pacman -S --asdeps libfoo"
+                    .to_string()
+            )
+        );
+        e.packages = Some(Vec::new());
+        assert_eq!(
+            restore_one(&env, &Config::default(), &e, true, "1"),
+            Err("the original action failed; nothing to restore".to_string())
+        );
+        e.ok = true;
+        e.app_id = None;
+        e.packages = Some(vec![
+            ("foo".into(), "1.0-1".into()),
+            ("libfoo".into(), "2.0-1".into()),
+        ]);
+        assert_eq!(
+            restore_one(&env, &Config::default(), &e, true, "1"),
+            Err("packages cannot be restored by crumbs; reinstall with: \
+                 pacman -S --asdeps foo libfoo"
+                .to_string())
+        );
         // A batch restore skips both.
         let out = restore(&env, &Config::default(), &sel(&rep.batch), false).unwrap();
         assert_eq!(out.len(), 1);
