@@ -4,12 +4,13 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::bloat::Category;
 use crate::env::Env;
 use crate::error::CoreError;
 
 /// Settings from `config.toml`. All paths and patterns are in-system and
 /// absolute (a leading `~` is expanded to the in-system home on load).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Paths that are never touched.
     pub protect: Vec<PathBuf>,
@@ -17,8 +18,28 @@ pub struct Config {
     pub exclude: Vec<String>,
     /// Extra directories scanned for AppImages.
     pub appimage_dirs: Vec<PathBuf>,
+    /// Minimum age of `/tmp` entries to list (days).
+    pub temp_age_days: u64,
+    /// Minimum age of log files to list (days).
+    pub log_age_days: u64,
+    /// Categories skipped when none are named. Defaults to `[DevCache]`.
+    pub categories_off: Vec<Category>,
     /// One message per entry dropped on load (never read from the file).
     pub warnings: Vec<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            protect: Vec::new(),
+            exclude: Vec::new(),
+            appimage_dirs: Vec::new(),
+            temp_age_days: 7,
+            log_age_days: 14,
+            categories_off: vec![Category::DevCache],
+            warnings: Vec::new(),
+        }
+    }
 }
 
 /// Raw file form; unknown keys are ignored so newer configs load on older
@@ -29,6 +50,9 @@ struct RawConfig {
     protect: Vec<String>,
     exclude: Vec<String>,
     appimage_dirs: Vec<String>,
+    temp_age_days: Option<u64>,
+    log_age_days: Option<u64>,
+    categories_off: Option<Vec<String>>,
 }
 
 /// Expands a leading `~` against the in-system home. Returns `None` for
@@ -98,11 +122,29 @@ pub fn load_config(env: &Env) -> Result<Config, CoreError> {
     let protect = strings("protect", &raw.protect);
     let exclude = strings("exclude", &raw.exclude);
     let appimage_dirs = strings("appimage_dirs", &raw.appimage_dirs);
+    let categories_off = match &raw.categories_off {
+        None => vec![Category::DevCache],
+        Some(names) => names
+            .iter()
+            .filter_map(|n| match n.parse::<Category>() {
+                Ok(c) => Some(c),
+                Err(_) => {
+                    warnings.push(format!(
+                        "config.toml: unknown category '{n}' in categories_off"
+                    ));
+                    None
+                }
+            })
+            .collect(),
+    };
     let paths = |v: Vec<String>| v.into_iter().map(PathBuf::from).collect();
     Ok(Config {
         protect: paths(protect),
         exclude,
         appimage_dirs: paths(appimage_dirs),
+        temp_age_days: raw.temp_age_days.unwrap_or(7),
+        log_age_days: raw.log_age_days.unwrap_or(14),
+        categories_off,
         warnings,
     })
 }
@@ -352,5 +394,33 @@ mod tests {
         assert_eq!(c.warnings.len(), 2, "{:?}", c.warnings);
         assert!(c.warnings[0].contains("climbs above /") && c.warnings[0].contains("/../x"));
         assert!(c.warnings[1].contains("exclude") && c.warnings[1].contains("/a/../../y"));
+    }
+
+    #[test]
+    fn config_bloat_keys_and_unknown_category_warns() {
+        let t = FixtureTree::new();
+        let d = load_config(&t.env()).unwrap();
+        assert_eq!((d.temp_age_days, d.log_age_days), (7, 14));
+        assert_eq!(d.categories_off, [Category::DevCache]);
+
+        t.write(
+            "/home/user/.config/crumbs/config.toml",
+            b"temp_age_days = 3\nlog_age_days = 30\ncategories_off = [\"logs\", \"bogus\", \"temp\"]\n",
+        );
+        let c = load_config(&t.env()).unwrap();
+        assert_eq!((c.temp_age_days, c.log_age_days), (3, 30));
+        assert_eq!(c.categories_off, [Category::Logs, Category::Temp]);
+        assert_eq!(
+            c.warnings,
+            ["config.toml: unknown category 'bogus' in categories_off"]
+        );
+
+        t.write(
+            "/home/user/.config/crumbs/config.toml",
+            b"categories_off = []\n",
+        );
+        let c = load_config(&t.env()).unwrap();
+        assert!(c.categories_off.is_empty());
+        assert!(c.warnings.is_empty());
     }
 }

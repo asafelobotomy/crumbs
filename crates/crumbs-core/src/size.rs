@@ -6,6 +6,7 @@ use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::env::Env;
@@ -53,6 +54,12 @@ pub fn disk_usage(env: &Env, in_system: &Path) -> DiskUsage {
         }
     }
     usage
+}
+
+/// [`disk_usage`] for each of `paths` in parallel, in the same order. Each
+/// walk is independent, so hard links are counted once per path.
+pub fn disk_usage_many(env: &Env, paths: &[PathBuf]) -> Vec<DiskUsage> {
+    paths.par_iter().map(|p| disk_usage(env, p)).collect()
 }
 
 /// Whether the tree at the real path `real` spans more than one mount:
@@ -253,6 +260,25 @@ mod tests {
         let no_parent = |p: &Path, _: &fs::Metadata| (p != parent).then_some(1);
         assert!(crosses_mount(&file, &no_parent).is_err());
         assert!(crosses_mount(&mnt, &no_parent).is_err());
+    }
+
+    #[test]
+    fn disk_usage_many_matches_sequential() {
+        let t = FixtureTree::new();
+        t.write("/data/a/f1", &[1u8; 9000]);
+        t.write("/data/a/sub/f2", &[1u8; 20_000]);
+        t.write("/data/b/f3", &[1u8; 4000]);
+        t.write("/data/c", &[1u8; 70_000]);
+        let env = t.env();
+        let paths: Vec<PathBuf> = ["/data/c", "/data/a", "/nope", "/data/b"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let many = disk_usage_many(&env, &paths);
+        let seq: Vec<DiskUsage> = paths.iter().map(|p| disk_usage(&env, p)).collect();
+        assert_eq!(many, seq);
+        assert_eq!(many[2].errors, 1);
+        assert!(disk_usage_many(&env, &[]).is_empty());
     }
 
     #[test]

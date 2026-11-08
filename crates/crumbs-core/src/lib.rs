@@ -1,3 +1,4 @@
+pub mod bloat;
 pub mod command;
 pub mod config;
 pub mod desktop;
