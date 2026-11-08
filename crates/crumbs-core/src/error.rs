@@ -12,3 +12,10 @@ pub enum CoreError {
     #[error("failed to parse {what}: {message}")]
     Parse { what: String, message: String },
 }
+
+/// A failure from one app source, reported alongside partial results.
+#[derive(serde::Serialize, Debug, Clone, PartialEq)]
+pub struct SourceError {
+    pub source: crate::model::SourceKind,
+    pub message: String,
+}

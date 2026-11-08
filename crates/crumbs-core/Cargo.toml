@@ -17,4 +17,5 @@ tempfile = { version = "3.27.0", optional = true }
 thiserror = "2.0.21"
 
 [dev-dependencies]
+serde_json = "1.0.154"
 tempfile = "3.27.0"
