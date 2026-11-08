@@ -74,16 +74,16 @@ fn unmanaged_app(
         return None;
     }
     let real = resolve_program(env, program)?;
-    if real.canonicalize().is_ok_and(|c| file_is_appimage(&c)) {
+    // Fail closed: a program we cannot resolve or read might be an AppImage.
+    let canon = real.canonicalize().ok()?;
+    if file_is_appimage(&canon)? {
         return None;
     }
     let in_system = env.unsys(&real);
     if owned.contains(&in_system) {
         return None;
     }
-    if let Ok(canon) = real.canonicalize()
-        && owned.contains(&env.unsys(&canon))
-    {
+    if owned.contains(&env.unsys(&canon)) {
         return None;
     }
 
@@ -108,13 +108,14 @@ fn unmanaged_app(
     Some(app)
 }
 
-fn file_is_appimage(path: &Path) -> bool {
+/// `None` when the file's first bytes cannot be read.
+fn file_is_appimage(path: &Path) -> Option<bool> {
     use std::io::Read;
     let mut head = Vec::with_capacity(16);
     std::fs::File::open(path)
         .and_then(|f| f.take(16).read_to_end(&mut head))
-        .is_ok()
-        && is_appimage(&head)
+        .ok()?;
+    Some(is_appimage(&head))
 }
 
 /// `/opt/<first component>` for programs under `/opt/`, else the program itself.
@@ -289,6 +290,22 @@ mod tests {
         t.desktop(
             "/home/user/.local/share/applications/foo.desktop",
             &entry("~/.local/share/foo/appimage"),
+        );
+        assert!(run(&t, &[], &[]).apps.is_empty());
+    }
+
+    #[test]
+    fn unreadable_program_not_unmanaged() {
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::geteuid().is_root() {
+            return; // root can read everything
+        }
+        let t = FixtureTree::new();
+        let p = t.write_exec("/opt/foo/foo", b"");
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        t.desktop(
+            "/home/user/.local/share/applications/foo.desktop",
+            &entry("/opt/foo/foo"),
         );
         assert!(run(&t, &[], &[]).apps.is_empty());
     }

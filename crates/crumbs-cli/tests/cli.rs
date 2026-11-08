@@ -132,10 +132,29 @@ fn apps_show_ambiguous_exit_2() {
         .stderr(
             predicate::str::contains("'FIREFOX' matches several apps:")
                 .and(predicate::str::contains("pacman:firefox"))
-                .and(predicate::str::contains("flatpak:org.mozilla.firefox"))
                 .and(predicate::str::contains(
-                    "appimage:Firefox-1.0-x86_64.AppImage",
+                    "flatpak:system/org.mozilla.firefox",
+                ))
+                .and(predicate::str::contains(
+                    "appimage:~/Applications/Firefox-1.0-x86_64.AppImage",
                 )),
+        );
+}
+
+#[test]
+fn apps_show_same_flatpak_in_both_installations_is_ambiguous() {
+    let t = fixture(
+        "#!/bin/sh\nprintf 'org.x.Y\\tY\\t1.0\\tuser\\t1 MB\\norg.x.Y\\tY\\t1.0\\tsystem\\t1 MB\\n'\n",
+    );
+    crumbs(&t)
+        .args(["apps", "show", "org.x.Y"])
+        .assert()
+        .code(2)
+        .stdout("")
+        .stderr(
+            predicate::str::contains("'org.x.Y' matches several apps:")
+                .and(predicate::str::contains("flatpak:user/org.x.Y"))
+                .and(predicate::str::contains("flatpak:system/org.x.Y")),
         );
 }
 

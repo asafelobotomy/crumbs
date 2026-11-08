@@ -3,11 +3,11 @@ source: crates/crumbs-cli/tests/cli.rs
 expression: text
 ---
 NAME        VERSION     SOURCE     SIZE       ID
-DOSBox-X    2026.10.01  flatpak    49.0 MiB   flatpak:com.dosbox_x.DOSBox-X
+DOSBox-X    2026.10.01  flatpak    49.0 MiB   flatpak:system/com.dosbox_x.DOSBox-X
 Firefox     159.0.1-1   pacman     286.1 MiB  pacman:firefox
-OBS Studio  33.0.0      flatpak    566.0 MiB  flatpak:com.obsproject.Studio
-Tool        1.0         appimage   256 B      appimage:Tool-1.0-x86_64.AppImage
-xemu        0.8.136     flatpak    32.8 MiB   flatpak:app.xemu.xemu
+OBS Studio  33.0.0      flatpak    566.0 MiB  flatpak:system/com.obsproject.Studio
+Tool        1.0         appimage   256 B      appimage:~/Applications/Tool-1.0-x86_64.AppImage
+xemu        0.8.136     flatpak    32.8 MiB   flatpak:user/app.xemu.xemu
 Zed Foo     -           unmanaged  -          unmanaged:foo.desktop
 
 6 apps

@@ -290,7 +290,7 @@ mod tests {
             ids,
             [
                 "pacman:firefox",
-                "appimage:Tool-1.0-x86_64.AppImage",
+                "appimage:~/Applications/Tool-1.0-x86_64.AppImage",
                 "unmanaged:foo.desktop"
             ]
         );
@@ -337,7 +337,7 @@ mod tests {
         );
         let inv = discover(&t.env(), &FakeRunner::new(), &ListOptions::default());
         let ids: Vec<_> = inv.apps.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(ids, ["appimage:Foo-1.0-x86_64.AppImage"]);
+        assert_eq!(ids, ["appimage:~/Applications/Foo-1.0-x86_64.AppImage"]);
         assert_eq!(inv.apps[0].desktop_ids, ["foo.desktop"]);
     }
 
@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(found(find_app(&inv, "firefox")).id, "pacman:firefox");
         assert_eq!(
             found(find_app(&inv, "org.mozilla.firefox")).id,
-            "flatpak:org.mozilla.firefox"
+            "flatpak:system/org.mozilla.firefox"
         );
         assert_eq!(
             found(find_app(&inv, "org.mozilla.firefox.desktop")).source,

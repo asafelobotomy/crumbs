@@ -151,6 +151,16 @@ impl Env {
     }
 }
 
+/// Display form of an in-system path: `~/<rest>` under the in-system home
+/// (`~` for the home itself), otherwise the absolute path.
+pub fn display_path(env: &Env, in_system: &Path) -> String {
+    match in_system.strip_prefix(env.unsys(&env.home)) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => in_system.to_string_lossy().into_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +207,24 @@ mod tests {
     fn distro_missing_is_unknown() {
         let t = FixtureTree::new();
         assert_eq!(t.env().distro.id, "unknown");
+    }
+
+    #[test]
+    fn display_path_home_and_absolute() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        assert_eq!(display_path(&env, Path::new("/home/user")), "~");
+        assert_eq!(
+            display_path(&env, Path::new("/home/user/Applications/X.AppImage")),
+            "~/Applications/X.AppImage"
+        );
+        assert_eq!(
+            display_path(&env, Path::new("/opt/x/X.AppImage")),
+            "/opt/x/X.AppImage"
+        );
+        assert_eq!(
+            display_path(&env, Path::new("/home/username/X")),
+            "/home/username/X"
+        );
     }
 }

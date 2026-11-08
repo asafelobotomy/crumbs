@@ -65,11 +65,13 @@ impl AppSource for FlatpakSource {
             }
             app.version = Some(cols[2]).filter(|v| !v.is_empty()).map(String::from);
             let (installation, location) = if cols[3] == "user" {
+                app.id = format!("flatpak:user/{id}");
                 (
                     Installation::User,
                     cx.env.unsys(&cx.env.data_home.join("flatpak/app").join(id)),
                 )
             } else {
+                app.id = format!("flatpak:system/{id}");
                 (
                     Installation::System,
                     std::path::Path::new(SYSTEM_APP_DIR).join(id),
@@ -159,7 +161,7 @@ com.obsproject.Studio\tOBS Studio\t33.0.0\tsystem\t593.5 MB\n";
         assert_eq!(l.apps.len(), 3);
 
         let xemu = &l.apps[0];
-        assert_eq!(xemu.id, "flatpak:app.xemu.xemu");
+        assert_eq!(xemu.id, "flatpak:user/app.xemu.xemu");
         assert_eq!(xemu.name, "app.xemu.xemu");
         assert_eq!(xemu.rdns_id.as_deref(), Some("app.xemu.xemu"));
         assert_eq!(xemu.display_name, "xemu");
@@ -253,5 +255,16 @@ com.obsproject.Studio\tOBS Studio\t33.0.0\tsystem\t593.5 MB\n";
         t.write_exec("/usr/bin/flatpak", b"");
         assert!(FlatpakSource.available(&t.env()));
         assert!(!FlatpakSource.is_package_db());
+    }
+
+    #[test]
+    fn flatpak_ids_include_installation() {
+        let t = installed();
+        let rows = "org.x.Y\tY\t1\tuser\t1 MB\norg.x.Y\tY\t1\tsystem\t1 MB\n";
+        let runner = FakeRunner::new().on("flatpak", &ARGS, out(0, rows, ""));
+        let l = list_with(&t, &runner);
+        let ids: Vec<_> = l.apps.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["flatpak:user/org.x.Y", "flatpak:system/org.x.Y"]);
+        assert!(l.apps.iter().all(|a| a.name == "org.x.Y"));
     }
 }

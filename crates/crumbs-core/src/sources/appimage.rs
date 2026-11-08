@@ -3,7 +3,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::desktop::{DesktopEntry, exec_basename};
-use crate::env::Env;
+use crate::env::{Env, display_path};
 use crate::error::CoreError;
 use crate::model::{App, Installation, SourceKind};
 
@@ -172,6 +172,7 @@ fn build_app(env: &Env, desktop: &[&DesktopEntry], file_name: &str, path: &Path,
     let norm_name = normalize_name(&base);
 
     let mut app = App::new(SourceKind::AppImage, file_name);
+    app.id = format!("appimage:{}", display_path(env, &location));
     app.installation = Installation::User;
     app.install_size = Some(len);
     app.has_gui = true;
@@ -201,9 +202,12 @@ fn build_app(env: &Env, desktop: &[&DesktopEntry], file_name: &str, path: &Path,
     app
 }
 
-/// True when the bytes start with an ELF header carrying the AppImage type-2 magic.
+/// True when the bytes start with an ELF header carrying the AppImage type-1
+/// (`AI\x01`) or type-2 (`AI\x02`) magic.
 pub fn is_appimage(bytes: &[u8]) -> bool {
-    bytes.len() >= 11 && bytes[0..4] == *b"\x7fELF" && bytes[8..11] == *b"AI\x02"
+    bytes.len() >= 11
+        && bytes[0..4] == *b"\x7fELF"
+        && (bytes[8..11] == *b"AI\x02" || bytes[8..11] == *b"AI\x01")
 }
 
 /// Splits an AppImage file name into a name and an optional version.
@@ -320,7 +324,10 @@ mod tests {
         let l = list(&t);
         assert_eq!(l.apps.len(), 1);
         let a = &l.apps[0];
-        assert_eq!(a.id, "appimage:GutCheck-0.19.0-x86_64.AppImage");
+        assert_eq!(
+            a.id,
+            "appimage:~/Applications/GutCheck-0.19.0-x86_64.AppImage"
+        );
         assert_eq!(a.display_name, "GutCheck");
         assert_eq!(a.version.as_deref(), Some("0.19.0"));
         assert_eq!(a.installation, Installation::User);
@@ -351,7 +358,7 @@ mod tests {
         );
         let l = list(&t);
         let ids: Vec<_> = l.apps.iter().map(|a| a.id.as_str()).collect();
-        assert_eq!(ids, ["appimage:real.AppImage"]);
+        assert_eq!(ids, ["appimage:~/Applications/real.AppImage"]);
     }
 
     #[test]
@@ -364,7 +371,13 @@ mod tests {
         let l = list(&t);
         let mut ids: Vec<_> = l.apps.iter().map(|a| a.id.as_str()).collect();
         ids.sort();
-        assert_eq!(ids, ["appimage:noext3", "appimage:yes.AppImage"]);
+        assert_eq!(
+            ids,
+            [
+                "appimage:~/.local/bin/yes.AppImage",
+                "appimage:~/opt/noext3"
+            ]
+        );
     }
 
     #[test]
@@ -447,7 +460,7 @@ mod tests {
         t.appimage("/home/user/Software/Baz.AppImage");
         let l = list(&t);
         assert_eq!(l.apps.len(), 1);
-        assert_eq!(l.apps[0].id, "appimage:Baz.AppImage");
+        assert_eq!(l.apps[0].id, "appimage:~/Software/Baz.AppImage");
     }
 
     #[test]
@@ -459,5 +472,31 @@ mod tests {
         );
         t.appimage("/home/user/Applications/Baz.AppImage");
         assert_eq!(list(&t).apps.len(), 1);
+    }
+
+    #[test]
+    fn appimage_ids_include_path() {
+        let t = FixtureTree::new();
+        t.appimage("/home/user/Applications/X-1.0-x86_64.AppImage");
+        t.appimage("/home/user/Downloads/X-1.0-x86_64.AppImage");
+        let l = list(&t);
+        let ids: Vec<_> = l.apps.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "appimage:~/Applications/X-1.0-x86_64.AppImage",
+                "appimage:~/Downloads/X-1.0-x86_64.AppImage"
+            ]
+        );
+        assert_eq!(l.apps[0].name, "X-1.0-x86_64.AppImage");
+    }
+
+    #[test]
+    fn type1_magic_detected() {
+        let mut b = vec![0x7f, b'E', b'L', b'F', 0, 0, 0, 0, b'A', b'I', 0x01];
+        b.resize(16, 0);
+        assert!(is_appimage(&b));
+        b[10] = 0x03;
+        assert!(!is_appimage(&b));
     }
 }
