@@ -10,6 +10,7 @@ use crate::desktop::discover_desktop_entries;
 use crate::env::Env;
 use crate::error::SourceError;
 use crate::model::{App, SourceKind};
+use crate::ownership::OwnedIndex;
 use crate::sources::appimage::{AppImageSource, normalize_name};
 use crate::sources::flatpak::FlatpakSource;
 use crate::sources::pacman::PacmanSource;
@@ -29,6 +30,9 @@ pub struct Inventory {
     pub apps: Vec<App>,
     pub statuses: Vec<SourceStatus>,
     pub errors: Vec<SourceError>,
+    /// Package-owned files and directories; not part of the JSON output.
+    #[serde(skip)]
+    pub owned: OwnedIndex,
 }
 
 pub fn default_sources() -> Vec<Box<dyn AppSource>> {
@@ -68,6 +72,7 @@ pub fn discover(
     let mut statuses = Vec::new();
     let mut errors = Vec::new();
     let mut owned = HashSet::new();
+    let mut owned_dirs = HashSet::new();
     let mut claimed = HashSet::new();
     let mut package_db_listed = false;
     let mut package_db_incomplete = false;
@@ -99,6 +104,7 @@ pub fn discover(
                     skipped_reason: None,
                 });
                 owned.extend(listing.owned_paths);
+                owned_dirs.extend(listing.owned_dirs);
                 claimed.extend(listing.claimed_desktop_ids);
                 errors.extend(listing.errors);
                 apps.extend(listing.apps);
@@ -158,6 +164,7 @@ pub fn discover(
         apps,
         statuses,
         errors,
+        owned: OwnedIndex::new(owned, owned_dirs.into_iter().collect()),
     }
 }
 
@@ -266,6 +273,7 @@ mod tests {
             apps,
             statuses: Vec::new(),
             errors: Vec::new(),
+            owned: Default::default(),
         }
     }
 

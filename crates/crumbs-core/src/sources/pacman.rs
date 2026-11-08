@@ -9,7 +9,7 @@ use crate::model::{App, SourceKind};
 
 use super::{AppSource, SourceContext, SourceListing};
 
-const DB_DIR: &str = "/var/lib/pacman/local";
+pub(crate) const DB_DIR: &str = "/var/lib/pacman/local";
 const APPLICATIONS_DIR: &str = "/usr/share/applications/";
 
 pub struct PacmanSource;
@@ -57,14 +57,18 @@ impl AppSource for PacmanSource {
         for dir in dirs {
             // Ownership must be complete even when desc is unusable.
             let files = match fs::read(dir.join("files")) {
-                Ok(b) => owned_files(&String::from_utf8_lossy(&b)),
+                Ok(b) => owned_entries(&String::from_utf8_lossy(&b)),
                 Err(e) => {
                     listing
                         .errors
                         .push(pkg_error(&dir, format!("cannot read files: {e}")));
-                    Vec::new()
+                    (Vec::new(), Vec::new())
                 }
             };
+            let (files, pkg_dirs) = files;
+            listing
+                .owned_dirs
+                .extend(pkg_dirs.into_iter().map(PathBuf::from));
             let desc_path = dir.join("desc");
             let desc = match fs::read(&desc_path) {
                 Ok(b) => parse_sections(&String::from_utf8_lossy(&b)),
@@ -170,15 +174,18 @@ pub(crate) fn first(sections: &HashMap<String, Vec<String>>, key: &str) -> Optio
         .filter(|v| !v.is_empty())
 }
 
-/// In-system absolute file paths from a `files` listing; directories dropped.
-fn owned_files(text: &str) -> Vec<String> {
-    parse_sections(text)
-        .remove("FILES")
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|l| !l.ends_with('/'))
-        .map(|l| format!("/{l}"))
-        .collect()
+/// In-system absolute `(files, directories)` from a `files` listing.
+/// Directory lines lose their trailing `/`.
+pub(crate) fn owned_entries(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    for l in parse_sections(text).remove("FILES").unwrap_or_default() {
+        match l.strip_suffix('/') {
+            Some(d) => dirs.push(format!("/{d}")),
+            None => files.push(format!("/{l}")),
+        }
+    }
+    (files, dirs)
 }
 
 #[cfg(test)]
@@ -292,6 +299,8 @@ mod tests {
         assert!(l.owned_paths.contains(&PathBuf::from("/usr/bin/firefox")));
         assert!(!l.owned_paths.contains(&PathBuf::from("/usr/")));
         assert!(!l.owned_paths.contains(&PathBuf::from("/usr")));
+        assert!(l.owned_dirs.contains(&PathBuf::from("/usr")));
+        assert!(l.owned_dirs.contains(&PathBuf::from("/usr/bin")));
     }
 
     #[test]

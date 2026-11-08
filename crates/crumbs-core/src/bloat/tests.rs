@@ -14,6 +14,7 @@ fn inv(apps: Vec<App>) -> Inventory {
         apps,
         statuses: vec![],
         errors: vec![],
+        owned: Default::default(),
     }
 }
 

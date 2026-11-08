@@ -18,6 +18,7 @@ fn inv(apps: Vec<App>) -> Inventory {
         apps,
         statuses: Vec::new(),
         errors: Vec::new(),
+        owned: Default::default(),
     }
 }
 
