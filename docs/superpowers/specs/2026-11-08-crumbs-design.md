@@ -419,9 +419,17 @@ Each milestone gets its own implementation plan and ends in a working, tested CL
    `uninstall --leftovers-only`, AppImage uninstall, `orphans`, `history`,
    `restore`. — done
 3. **Bloat (user level)** — size module, user scanners, `scan`, `clean --user`. — done
-4. **Privilege & system** — privilege module, simulations, package-manager
-   uninstall, system scanners, `clean --system`.
+4. **Privilege & system** — privilege module, simulations, pacman and
+   Flatpak uninstall through one escalation prompt, system scanners
+   (`pkg-cache`, `orphan-pkgs`, `journal`, `coredumps`, `system-temp`,
+   `flatpak-unused-system`), `clean --system`. apt and dnf variants of the
+   package categories move to milestone 5 with their sources. — done
+   - **4b. System leftovers and unmanaged removal** — `/etc/<name>` and
+     `/opt/<name>` leftovers not owned by any package, path-based removal of
+     unmanaged apps, and the owned-directory database both need. They are the
+     riskiest deletions and get their own plan; scope in
+     `docs/superpowers/notes/m4b-scope.md`.
 5. **Cross-distro** — dpkg, rpm, Snap sources; distro CI matrix.
 6. **Packaging** — musl build, AppImage, AUR, deb, rpm, release workflow.
 
-The GUI follows as a separate spec once milestone 4 is complete.
+The GUI follows as a separate spec once milestones 4 and 4b are complete.
