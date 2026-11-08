@@ -8,6 +8,7 @@ pub mod inventory;
 pub mod model;
 pub mod privilege;
 pub mod safety;
+pub mod size;
 pub mod sources;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
