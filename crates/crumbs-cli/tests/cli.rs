@@ -1197,10 +1197,14 @@ fn dotfile_kind() {
 }
 
 #[test]
-fn keep_data_keeps_launchers() {
+fn keep_data_removes_own_launchers_with_appimage() {
     let t = fixture(FLATPAK_OK);
     gutcheck_launcher(&t);
-    t.write("/home/user/.cache/GutCheck/blob", b"x");
+    // Someone else's launcher that mentions the app stays.
+    t.desktop(
+        "/home/user/.local/share/applications/gutcheck-helper.desktop",
+        "[Desktop Entry]\nType=Application\nName=GutCheck Helper\nExec=/usr/bin/gutcheck-helper\n",
+    );
     let out = crumbs(&t)
         .args(["uninstall", "GutCheck", "--keep-data", "--yes"])
         .output()
@@ -1209,20 +1213,38 @@ fn keep_data_keeps_launchers() {
     assert_eq!(out.status.code(), Some(0), "{stdout}");
     assert!(!real(&t, "/home/user/.cache/GutCheck").exists());
     assert!(
-        real(
+        !real(
+            &t,
+            "/home/user/Applications/GutCheck-0.19.0-x86_64.AppImage"
+        )
+        .exists()
+    );
+    // Nothing is left pointing at the removed file.
+    assert!(
+        !real(
             &t,
             "/home/user/.local/share/applications/appofholding-gutcheck.desktop"
         )
-        .exists()
+        .exists(),
+        "{stdout}"
     );
     assert!(
-        real(
+        !real(
             &t,
             "/home/user/.local/share/icons/hicolor/512x512/apps/appofholding-gutcheck.png"
         )
+        .exists(),
+        "{stdout}"
+    );
+    // Data and settings stay.
+    assert!(real(&t, "/home/user/.config/GutCheck/settings.json").exists());
+    assert!(
+        real(
+            &t,
+            "/home/user/.local/share/applications/gutcheck-helper.desktop"
+        )
         .exists()
     );
-    assert!(!stdout.contains("appofholding-gutcheck"), "{stdout}");
 }
 
 #[test]

@@ -25,7 +25,8 @@ pub struct UninstallArgs {
     /// Keep the app itself; remove only its leftovers
     #[arg(long)]
     pub leftovers_only: bool,
-    /// Keep data and settings; remove only caches
+    /// Keep data and settings; remove only caches (and, with the AppImage
+    /// file, its own launchers and icons)
     #[arg(long)]
     pub keep_data: bool,
     /// Include low-confidence leftovers
@@ -80,17 +81,14 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
     }
     let opts = PlanOptions {
         permanent: args.act.permanent,
-        keep_data: args.keep_data,
+        // `--keep-data` is applied to the findings below, before choosing.
+        keep_data: false,
         leftovers_only: args.leftovers_only,
     };
     let mut targets = Vec::new();
     for app in apps {
         let mut found = plannable(find_leftovers(&cx.idx, app, args.show_low));
-        // The launchers and icons stay with an app that stays, and with
-        // `--keep-data` they are not caches.
-        if args.leftovers_only || args.keep_data {
-            found.retain(|f| !is_own_launcher(env, app, f));
-        }
+        found.retain(|f| keeps(env, app, f, args));
         let prompt_text = format!("Leftovers of {} to remove", app.display_name);
         let Some(chosen) = choose(env, &prompt_text, found, args.act.interactive, |f| {
             f.preselected
@@ -106,6 +104,22 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
     }
     drop_overlaps(&mut targets);
     apply(env, &cx.cfg, &cx.errors(), out, &targets, &args.act)
+}
+
+/// Whether a finding may be planned. The launchers and icons stay with an
+/// app that stays (`--leftovers-only`). `--keep-data` keeps everything but
+/// caches; when the AppImage file itself goes, its own launchers and icons
+/// go with it so nothing is left pointing at a removed file.
+fn keeps(env: &Env, app: &App, f: &Finding, args: &UninstallArgs) -> bool {
+    if args.leftovers_only {
+        return !is_own_launcher(env, app, f) && (!args.keep_data || f.kind == FindingKind::Cache);
+    }
+    if args.keep_data {
+        return f.kind == FindingKind::Cache
+            || (matches!(f.kind, FindingKind::DesktopEntry | FindingKind::Icon)
+                && is_own_launcher(env, app, f));
+    }
+    true
 }
 
 /// Whether an AppImage's own file passes the same checks the executor runs
