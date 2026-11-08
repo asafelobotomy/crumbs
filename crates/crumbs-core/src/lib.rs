@@ -5,6 +5,7 @@ pub mod doctor;
 pub mod env;
 pub mod error;
 pub mod inventory;
+pub mod leftovers;
 pub mod model;
 pub mod privilege;
 pub mod rules;
