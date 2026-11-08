@@ -779,3 +779,27 @@ fn orphans_never_preselected() {
         [Confidence::High, Confidence::Medium, Confidence::Low]
     );
 }
+
+#[test]
+fn parent_of_live_rule_path_not_orphan() {
+    let t = FixtureTree::new();
+    t.mkdir("/home/user/.mozilla/firefox/profile");
+    let fs = orphans(&t, vec![pacman("firefox", &["firefox"])], true);
+    assert!(at(&fs, ".mozilla").is_none(), "{fs:#?}");
+}
+
+#[test]
+fn live_rule_path_unclaimed_by_name_not_orphan() {
+    let t = FixtureTree::new();
+    t.mkdir("/home/user/.config/BraveSoftware/Brave-Browser");
+    let fs = orphans(&t, vec![pacman("brave-bin", &["brave"])], true);
+    assert!(at(&fs, ".config/BraveSoftware").is_none(), "{fs:#?}");
+}
+
+#[test]
+fn path_live_for_one_rule_and_gone_for_another_not_orphan() {
+    let t = FixtureTree::new();
+    t.mkdir("/home/user/.vscode-oss/extensions");
+    let fs = orphans(&t, vec![pacman("vscodium", &["codium"])], true);
+    assert!(at(&fs, ".vscode-oss").is_none(), "{fs:#?}");
+}

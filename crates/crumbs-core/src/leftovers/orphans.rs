@@ -123,6 +123,16 @@ pub fn find_orphans(idx: &LeftoverIndex, show_low: bool) -> Vec<Finding> {
         }
     }
 
+    // Paths an installed app owns: a candidate holding one of them (a shared
+    // parent such as `~/.mozilla`) must stay, or trashing it takes them too.
+    let claimed: Vec<&Path> = idx
+        .candidates()
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| idx.matched_by_any(*i))
+        .map(|(_, c)| c.path.as_path())
+        .collect();
+
     let mut out: Vec<Finding> = Vec::new();
     for (i, c) in idx.candidates().iter().enumerate() {
         let eligible = matches!(
@@ -140,7 +150,10 @@ pub fn find_orphans(idx: &LeftoverIndex, show_low: bool) -> Vec<Finding> {
         if !eligible
             || idx.matched_by_any(i)
             || is_ignored(env, c)
-            || live.iter().any(|p| c.path.starts_with(p))
+            || live
+                .iter()
+                .any(|p| c.path.starts_with(p) || p.starts_with(&c.path))
+            || claimed.iter().any(|p| p.starts_with(&c.path))
         {
             continue;
         }
