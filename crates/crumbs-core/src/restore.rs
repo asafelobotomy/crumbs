@@ -388,6 +388,7 @@ mod tests {
                 fingerprint: fingerprint(env, action.path().unwrap()).unwrap(),
                 scope: crate::safety::Scope::Home,
                 depends_on: None,
+                depends_on_plan: None,
                 reason: "test".into(),
                 action,
             })
@@ -812,6 +813,7 @@ mod tests {
                 },
                 scope: crate::safety::Scope::Home,
                 depends_on: None,
+                depends_on_plan: None,
                 reason: "test".into(),
             }],
             total_size: 0,
@@ -849,6 +851,7 @@ mod tests {
             },
             scope: crate::safety::Scope::Home,
             depends_on: None,
+            depends_on_plan: None,
             reason: "test".into(),
         };
         let plan = Plan {

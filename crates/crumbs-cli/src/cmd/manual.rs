@@ -82,6 +82,7 @@ mod tests {
             },
             scope,
             depends_on: None,
+            depends_on_plan: None,
             reason: String::new(),
         }
     }

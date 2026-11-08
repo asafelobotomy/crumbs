@@ -78,6 +78,11 @@ pub struct PlannedAction {
     /// first; the executor skips this action otherwise. Left out of the
     /// JSON when `None`.
     pub depends_on: Option<usize>,
+    /// `(plan index, action index)` of an action in an earlier plan of the
+    /// same run that covered this action's dependency (see the CLI's
+    /// `drop_overlaps`); [`execute_many`](crate::executor::execute_many)
+    /// skips this action unless that action succeeded. Not part of the JSON.
+    pub depends_on_plan: Option<(usize, usize)>,
     pub reason: String,
 }
 
@@ -159,6 +164,7 @@ pub fn build_plan(
                 fingerprint,
                 scope: Scope::Home,
                 depends_on: None,
+                depends_on_plan: None,
                 reason: REASON_APPIMAGE.into(),
             });
             skip_path = Some(location);
@@ -189,6 +195,7 @@ pub fn build_plan(
             fingerprint: f.fingerprint,
             scope: Scope::Home,
             depends_on: None,
+            depends_on_plan: None,
             reason: f.reason.clone(),
         });
     }
@@ -258,6 +265,7 @@ pub fn build_clean_plan(
                 fingerprint: Fingerprint::default(),
                 scope: item.scope,
                 depends_on: None,
+                depends_on_plan: None,
                 reason,
             });
             continue;
@@ -280,6 +288,7 @@ pub fn build_clean_plan(
             fingerprint,
             scope: item.scope,
             depends_on: None,
+            depends_on_plan: None,
             reason: reason.clone(),
         });
         for (extra, fp) in &item.extra_paths {
@@ -291,6 +300,7 @@ pub fn build_clean_plan(
                 fingerprint: *fp,
                 scope: item.scope,
                 depends_on: Some(main),
+                depends_on_plan: None,
                 reason: reason.clone(),
             });
         }
@@ -780,6 +790,7 @@ mod tests {
             },
             scope,
             depends_on: Some(0),
+            depends_on_plan: None,
             reason: "r".into(),
         };
         let cmd = pa(

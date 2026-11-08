@@ -1,6 +1,6 @@
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -117,6 +117,8 @@ pub fn append(env: &Env, entries: &[HistoryEntry]) -> Result<(), CoreError> {
         .mode(0o700)
         .create(&dir)
         .map_err(|e| io_err(&dir, e))?;
+    // Warnings go out through `harden_files`, which the CLI calls at start-up.
+    let _ = tighten(&dir, &path);
     let mut buf = Vec::new();
     for e in entries {
         serde_json::to_writer(&mut buf, e).map_err(|e| CoreError::Parse {
@@ -125,14 +127,65 @@ pub fn append(env: &Env, entries: &[HistoryEntry]) -> Result<(), CoreError> {
         })?;
         buf.push(b'\n');
     }
-    let mut f = OpenOptions::new()
+    // Never follows a symlink: a planted link must not redirect the log.
+    let f = OpenOptions::new()
+        .read(true)
         .append(true)
         .create(true)
         .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(&path)
         .map_err(|e| io_err(&path, e))?;
-    f.write_all(&buf).map_err(|e| io_err(&path, e))?;
+    // A torn last line (no newline) must not swallow the next entry.
+    let len = f.metadata().map_err(|e| io_err(&path, e))?.len();
+    if len > 0 {
+        let mut last = [0u8; 1];
+        f.read_exact_at(&mut last, len - 1)
+            .map_err(|e| io_err(&path, e))?;
+        if last[0] != b'\n' {
+            buf.insert(0, b'\n');
+        }
+    }
+    (&f).write_all(&buf).map_err(|e| io_err(&path, e))?;
     f.sync_data().map_err(|e| io_err(&path, e))
+}
+
+/// Tightens the history directory and file to `0o700` / `0o600` when they
+/// carry more permission bits. Returns what was changed, one message each,
+/// for the caller to show as warnings. A symlink is left alone (opening
+/// it for append fails instead).
+fn tighten(dir: &Path, file: &Path) -> Vec<String> {
+    let mut changed = Vec::new();
+    for (p, want) in [(dir, 0o700u32), (file, 0o600u32)] {
+        let Ok(m) = fs::symlink_metadata(p) else {
+            continue;
+        };
+        if m.file_type().is_symlink() {
+            continue;
+        }
+        let mode = m.mode() & 0o7777;
+        if mode & !want != 0 {
+            match fs::set_permissions(p, fs::Permissions::from_mode(mode & want)) {
+                Ok(()) => changed.push(format!(
+                    "{} had mode {mode:o}; tightened to {:o}",
+                    p.display(),
+                    mode & want
+                )),
+                Err(e) => changed.push(format!(
+                    "{} has mode {mode:o} and could not be tightened: {e}",
+                    p.display()
+                )),
+            }
+        }
+    }
+    changed
+}
+
+/// Tightens loose modes on the history directory and file (see `tighten`)
+/// and returns a message for each change, to be shown as
+/// `warning: history: <message>`.
+pub fn harden_files(env: &Env) -> Vec<String> {
+    tighten(&env.state_home.join("crumbs"), &history_path(env))
 }
 
 /// Entries in file order plus the number of unparseable (non-blank) lines.
@@ -207,6 +260,54 @@ mod tests {
         let text = fs::read_to_string(dir.join("history.jsonl")).unwrap();
         assert_eq!(text.lines().count(), 3);
         assert!(text.contains("\"action\":\"trash\""));
+    }
+
+    #[test]
+    fn history_refuses_symlink() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        let dir = env.state_home.join("crumbs");
+        fs::create_dir_all(&dir).unwrap();
+        let target = t.write("home/user/elsewhere", b"");
+        std::os::unix::fs::symlink(&target, dir.join("history.jsonl")).unwrap();
+        assert!(append(&env, &[entry(0, "1")]).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"");
+    }
+
+    #[test]
+    fn history_tightens_modes() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        append(&env, &[entry(0, "1")]).unwrap();
+        let dir = env.state_home.join("crumbs");
+        let file = dir.join("history.jsonl");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        let warnings = harden_files(&env);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&file), 0o600);
+        assert!(harden_files(&env).is_empty());
+        // `append` alone tightens too.
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o666)).unwrap();
+        append(&env, &[entry(1, "1")]).unwrap();
+        assert_eq!(mode(&file), 0o600);
+    }
+
+    #[test]
+    fn history_repairs_torn_line() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        append(&env, &[entry(0, "1")]).unwrap();
+        let p = env.state_home.join("crumbs/history.jsonl");
+        let mut text = fs::read_to_string(&p).unwrap();
+        text.push_str("{\"id\":\"torn");
+        fs::write(&p, text).unwrap();
+        append(&env, &[entry(1, "1")]).unwrap();
+        let (got, skipped) = read_history(&env).unwrap();
+        assert_eq!(got, vec![entry(0, "1"), entry(1, "1")]);
+        assert_eq!(skipped, 1);
     }
 
     #[test]

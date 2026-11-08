@@ -262,21 +262,35 @@ pub fn drop_overlaps(targets: &mut [Target]) {
         let mut kept: Vec<PlannedAction> = Vec::with_capacity(t.plan.actions.len());
         // Old index -> new index of the actions that stay.
         let mut new_index: Vec<Option<usize>> = Vec::with_capacity(t.plan.actions.len());
+        // Old index -> (plan, action) of the earlier action that covers a
+        // dropped one.
+        let mut cover: Vec<Option<(usize, usize)>> = Vec::with_capacity(t.plan.actions.len());
         for mut pa in t.plan.actions.drain(..) {
             // A command has no filesystem path to overlap with.
             let path = pa.action.path().map(Path::to_path_buf);
-            let covered = path.as_ref().is_some_and(|path| {
-                earlier
-                    .iter()
-                    .flat_map(|e| &e.plan.actions)
-                    .any(|e| e.action.path().is_some_and(|ep| path.starts_with(ep)))
+            let covered_by = path.as_ref().and_then(|path| {
+                earlier.iter().enumerate().find_map(|(ti, e)| {
+                    e.plan
+                        .actions
+                        .iter()
+                        .position(|a| a.action.path().is_some_and(|ep| path.starts_with(ep)))
+                        .map(|ai| (ti, ai))
+                })
             });
-            if !covered {
-                // A dropped dependency was covered by an earlier plan, which
-                // runs first in the batch, so there is nothing to wait for.
-                pa.depends_on = pa
-                    .depends_on
-                    .and_then(|d| new_index.get(d).copied().flatten());
+            cover.push(covered_by);
+            if covered_by.is_none() {
+                // A dependency dropped because an earlier plan covers it is
+                // waited for there: the executor skips this action if that
+                // cover failed.
+                if let Some(d) = pa.depends_on {
+                    match new_index.get(d).copied().flatten() {
+                        Some(n) => pa.depends_on = Some(n),
+                        None => {
+                            pa.depends_on = None;
+                            pa.depends_on_plan = cover.get(d).copied().flatten();
+                        }
+                    }
+                }
                 new_index.push(Some(kept.len()));
                 kept.push(pa);
                 continue;
@@ -746,6 +760,7 @@ mod tests {
             },
             scope: Scope::Home,
             depends_on: None,
+            depends_on_plan: None,
             reason: String::new(),
         }
     }
@@ -871,8 +886,14 @@ mod tests {
         ];
         drop_overlaps(&mut ts);
         assert_eq!(ts[1].plan.actions.len(), 2);
-        assert!(ts[1].plan.actions.iter().all(|a| a.depends_on.is_none()));
+        // Their dependency went to the earlier plan's covering action: the
+        // executor waits for it there.
+        for a in &ts[1].plan.actions {
+            assert_eq!(a.depends_on, None);
+            assert_eq!(a.depends_on_plan, Some((0, 0)));
+        }
         assert_eq!(ts[2].plan.actions.len(), 2);
         assert_eq!(ts[2].plan.actions[1].depends_on, Some(0));
+        assert_eq!(ts[2].plan.actions[1].depends_on_plan, None);
     }
 }

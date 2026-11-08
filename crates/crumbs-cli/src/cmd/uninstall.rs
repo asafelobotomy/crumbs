@@ -149,6 +149,7 @@ fn attach_removal(plan: &mut Plan, removal: RemovalPlan) {
             },
             scope: Scope::Home,
             depends_on: k.checked_sub(1),
+            depends_on_plan: None,
             reason: REASON_APP.into(),
         })
         .collect();

@@ -233,13 +233,20 @@ fn run_plans(
     }
     let mut reports = Vec::with_capacity(plans.len());
     for (k, plan) in plans.iter().enumerate() {
-        let results = &mut results[k];
+        // Plans before `k` are finished; their results are what a
+        // cross-plan dependency waits on.
+        let (earlier, rest) = results.split_at_mut(k);
+        let Some(results) = rest.first_mut() else {
+            continue;
+        };
         for (i, pa) in plan.actions.iter().enumerate() {
             if results[i].is_some() {
                 continue;
             }
             let mut attempt = Attempt::new(action_target(&pa.action));
-            attempt.outcome = match skip_reason(env, plan, results, i, pa.depends_on) {
+            let skip = skip_reason(env, plan, results, i, pa.depends_on)
+                .or_else(|| cross_skip_reason(env, plans, earlier, pa.depends_on_plan));
+            attempt.outcome = match skip {
                 Some(reason) => Err(reason),
                 // A command has no path to verify; its program is resolved in
                 // the trusted directories right now instead.
@@ -260,7 +267,7 @@ fn run_plans(
         }
         reports.push(ExecReport {
             batch: batches[k].clone(),
-            results: std::mem::take(results).into_iter().flatten().collect(),
+            results: results.iter().flatten().cloned().collect(),
             freed: freed[k],
             escalation_failed: failed[k],
         });
@@ -335,12 +342,18 @@ fn run_privileged(
                 continue;
             }
             let mut attempt = Attempt::new(action_target(&pa.action));
-            let step = match pa.depends_on {
-                Some(dep) => Err(format!(
+            let step = match (pa.depends_on, pa.depends_on_plan) {
+                (Some(dep), _) => Err(format!(
                     "skipped: privileged actions run first and cannot wait for {}",
                     shown_action(env, plan, dep)
                 )),
-                None => privileged_step(env, cfg, pa, &mut attempt),
+                (None, Some((ep, ea))) => Err(format!(
+                    "skipped: privileged actions run first and cannot wait for {}",
+                    plans
+                        .get(ep)
+                        .map_or_else(|| format!("action {ea}"), |p| shown_action(env, p, ea))
+                )),
+                (None, None) => privileged_step(env, cfg, pa, &mut attempt),
             };
             match step {
                 Ok(step) => {
@@ -696,6 +709,31 @@ fn skip_reason(
     ))
 }
 
+/// Why an action must be skipped because the action of an earlier plan that
+/// covered its dependency (`(plan, action)`) did not succeed; `None` when it
+/// did, or there is no such dependency.
+fn cross_skip_reason(
+    env: &Env,
+    plans: &[&Plan],
+    earlier: &[Vec<Option<ActionResult>>],
+    depends_on_plan: Option<(usize, usize)>,
+) -> Option<String> {
+    let (ep, ea) = depends_on_plan?;
+    let ok = earlier
+        .get(ep)
+        .and_then(|r| r.get(ea))
+        .is_some_and(|r| r.as_ref().is_some_and(|r| r.ok));
+    if ok {
+        return None;
+    }
+    let shown = plans
+        .get(ep)
+        .map_or_else(|| format!("action {ea}"), |p| shown_action(env, p, ea));
+    Some(format!(
+        "skipped: {shown} was not removed (it covered this action)"
+    ))
+}
+
 /// The action at `index` as shown in a skip reason.
 fn shown_action(env: &Env, plan: &Plan, index: usize) -> String {
     plan.actions.get(index).map_or_else(
@@ -825,10 +863,21 @@ fn edit_file(
     Ok(Some(backup_in_system))
 }
 
-/// PIDs (sorted) of processes that look like `app`: the `exe` link's
-/// basename is one of `exec_names`, the `exe` link is the root-joined
-/// `location`, or `environ` holds `APPIMAGE=<location>`. Unreadable
-/// entries are skipped.
+/// Names too common to say which app a process belongs to: never matched
+/// by basename (exe, comm or argv0).
+const GENERIC_BASENAMES: [&str; 10] = [
+    "sh", "bash", "env", "python", "python3", "node", "electron", "java", "flatpak", "bwrap",
+];
+
+/// The kernel cuts `comm` at 15 bytes.
+const COMM_LEN: usize = 15;
+
+/// PIDs (sorted) of processes that look like `app`: the basename of the
+/// `exe` link (without the kernel's ` (deleted)` suffix), of `comm` or of
+/// `cmdline`'s first argument is one of `exec_names`; the `exe` link is the
+/// root-joined `location`; or `environ` holds `APPIMAGE=<location>`. Names
+/// in [`GENERIC_BASENAMES`] never match by basename. Unreadable entries
+/// are skipped.
 pub fn running_processes(env: &Env, app: &App) -> Vec<u32> {
     let Ok(dir) = fs::read_dir(env.sys_path(Path::new("/proc"))) else {
         return Vec::new();
@@ -843,7 +892,15 @@ pub fn running_processes(env: &Env, app: &App) -> Vec<u32> {
         .exec_names
         .iter()
         .filter_map(|e| Path::new(e).file_name())
+        .filter(|n| !GENERIC_BASENAMES.iter().any(|g| OsStr::new(g) == *n))
         .collect();
+    let named = |n: &OsStr| exec_names.contains(&n);
+    let comm_named = |comm: &[u8]| {
+        exec_names.iter().any(|n| {
+            let n = n.as_bytes();
+            n == comm || (n.len() > COMM_LEN && n[..COMM_LEN] == *comm)
+        })
+    };
     let mut pids: Vec<u32> = dir
         .flatten()
         .filter_map(|entry| {
@@ -855,18 +912,46 @@ pub fn running_processes(env: &Env, app: &App) -> Vec<u32> {
             let pid: u32 = name.parse().ok()?;
             let dir = entry.path();
             let by_exe = fs::read_link(dir.join("exe")).is_ok_and(|target| {
-                target.file_name().is_some_and(|n| exec_names.contains(&n))
+                let target = strip_deleted(&target);
+                target.file_name().is_some_and(named)
                     || location_real.as_deref() == Some(target.as_path())
             });
+            let by_comm = || {
+                fs::read(dir.join("comm")).is_ok_and(|c| {
+                    let c = c.strip_suffix(b"\n").unwrap_or(&c);
+                    !c.is_empty() && comm_named(c)
+                })
+            };
+            let by_argv0 = || {
+                fs::read(dir.join("cmdline")).is_ok_and(|c| {
+                    let argv0 = c.split(|&b| b == 0).next().unwrap_or_default();
+                    Path::new(OsStr::from_bytes(argv0))
+                        .file_name()
+                        .is_some_and(named)
+                })
+            };
             let by_env = || {
                 appimage_var.as_deref().is_some_and(|var| {
                     fs::read(dir.join("environ"))
                         .is_ok_and(|bytes| bytes.split(|&b| b == 0).any(|kv| kv == var))
                 })
             };
-            (by_exe || by_env()).then_some(pid)
+            (by_exe || by_comm() || by_argv0() || by_env()).then_some(pid)
         })
         .collect();
     pids.sort_unstable();
     pids
+}
+
+/// `target` without the ` (deleted)` the kernel appends to the `exe` link of
+/// a binary that was unlinked or replaced.
+fn strip_deleted(target: &Path) -> PathBuf {
+    target
+        .as_os_str()
+        .as_bytes()
+        .strip_suffix(b" (deleted)")
+        .map_or_else(
+            || target.to_path_buf(),
+            |t| PathBuf::from(OsStr::from_bytes(t)),
+        )
 }

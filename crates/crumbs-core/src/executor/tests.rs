@@ -24,6 +24,7 @@ fn planned(env: &Env, action: Action) -> PlannedAction {
         fingerprint: fingerprint(env, &p).unwrap(),
         scope: Scope::Home,
         depends_on: None,
+        depends_on_plan: None,
         reason: "test".into(),
         action,
     }
@@ -351,6 +352,47 @@ fn running_process_detected_by_appimage_env() {
 }
 
 #[test]
+fn running_detects_deleted_exe_and_comm() {
+    let t = FixtureTree::new();
+    let env = t.env();
+    // The binary was replaced by an update: the kernel appends " (deleted)".
+    t.symlink("proc/10/exe", "/usr/bin/foo-bin (deleted)");
+    // Only the process name and argv0 say who it is.
+    t.write("proc/11/comm", b"foo-bin\n");
+    t.write("proc/12/cmdline", b"/opt/foo/foo-bin\0--flag\0");
+    // The kernel cuts comm at 15 bytes.
+    t.write("proc/13/comm", b"very-long-name-\n");
+    t.write("proc/14/comm", b"unrelated\n");
+    t.write("proc/14/cmdline", b"/usr/bin/unrelated\0");
+    let mut app = appimage_app();
+    app.exec_names.push("very-long-name-app".into());
+    assert_eq!(running_processes(&env, &app), [10, 11, 12, 13]);
+}
+
+#[test]
+fn generic_basenames_never_match() {
+    let t = FixtureTree::new();
+    let env = t.env();
+    let mut app = appimage_app();
+    app.exec_names = ["sh", "bash", "env", "python", "python3", "node"]
+        .into_iter()
+        .chain(["electron", "java", "flatpak", "bwrap", "/usr/bin/bash"])
+        .map(String::from)
+        .collect();
+    for (pid, name) in [(1, "sh"), (2, "bash"), (3, "python3"), (4, "flatpak")] {
+        t.symlink(&format!("proc/{pid}/exe"), &format!("/usr/bin/{name}"));
+    }
+    t.write("proc/5/comm", b"node\n");
+    t.write("proc/6/cmdline", b"/usr/bin/java\0-jar\0x.jar\0");
+    t.write("proc/7/cmdline", b"bwrap\0--x\0");
+    assert!(running_processes(&env, &app).is_empty());
+    // The exact location still matches.
+    let loc = t.dir.path().join("home/user/Apps/Foo.AppImage");
+    t.symlink("proc/8/exe", loc.to_str().unwrap());
+    assert_eq!(running_processes(&env, &app), [8]);
+}
+
+#[test]
 fn running_processes_without_proc_is_empty() {
     let t = FixtureTree::new();
     let env = t.env();
@@ -643,6 +685,7 @@ fn command_plan(program: &str, args: &[&str]) -> Plan {
         },
         scope: Scope::Home,
         depends_on: None,
+        depends_on_plan: None,
         reason: "test".into(),
     }])
 }
@@ -828,6 +871,7 @@ fn unfingerprinted(action: Action) -> PlannedAction {
         },
         scope: Scope::Home,
         depends_on: None,
+        depends_on_plan: None,
         reason: "test".into(),
     }
 }
@@ -873,6 +917,7 @@ fn core_delete(env: &Env, name: &str) -> PlannedAction {
         action: Action::Delete { path: p },
         scope: Scope::System,
         depends_on: None,
+        depends_on_plan: None,
         reason: "test".into(),
     }
 }
@@ -1688,6 +1733,54 @@ fn execute_many_uses_one_batch_for_every_plan() {
     // A later run gets a later batch id than both.
     let next: u128 = crate::history::next_batch_id(&env).parse().unwrap();
     assert!(next > reports[1].batch.parse::<u128>().unwrap());
+}
+
+/// An action an earlier plan's action covered waits for it: it is skipped,
+/// naming the failed cover, and never run; one whose cover succeeded runs.
+#[test]
+fn cross_plan_gate_skips_when_cover_failed() {
+    let t = FixtureTree::new();
+    t.write("home/user/.config/shared/a", b"a");
+    t.write("home/user/.config/ok/a", b"a");
+    t.write("home/user/.config/dep/a", b"a");
+    t.write("home/user/.config/dep2/a", b"a");
+    let env = t.env();
+    let shared = planned(&env, trash("/home/user/.config/shared"));
+    let ok = planned(&env, trash("/home/user/.config/ok"));
+    let mut dep = planned(&env, trash("/home/user/.config/dep"));
+    dep.depends_on_plan = Some((0, 0));
+    let mut dep2 = planned(&env, trash("/home/user/.config/dep2"));
+    dep2.depends_on_plan = Some((0, 1));
+    // The cover vanishes after the scan, so its action fails.
+    fs::remove_dir_all(env.sys("/home/user/.config/shared")).unwrap();
+    let plans = [
+        app_plan("pacman:foo", vec![shared, ok]),
+        app_plan("pacman:bar", vec![dep, dep2]),
+    ];
+    let reports = execute_many(
+        &env,
+        &Config::default(),
+        &plans,
+        &FakeRunner::new(),
+        &FakePrivilegedRunner::default(),
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert!(!reports[0].results[0].ok);
+    assert!(reports[0].results[1].ok);
+    let skipped = &reports[1].results[0];
+    assert!(!skipped.ok);
+    assert!(
+        !skipped.rights_missing,
+        "a skipped dependent is never listed"
+    );
+    assert_eq!(
+        skipped.error.as_deref(),
+        Some("skipped: ~/.config/shared was not removed (it covered this action)")
+    );
+    assert!(env.sys("/home/user/.config/dep").exists(), "must not run");
+    assert!(reports[1].results[1].ok);
+    assert!(!env.sys("/home/user/.config/dep2").exists());
 }
 
 #[test]
