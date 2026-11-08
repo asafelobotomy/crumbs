@@ -222,7 +222,7 @@ pub const NOTE_PERMANENT_TRASH: &str = "permanently delete (emptying the trash)"
 
 /// Builds a plan for `clean` from scanned items. Trash items are trashed
 /// (deleted with `--permanent`), delete items are always deleted, command
-/// items become `UserCommand`. A `UserTemp` or `HomeTrash` item may only be
+/// items become `UserCommand` and privileged items `PrivilegedCommand`. A `UserTemp` or `HomeTrash` item may only be
 /// deleted, never trashed. Extra paths (a trashed entry's `.trashinfo`) are
 /// deleted right after their item and depend on it.
 pub fn build_clean_plan(
@@ -240,6 +240,28 @@ pub fn build_clean_plan(
         if let ItemAction::Command { program, args } = &item.action {
             actions.push(PlannedAction {
                 action: Action::UserCommand {
+                    program: program.clone(),
+                    args: args.clone(),
+                },
+                size: item.size.unwrap_or(0),
+                fingerprint: Fingerprint {
+                    dev: 0,
+                    ino: 0,
+                    is_symlink: false,
+                    ctime: 0,
+                    ctime_nsec: 0,
+                },
+                scope: item.scope,
+                depends_on: None,
+                reason,
+            });
+            continue;
+        }
+        if let ItemAction::Privileged { program, args } = &item.action {
+            // Run as root in the run's one batch; the executor resolves the
+            // bare program name from the trusted directories.
+            actions.push(PlannedAction {
+                action: Action::PrivilegedCommand {
                     program: program.clone(),
                     args: args.clone(),
                 },
@@ -639,6 +661,29 @@ mod tests {
         let json = serde_json::to_value(&plan.actions[3].action).unwrap();
         assert_eq!(json["type"], "user-command");
         assert_eq!(json["program"], "flatpak");
+    }
+
+    #[test]
+    fn privileged_items_become_privileged_commands() {
+        use crate::bloat::ItemAction;
+        let mut item = command_item();
+        item.category = crate::bloat::Category::Journal;
+        item.scope = Scope::System;
+        item.action = ItemAction::Privileged {
+            program: "journalctl".into(),
+            args: vec!["--vacuum-size=500M".into()],
+        };
+        let t = FixtureTree::new();
+        let plan = build_clean_plan(&t.env(), &[item], &PlanOptions::default()).unwrap();
+        assert_eq!(kinds(&plan), ["privileged-command"]);
+        assert_eq!(
+            plan.actions[0].action,
+            Action::PrivilegedCommand {
+                program: "journalctl".into(),
+                args: vec!["--vacuum-size=500M".into()],
+            }
+        );
+        assert_eq!(plan.actions[0].scope, Scope::System);
     }
 
     #[test]

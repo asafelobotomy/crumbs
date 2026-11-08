@@ -64,7 +64,7 @@ The exit code tells you which kind of failure it was (see below). `apps show` re
 |---|---|
 | 0 | Success (including a dry run and "nothing to do"). |
 | 1 | Error, or `uninstall`/`orphans --clean`/`clean` refused because a source or scanner failed (override with `--force`) or an app is running, or `uninstall` refused an AppImage whose file fails the safety checks. |
-| 2 | Usage error: bad flags, an unknown category name, `--system` (not available yet), ambiguous or not-found app, `--json` without `--yes` or `--dry-run`, a destructive command run non-interactively without `--yes`, removing a non-AppImage app without `--leftovers-only`, or `restore` with no selector matching any history entry. |
+| 2 | Usage error: bad flags, an unknown category name, `--user` together with `--system`, ambiguous or not-found app, `--json` without `--yes` or `--dry-run`, a destructive command run non-interactively without `--yes`, removing a non-AppImage app without `--leftovers-only`, or `restore` with no selector matching any history entry. |
 | 3 | Partial failure: some source failed while another worked, some actions/restores failed, or (`scan`) some category's scanner failed. |
 | 4 | Aborted by the user at a prompt. |
 | 5 | Privilege escalation unavailable (reserved; not returned by M2 or M3 commands). |
@@ -570,7 +570,7 @@ A batch selector restores the batch's successful `trash` and `edit-file` entries
 
 ## `scan`
 
-`crumbs scan [--category <name>]... [--details] [--user] [--json]` is strictly read-only: it never changes a file and never writes history. `--system` is not available yet: exit 2 with `system cleanup needs privileged support (coming in a later version)` (under `--json`, an envelope with `data: null` and a `cli` error).
+`crumbs scan [--category <name>]... [--details] [--user] [--json]` is strictly read-only: it never changes a file and never writes history. `--system` scans the system categories instead (also read-only, no administrator rights needed; naming a system category implies it). `--user --system` exits 2 with `use either --user or --system` (under `--json`, an envelope with `data: null` and a `cli` error). Under `--json` a category that cannot run here has an `unavailable` reason; the human table shows `unavailable (<reason>)` in its note column.
 
 `data`: `categories`, an array of **CategoryReport**, one per listed category in this fixed order: `cache`, `thumbnails`, `trash`, `temp`, `browser-cache`, `dev-cache`, `flatpak-unused`, `appimage-old`, `logs`.
 

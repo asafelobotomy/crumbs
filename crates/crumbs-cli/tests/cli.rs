@@ -1443,20 +1443,6 @@ fn scan_scanner_error_exit_3() {
 }
 
 #[test]
-fn scan_system_exit_2() {
-    let t = scan_fixture(FLATPAK_OK);
-    crumbs(&t)
-        .args(["scan", "--system"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains(
-            "system cleanup needs privileged support (coming in a later version)",
-        ));
-    let v = json_error(&t, &["scan", "--system", "--json"], 2);
-    assert_eq!(v["command"], "scan");
-}
-
-#[test]
 fn scan_writes_nothing() {
     let t = scan_fixture(FLATPAK_OK);
     let before = tree_state(&t);
@@ -1782,21 +1768,6 @@ fn clean_restore_round_trip() {
         vec![1u8; 3000]
     );
     assert!(trash_files(&t).iter().all(|n| n != "foo"));
-}
-
-#[test]
-fn clean_system_exit_2() {
-    let t = scan_fixture(FLATPAK_OK);
-    crumbs(&t)
-        .args(["clean", "--system", "--yes"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains(
-            "system cleanup needs privileged support (coming in a later version)",
-        ));
-    let v = json_error(&t, &["clean", "--system", "--json", "--yes"], 2);
-    assert_eq!(v["command"], "clean");
-    assert!(real(&t, "/home/user/.cache/foo/blob").exists());
 }
 
 #[test]
@@ -2491,12 +2462,329 @@ fn doctor_sudo_without_terminal_is_unavailable() {
         .stdout(predicate::str::contains("privileged cleanup: unavailable"));
 }
 
+// ---- system categories (`--system`) ----
+
+const SYS_ORPHANS: [&str; 7] = [
+    "orph1", "orph2", "orph3", "orph4", "orph5", "orph6", "orph7",
+];
+
+/// A fixture with every system tool as a recording script. Each one logs
+/// its arguments to `<root>/<tool>-args` when it changes something. The
+/// journal query first runs `JOURNAL_HOOK` (empty unless a test sets it).
+fn system_fixture(journal_hook: &str) -> FixtureTree {
+    let t = FixtureTree::new();
+    t.write_exec(
+        "/usr/bin/paccache",
+        b"#!/bin/sh\nroot=\"$(dirname \"$0\")/../..\"\ncase \"$1\" in\n-dk2) printf '==> finished dry run: 1 candidates (disk space saved: 86.17 MiB)\\n' ;;\n-rk2) echo \"$@\" >> \"$root/paccache-args\" ;;\n*) exit 9 ;;\nesac\n",
+    );
+    t.write_exec(
+        "/usr/bin/pacman",
+        b"#!/bin/sh\nroot=\"$(dirname \"$0\")/../..\"\ncase \"$1\" in\n-Qdtq) printf 'orph1\\norph2\\norph3\\norph4\\norph5\\norph6\\norph7\\n' ;;\n-Rs) shift 4; for p in \"$@\"; do printf '%s 1.0-1\\n' \"$p\"; done ;;\n-Rn) echo \"$@\" >> \"$root/pacman-args\" ;;\n*) exit 9 ;;\nesac\n",
+    );
+    let journalctl = format!(
+        "#!/bin/sh\nroot=\"$(dirname \"$0\")/../..\"\ncase \"$1\" in\n--disk-usage) {journal_hook}\nprintf 'Archived and active journals take up 719.1M in the file system.\\n' ;;\n--vacuum-size=500M) echo \"$@\" >> \"$root/journal-args\" ;;\n*) exit 9 ;;\nesac\n"
+    );
+    t.write_exec("/usr/bin/journalctl", journalctl.as_bytes());
+    t.write_exec(
+        "/usr/bin/systemd-tmpfiles",
+        b"#!/bin/sh\necho \"$@\" >> \"$(dirname \"$0\")/../../tmpfiles-args\"\n",
+    );
+    t.write_exec(
+        "/usr/bin/flatpak",
+        b"#!/bin/sh\nroot=\"$(dirname \"$0\")/../..\"\nif [ \"$1\" = list ]; then case \"$*\" in *--runtime*) echo org.x.Platform/x86_64/23.08;; esac; exit 0; fi\necho \"$@\" >> \"$root/flatpak-args\"\n",
+    );
+    // `rm` logs, then removes the root-joined path the batch passes.
+    t.write_exec(
+        "/usr/bin/rm",
+        b"#!/bin/sh\necho \"$@\" >> \"$(dirname \"$0\")/../../rm-args\"\nexec /usr/bin/rm \"$@\"\n",
+    );
+    t.mkdir("var/lib/systemd/coredump");
+    let mut cur = t.dir.path().to_path_buf();
+    for c in ["", "var", "lib", "systemd", "coredump"] {
+        cur.push(c);
+        std::fs::set_permissions(&cur, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+    }
+    t.write(
+        "/var/lib/systemd/coredump/core.foo.1000.abc.1.zst",
+        &[7u8; 9000],
+    );
+    t
+}
+
+const CORE: &str = "/var/lib/systemd/coredump/core.foo.1000.abc.1.zst";
+
+fn sh_runner(t: &FixtureTree) -> Command {
+    let mut cmd = crumbs(t);
+    cmd.env("CRUMBS_TEST_PRIV_RUNNER", "sh");
+    cmd
+}
+
+fn recorded(t: &FixtureTree, file: &str) -> Option<String> {
+    std::fs::read_to_string(real(t, file)).ok()
+}
+
 #[test]
-fn clean_system_category_without_system_is_usage_error() {
-    let t = fixture(FLATPAK_OK);
+fn scan_system_table() {
+    let t = system_fixture("");
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["scan", "--system"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    for c in [
+        "pkg-cache",
+        "orphan-pkgs",
+        "journal",
+        "coredumps",
+        "system-temp",
+        "flatpak-unused-system",
+    ] {
+        assert!(stdout.lines().any(|l| l.starts_with(c)), "{c}: {stdout}");
+    }
+    assert!(
+        !stdout.lines().any(|l| l.starts_with("thumbnails")),
+        "{stdout}"
+    );
+    assert!(!stdout.lines().any(|l| l.starts_with("trash")), "{stdout}");
+    let v = stdout_json(crumbs(&t).args(["scan", "--system", "--json"]));
+    assert_eq!(v["data"]["categories"].as_array().unwrap().len(), 6, "{v}");
+    // A scan changes nothing and needs no privileges.
+    for f in [
+        "paccache-args",
+        "pacman-args",
+        "journal-args",
+        "tmpfiles-args",
+        "rm-args",
+    ] {
+        assert!(recorded(&t, f).is_none(), "{f}");
+    }
+    assert!(real(&t, CORE).exists());
+}
+
+#[test]
+fn scan_system_unavailable_shows_reason() {
+    let t = FixtureTree::new();
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["scan", "--system"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let line = stdout.lines().find(|l| l.starts_with("pkg-cache")).unwrap();
+    assert!(
+        line.contains("unavailable (pacman not installed)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.lines().any(
+            |l| l.starts_with("coredumps") && l.contains("unavailable (no coredump directory)")
+        ),
+        "{stdout}"
+    );
+    // JSON keeps its own field and has no human text.
+    let v = stdout_json(crumbs(&t).args(["scan", "--system", "--json"]));
+    let first = &v["data"]["categories"][0];
+    assert_eq!(first["unavailable"], "pacman not installed", "{v}");
+}
+
+#[test]
+fn scan_user_and_system_conflict_exit_2() {
+    let t = system_fixture("");
     crumbs(&t)
-        .args(["clean", "journal", "--yes"])
+        .args(["scan", "--user", "--system"])
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("'journal'").and(predicate::str::contains("--system")));
+        .stderr(predicate::str::contains("use either --user or --system"));
+    let v = json_error(&t, &["scan", "--user", "--system", "--json"], 2);
+    assert_eq!(v["command"], "scan");
+    crumbs(&t)
+        .args(["clean", "--user", "--system", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("use either --user or --system"));
+    let v = json_error(&t, &["clean", "--user", "--system", "--json", "--yes"], 2);
+    assert_eq!(v["command"], "clean");
+}
+
+#[test]
+fn clean_system_dry_run_preview() {
+    let t = system_fixture("");
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["clean", "--system", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("as root: '/usr/bin/paccache' '-rk2'"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("as root: '/usr/bin/journalctl' '--vacuum-size=500M'"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("as root: '/usr/bin/systemd-tmpfiles' '--clean'"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("as root: '/usr/bin/rm' '-f' '--' '{CORE}'")),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "note: packages are removed with administrator rights; you will be asked once"
+        ),
+        "{stdout}"
+    );
+    // Opt-in categories stay out unless named.
+    assert!(!stdout.contains("orph"), "{stdout}");
+    assert!(!stdout.contains("flatpak"), "{stdout}");
+    for f in ["paccache-args", "journal-args", "tmpfiles-args", "rm-args"] {
+        assert!(recorded(&t, f).is_none(), "{f}");
+    }
+    assert!(real(&t, CORE).exists());
+    let v = stdout_json(crumbs(&t).args(["clean", "--system", "--dry-run", "--json"]));
+    assert!(v["data"]["report"].is_null(), "{v}");
+}
+
+#[test]
+fn clean_system_runs_one_batch() {
+    let t = system_fixture("");
+    let (code, stdout, stderr) = run_out(sh_runner(&t).args(["clean", "--system", "--yes"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        stderr.matches("crumbs-test: privileged batch").count(),
+        1,
+        "{stderr}"
+    );
+    assert_eq!(recorded(&t, "/paccache-args").as_deref(), Some("-rk2\n"));
+    assert_eq!(
+        recorded(&t, "/journal-args").as_deref(),
+        Some("--vacuum-size=500M\n")
+    );
+    assert_eq!(
+        recorded(&t, "/tmpfiles-args").as_deref(),
+        Some("--clean --prefix=/tmp --prefix=/var/tmp\n")
+    );
+    assert!(!real(&t, CORE).exists());
+    assert!(recorded(&t, "/rm-args").unwrap().contains("core.foo"));
+    // Opt-in categories did not run.
+    assert!(recorded(&t, "/pacman-args").is_none());
+    assert!(recorded(&t, "/flatpak-args").is_none());
+    let h = history_json(&t).to_string();
+    assert!(h.contains("privileged-command"), "{h}");
+}
+
+#[test]
+fn clean_system_orphan_pkgs_opt_in() {
+    let t = system_fixture("");
+    // Naming the category implies --system, and opts in.
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["clean", "orphan-pkgs", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    // The preview shows the whole closure, not the scanner's short note.
+    let all = SYS_ORPHANS.map(|n| format!("'{n}'")).join(" ");
+    assert!(
+        stdout.contains(&format!(
+            "as root: '/usr/bin/pacman' '-Rn' '--noconfirm' {all}"
+        )),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("paccache"), "{stdout}");
+    let (code, stdout, stderr) = run_out(sh_runner(&t).args(["clean", "orphan-pkgs", "--yes"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        recorded(&t, "/pacman-args").unwrap(),
+        format!("-Rn --noconfirm {}\n", SYS_ORPHANS.join(" "))
+    );
+    assert!(recorded(&t, "/paccache-args").is_none());
+    assert!(real(&t, CORE).exists());
+    // Without naming it, `--system` leaves it out (the first test above
+    // already shows the preview); the flatpak one is opt-in too.
+    let (code, stdout, stderr) =
+        run_out(sh_runner(&t).args(["clean", "flatpak-unused-system", "--yes"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        recorded(&t, "/flatpak-args").unwrap(),
+        "uninstall --system --unused -y --noninteractive\n"
+    );
+}
+
+#[test]
+fn clean_system_escalation_denied_exit_5() {
+    let t = system_fixture("");
+    let manual = format!("sudo '/usr/bin/rm' '-f' '--' '{CORE}'");
+    let (code, stdout, stderr) = run_out(
+        crumbs(&t)
+            .env("CRUMBS_TEST_PRIV_RUNNER", "deny")
+            .args(["clean", "--system", "--yes"]),
+    );
+    assert_eq!(code, 5, "{stdout}{stderr}");
+    assert!(
+        stderr
+            .contains("administrator rights were not granted; nothing that needs them was changed"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&manual), "{stderr}");
+    assert!(
+        stderr.contains("sudo '/usr/bin/paccache' '-rk2'"),
+        "{stderr}"
+    );
+    assert!(real(&t, CORE).exists());
+    assert!(recorded(&t, "/paccache-args").is_none());
+    // No fake runner at all: nothing to escalate with.
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["clean", "--system", "--yes"]));
+    assert_eq!(code, 5, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("no way to get administrator rights"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&manual), "{stderr}");
+    let v = json_error(&t, &["clean", "--system", "--json", "--yes"], 5);
+    let list = v["data"]["manual_commands"].as_array().unwrap();
+    assert!(list.iter().any(|m| m == &serde_json::json!(manual)), "{v}");
+    assert!(real(&t, CORE).exists());
+}
+
+#[test]
+fn clean_system_coredump_swapped_refused() {
+    // The journal query runs during the scan, after the coredump scanner has
+    // fingerprinted the file (it waits); it then swaps the file for a
+    // symlink to a precious one, as an attacker could before the batch.
+    let hook = format!("sleep 1; rm -f \"$root{CORE}\"; ln -s \"$root/precious\" \"$root{CORE}\";");
+    let t = system_fixture(&hook);
+    t.write("/precious", b"keep me");
+    let (code, stdout, stderr) = run_out(sh_runner(&t).args(["clean", "--system", "--yes"]));
+    assert_eq!(code, 3, "{stdout}{stderr}");
+    assert!(stdout.contains("✗"), "{stdout}");
+    // No rm step ran, and nothing was deleted through the link.
+    assert!(
+        recorded(&t, "/rm-args").is_none(),
+        "{:?}",
+        recorded(&t, "/rm-args")
+    );
+    assert!(
+        std::fs::symlink_metadata(real(&t, CORE))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read(real(&t, "/precious")).unwrap(), b"keep me");
+    // The other items in the batch still ran.
+    assert_eq!(recorded(&t, "/paccache-args").as_deref(), Some("-rk2\n"));
+}
+
+#[test]
+fn clean_default_still_user_only() {
+    let t = system_fixture("");
+    t.write("/home/user/.cache/foo/blob", &[1u8; 3000]);
+    // No flag: user categories only, and nothing needs privileges.
+    let (code, stdout, stderr) = run_clean(&t, &["--yes"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!real(&t, "/home/user/.cache/foo").exists());
+    assert!(real(&t, CORE).exists());
+    for f in ["paccache-args", "journal-args", "tmpfiles-args", "rm-args"] {
+        assert!(recorded(&t, f).is_none(), "{f}");
+    }
+    let (_, stdout, _) = run_out(crumbs(&t).args(["scan"]));
+    for c in [
+        "pkg-cache",
+        "orphan-pkgs",
+        "journal",
+        "coredumps",
+        "system-temp",
+    ] {
+        assert!(!stdout.lines().any(|l| l.starts_with(c)), "{c}: {stdout}");
+    }
+    assert!(stdout.lines().any(|l| l.starts_with("cache")), "{stdout}");
 }

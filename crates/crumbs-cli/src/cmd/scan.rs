@@ -12,8 +12,7 @@ use super::context::{ScanSetup, print_notes};
 use super::render::sanitise;
 use crate::output::{ErrorEntry, fmt_size, print_json_entries, print_table_with_details};
 
-pub const SYSTEM_UNAVAILABLE: &str =
-    "system cleanup needs privileged support (coming in a later version)";
+pub const USER_AND_SYSTEM: &str = "use either --user or --system";
 const OFF_NOTE: &str = "off (enable with --category or config)";
 
 #[derive(Args, Debug)]
@@ -22,9 +21,9 @@ pub struct ScanArgs {
     #[arg(long = "category", value_name = "CATEGORY")]
     pub categories: Vec<Category>,
     /// Scan your own files (the default)
-    #[arg(long, conflicts_with = "system")]
+    #[arg(long)]
     pub user: bool,
-    /// Scan system-wide locations (not available yet)
+    /// Scan the system categories (read-only; needs no administrator rights)
     #[arg(long)]
     pub system: bool,
     /// List every item under its category
@@ -48,18 +47,22 @@ fn skipped(category: Category) -> CategoryReport {
 }
 
 pub fn run(env: &Env, args: &ScanArgs) -> anyhow::Result<ExitCode> {
-    if args.system {
-        writeln!(anstream::stderr().lock(), "error: {SYSTEM_UNAVAILABLE}")?;
+    if args.user && args.system {
+        writeln!(anstream::stderr().lock(), "error: {USER_AND_SYSTEM}")?;
         if args.json {
-            let entry = [ErrorEntry::new("cli", SYSTEM_UNAVAILABLE.into())];
+            let entry = [ErrorEntry::new("cli", USER_AND_SYSTEM.into())];
             print_json_entries("scan", &serde_json::Value::Null, &entry)?;
         }
         return Ok(ExitCode::from(2));
     }
     let setup = ScanSetup::load(env)?;
     let listed: Vec<Category> = if args.categories.is_empty() {
-        // System categories wait for `--system` (not wired yet).
-        Category::ALL.into_iter().filter(|c| !c.system()).collect()
+        // Without names: the user categories, or with `--system` the
+        // system ones.
+        Category::ALL
+            .into_iter()
+            .filter(|c| c.system() == args.system)
+            .collect()
     } else {
         Category::ALL
             .into_iter()
@@ -127,12 +130,14 @@ fn print_human(report: &ScanReport, details: bool) -> anyhow::Result<()> {
             OFF_NOTE.to_string()
         } else if let Some(e) = &rep.error {
             sanitise(e)
+        } else if let Some(why) = &rep.unavailable {
+            format!("unavailable ({})", sanitise(why))
         } else if !rep.items.is_empty() && rep.items.iter().all(|i| i.rebuildable) {
             "rebuildable".to_string()
         } else {
             String::new()
         };
-        let (items, size) = if rep.skipped || rep.error.is_some() {
+        let (items, size) = if rep.skipped || rep.error.is_some() || rep.unavailable.is_some() {
             ("-".to_string(), "-".to_string())
         } else {
             let size = match (rep.total, rep.unknown_sizes) {
