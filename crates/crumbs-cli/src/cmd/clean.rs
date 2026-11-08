@@ -87,13 +87,13 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
         .collect();
     let defaults: Vec<bool> = items.iter().map(|i| preselect(i, named)).collect();
     // Items a scanner held back (a running app); the opt-in Flatpak
-    // command is not one of them.
+    // command and trash entries are not among them.
     let held: Vec<&str> = if act.interactive {
         Vec::new()
     } else {
         items
             .iter()
-            .filter(|i| !i.preselected && i.category != Category::FlatpakUnused)
+            .filter(|i| !i.preselected && !opt_in(i.category))
             .map(|i| i.note.as_deref().unwrap_or(&i.label))
             .collect()
     };
@@ -133,11 +133,17 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
     apply(env, &setup.cfg, &errors, out, &targets, act)
 }
 
+/// Categories whose items are never ticked unless the category is named:
+/// the Flatpak command, and emptying the trash (it cannot be undone).
+fn opt_in(category: Category) -> bool {
+    matches!(category, Category::FlatpakUnused | Category::Trash)
+}
+
 /// Whether an item starts ticked: the scanner's own default, except that
-/// naming `flatpak-unused` opts in to its command. Items a scanner held
+/// naming an [`opt_in`] category opts in to its items. Items a scanner held
 /// back (their app is running) stay unticked even in a named category.
 fn preselect(item: &BloatItem, named: bool) -> bool {
-    item.preselected || (named && item.category == Category::FlatpakUnused)
+    item.preselected || (named && opt_in(item.category))
 }
 
 /// `CATEGORY  SIZE  LABEL  NOTE`, sanitised.
@@ -204,9 +210,13 @@ mod tests {
     }
 
     #[test]
-    fn naming_a_category_only_opts_in_to_flatpak() {
+    fn naming_a_category_only_opts_in_to_flatpak_and_trash() {
         let mut flatpak = item(false, Some("decided by flatpak"));
         flatpak.category = Category::FlatpakUnused;
+        let mut trash = item(false, None);
+        trash.category = Category::Trash;
+        assert!(preselect(&trash, true));
+        assert!(!preselect(&trash, false));
         // Held back for any reason, whatever the note says.
         let held = item(false, Some("anything"));
         let unnoted = item(false, None);

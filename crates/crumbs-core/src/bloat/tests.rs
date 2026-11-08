@@ -741,7 +741,10 @@ fn check_trash(t: &FixtureTree, items: &[BloatItem]) {
         assert_eq!(i.category, Category::Trash);
         assert_eq!(i.scope, Scope::HomeTrash);
         assert_eq!(i.action, ItemAction::Delete);
-        assert!(!i.rebuildable && i.preselected);
+        assert!(
+            !i.rebuildable && !i.preselected,
+            "emptying the trash is opt-in"
+        );
         let p = i.path.as_ref().unwrap();
         verify(
             &env,

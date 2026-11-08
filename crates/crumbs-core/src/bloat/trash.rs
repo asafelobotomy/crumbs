@@ -150,7 +150,9 @@ impl Scanner for TrashScanner {
                 label,
                 size: None,
                 rebuildable: false,
-                preselected: true,
+                // Emptying the trash cannot be undone: opt-in, by naming
+                // the category or ticking it with `-i`.
+                preselected: false,
                 note: None,
                 action: ItemAction::Delete,
                 scope: Scope::HomeTrash,

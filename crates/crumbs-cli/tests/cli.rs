@@ -1962,3 +1962,27 @@ fn history_labels_batches_by_kind() {
         .unwrap_or_else(|| panic!("{text}"));
     assert!(clean.contains("1 items"), "{clean}");
 }
+
+#[test]
+fn clean_trash_is_opt_in() {
+    let t = scan_fixture(FLATPAK_OK);
+    let (code, stdout, stderr) = run_clean(&t, &["--dry-run"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!stdout.contains("Trash/"), "{stdout}");
+    assert!(!stdout.contains("emptying the trash"), "{stdout}");
+    let (code, stdout, stderr) = run_clean(&t, &["--yes"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!real(&t, "/home/user/.cache/foo").exists());
+    assert!(real(&t, "/home/user/.local/share/Trash/files/old.txt").exists());
+    assert!(real(&t, "/home/user/.local/share/Trash/info/old.txt.trashinfo").exists());
+    // Only the trash left: it is not "held back".
+    let (code, stdout, _) = run_clean(&t, &["cache", "thumbnails", "trash", "--dry-run"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(stdout.contains("Trash/files/old.txt"), "{stdout}");
+    let (code, stdout, _) = run_clean(&t, &["--yes"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(!stdout.contains("held back"), "{stdout}");
+    let (code, stdout, stderr) = run_clean(&t, &["trash", "--yes"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!real(&t, "/home/user/.local/share/Trash/files/old.txt").exists());
+}
