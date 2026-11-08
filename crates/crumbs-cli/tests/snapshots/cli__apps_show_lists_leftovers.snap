@@ -1,0 +1,21 @@
+---
+source: crates/crumbs-cli/tests/cli.rs
+expression: "snapshot_text(&t, &[\"apps\", \"show\", \"Tool\"])"
+---
+Name:         Tool
+ID:           appimage:~/Applications/Tool-1.0-x86_64.AppImage
+Source:       appimage
+Version:      1.0
+Installation: user
+Size:         256 B
+Location:     ~/Applications/Tool-1.0-x86_64.AppImage
+Desktop IDs:  -
+Executables:  -
+Description:  -
+
+Leftovers
+CONF  SIZE      KIND    PATH            NOTE
+high  12.0 KiB  cache   ~/.cache/Tool
+high  8.0 KiB   config  ~/.config/Tool
+
+2 leftovers, 20.0 KiB (2 preselected)

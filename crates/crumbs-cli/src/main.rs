@@ -28,6 +28,15 @@ enum Command {
     /// List and inspect installed apps
     #[command(subcommand)]
     Apps(cmd::apps::AppsCmd),
+    /// List per-user files that belong to no installed app
+    Orphans {
+        /// Include low-confidence findings
+        #[arg(long)]
+        show_low: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
     /// Check which sources and tools crumbs can use
     Doctor {
         /// Machine-readable output
@@ -46,6 +55,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let env = Env::from_system()?;
     match cli.command {
         Command::Apps(c) => cmd::apps::run(c, &env),
+        Command::Orphans { show_low, json } => cmd::orphans::run(&env, show_low, json),
         Command::Doctor { json } => cmd::doctor::run(&env, json),
     }
 }

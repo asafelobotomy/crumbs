@@ -5,6 +5,7 @@ use std::io::{self, Write};
 use anstyle::Style;
 use crumbs_core::SourceError;
 use crumbs_core::inventory::{Inventory, SourceStatus};
+use crumbs_core::leftovers::{Confidence, FindingKind};
 use serde::Serialize;
 
 const SCHEMA_VERSION: u32 = 1;
@@ -43,7 +44,46 @@ struct Envelope<'a, T: Serialize> {
     schema_version: u32,
     command: &'a str,
     data: &'a T,
-    errors: &'a [SourceError],
+    errors: &'a [ErrorEntry],
+}
+
+/// One envelope `errors` entry. `source` is a source name, or `config` /
+/// `rules` for notes built in the CLI.
+#[derive(Serialize, Debug, Clone)]
+pub struct ErrorEntry {
+    pub source: String,
+    pub message: String,
+}
+
+impl ErrorEntry {
+    pub fn new(source: &str, message: String) -> Self {
+        ErrorEntry {
+            source: source.into(),
+            message,
+        }
+    }
+}
+
+impl From<&SourceError> for ErrorEntry {
+    fn from(e: &SourceError) -> Self {
+        ErrorEntry::new(e.source.as_str(), e.message.clone())
+    }
+}
+
+/// Serde's own name for a value that serializes to a plain string.
+fn serde_name<T: Serialize>(v: T) -> String {
+    serde_json::to_value(v)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "-".into())
+}
+
+pub fn confidence(c: Confidence) -> String {
+    serde_name(c)
+}
+
+pub fn finding_kind(k: FindingKind) -> String {
+    serde_name(k)
 }
 
 /// Writes the JSON envelope for one invocation to stdout.
@@ -51,6 +91,16 @@ pub fn print_json<T: Serialize>(
     command: &str,
     data: &T,
     errors: &[SourceError],
+) -> anyhow::Result<()> {
+    let entries: Vec<ErrorEntry> = errors.iter().map(ErrorEntry::from).collect();
+    print_json_entries(command, data, &entries)
+}
+
+/// Like [`print_json`], with CLI-built entries (config and rules notes).
+pub fn print_json_entries<T: Serialize>(
+    command: &str,
+    data: &T,
+    errors: &[ErrorEntry],
 ) -> anyhow::Result<()> {
     let envelope = Envelope {
         schema_version: SCHEMA_VERSION,
@@ -85,6 +135,7 @@ pub fn print_table(header: &[&str], rows: &[Vec<String>]) -> io::Result<()> {
                 s.extend(std::iter::repeat_n(' ', pad + 2));
             }
         }
+        s.truncate(s.trim_end().len());
         s
     };
     let head = line(&mut header.iter().copied());

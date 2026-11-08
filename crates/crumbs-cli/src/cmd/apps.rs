@@ -4,13 +4,18 @@ use std::process::ExitCode;
 
 use clap::{Subcommand, ValueEnum};
 use crumbs_core::command::SystemRunner;
-use crumbs_core::config::Config;
-use crumbs_core::inventory::{Inventory, Resolved, discover, find_app};
+use crumbs_core::env::display_path;
+use crumbs_core::inventory::{Resolved, discover, find_app};
+use crumbs_core::leftovers::{Finding, find_leftovers};
 use crumbs_core::sources::ListOptions;
 use crumbs_core::{App, Env, SourceKind};
 use serde_json::json;
 
-use crate::output::{fmt_size, partial_failure, print_json, print_table};
+use super::context::{Context, load_cfg, print_notes};
+use crate::output::{
+    ErrorEntry, confidence, finding_kind, fmt_size, partial_failure, print_json_entries,
+    print_table,
+};
 
 #[derive(Subcommand)]
 pub enum AppsCmd {
@@ -33,6 +38,9 @@ pub enum AppsCmd {
     Show {
         /// App id, name, desktop id or display name
         app: String,
+        /// Include low-confidence leftovers
+        #[arg(long)]
+        show_low: bool,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -53,7 +61,11 @@ pub fn run(cmd: AppsCmd, env: &Env) -> anyhow::Result<ExitCode> {
             sort,
             json,
         } => list(env, &sources, all, sort, json),
-        AppsCmd::Show { app, json } => show(env, &app, json),
+        AppsCmd::Show {
+            app,
+            show_low,
+            json,
+        } => show(env, &app, show_low, json),
     }
 }
 
@@ -64,12 +76,8 @@ fn list(
     sort: Sort,
     json: bool,
 ) -> anyhow::Result<ExitCode> {
-    let mut inv = discover(
-        env,
-        &SystemRunner,
-        &ListOptions { include_all: all },
-        &Config::default(),
-    );
+    let (cfg, notes) = load_cfg(env)?;
+    let mut inv = discover(env, &SystemRunner, &ListOptions { include_all: all }, &cfg);
     if !sources.is_empty() {
         inv.apps.retain(|a| sources.contains(&a.source));
     }
@@ -81,10 +89,12 @@ fn list(
     let code = if partial_failure(&inv) { 3 } else { 0 };
 
     if json {
-        print_json(
+        let mut errors: Vec<ErrorEntry> = inv.errors.iter().map(ErrorEntry::from).collect();
+        errors.extend(notes);
+        print_json_entries(
             "apps list",
             &json!({ "apps": inv.apps, "statuses": inv.statuses }),
-            &inv.errors,
+            &errors,
         )?;
     } else {
         let rows: Vec<Vec<String>> = inv
@@ -107,32 +117,37 @@ fn list(
         for e in &inv.errors {
             writeln!(err, "warning: {}: {}", e.source.as_str(), e.message)?;
         }
+        drop(err);
+        print_notes(&notes)?;
     }
     Ok(ExitCode::from(code))
 }
 
-fn show(env: &Env, query: &str, json: bool) -> anyhow::Result<ExitCode> {
-    let inv: Inventory = discover(
-        env,
-        &SystemRunner,
-        &ListOptions { include_all: true },
-        &Config::default(),
-    );
+fn show(env: &Env, query: &str, show_low: bool, json: bool) -> anyhow::Result<ExitCode> {
+    let cx = Context::load(env)?;
+    let inv = &cx.inv;
+    let mut errors: Vec<ErrorEntry> = inv.errors.iter().map(ErrorEntry::from).collect();
+    errors.extend(cx.notes.iter().cloned());
     let mut err = anstream::stderr().lock();
-    match find_app(&inv, query) {
+    match find_app(inv, query) {
         Resolved::Found(app) => {
+            let leftovers = find_leftovers(&cx.idx, app, show_low);
             if json {
-                print_json("apps show", &json!({ "app": app }), &inv.errors)?;
+                let data = json!({ "app": app, "leftovers": leftovers });
+                print_json_entries("apps show", &data, &errors)?;
             } else {
-                print_app(app)?;
+                print_app(env, app)?;
+                print_leftovers(env, &leftovers)?;
+                drop(err);
+                print_notes(&cx.notes)?;
             }
-            Ok(ExitCode::from(if partial_failure(&inv) { 3 } else { 0 }))
+            Ok(ExitCode::from(if partial_failure(inv) { 3 } else { 0 }))
         }
         Resolved::NotFound => {
             writeln!(err, "error: no installed app matches '{query}'")?;
             if json {
                 let data = json!({ "app": null, "query": query, "candidates": [] });
-                print_json("apps show", &data, &inv.errors)?;
+                print_json_entries("apps show", &data, &errors)?;
             }
             Ok(ExitCode::from(2))
         }
@@ -140,7 +155,7 @@ fn show(env: &Env, query: &str, json: bool) -> anyhow::Result<ExitCode> {
             writeln!(err, "error: '{query}' matches several apps:")?;
             if json {
                 let data = json!({ "app": null, "query": query, "candidates": candidates });
-                print_json("apps show", &data, &inv.errors)?;
+                print_json_entries("apps show", &data, &errors)?;
             }
             for a in candidates {
                 writeln!(err, "  {}  {}  {}", a.id, a.display_name, a.source.as_str())?;
@@ -150,7 +165,33 @@ fn show(env: &Env, query: &str, json: bool) -> anyhow::Result<ExitCode> {
     }
 }
 
-fn print_app(a: &App) -> anyhow::Result<()> {
+fn print_leftovers(env: &Env, leftovers: &[Finding]) -> anyhow::Result<()> {
+    writeln!(anstream::stdout().lock(), "\nLeftovers")?;
+    let rows: Vec<Vec<String>> = leftovers
+        .iter()
+        .map(|f| {
+            vec![
+                confidence(f.confidence),
+                fmt_size(f.size.bytes),
+                finding_kind(f.kind),
+                display_path(env, &f.path),
+                if f.shared { "shared" } else { "" }.to_string(),
+            ]
+        })
+        .collect();
+    print_table(&["CONF", "SIZE", "KIND", "PATH", "NOTE"], &rows)?;
+    let total: u64 = leftovers.iter().map(|f| f.size.bytes).sum();
+    let preselected = leftovers.iter().filter(|f| f.preselected).count();
+    writeln!(
+        anstream::stdout().lock(),
+        "\n{} leftovers, {} ({preselected} preselected)",
+        leftovers.len(),
+        fmt_size(total)
+    )?;
+    Ok(())
+}
+
+fn print_app(env: &Env, a: &App) -> anyhow::Result<()> {
     let list = |v: &[String]| {
         if v.is_empty() {
             "-".to_string()
@@ -175,7 +216,7 @@ fn print_app(a: &App) -> anyhow::Result<()> {
             "Location",
             a.location
                 .as_ref()
-                .map_or_else(|| "-".into(), |p| p.display().to_string()),
+                .map_or_else(|| "-".into(), |p| display_path(env, p)),
         ),
         ("Desktop IDs", list(&a.desktop_ids)),
         ("Executables", list(&a.exec_names)),

@@ -277,3 +277,74 @@ fn apps_show_installation_uses_serde_name() {
         .assert()
         .stdout(predicate::str::is_match(r"Installation:\s+system\n").unwrap());
 }
+
+fn with_leftovers(t: &FixtureTree) {
+    t.write("/home/user/.config/Tool/settings.json", &[b'x'; 5000]);
+    t.write("/home/user/.cache/Tool/blob", &[b'y'; 9000]);
+}
+
+fn with_orphans(t: &FixtureTree) {
+    t.write("/home/user/.thunderbird/profiles.ini", b"x");
+    t.mkdir("/home/user/.var/app/org.gone.App");
+    t.mkdir("/home/user/.config/zzquux-thing");
+}
+
+fn snapshot_text(t: &FixtureTree, args: &[&str]) -> String {
+    let out = crumbs(t).args(args).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8(out.stdout).unwrap();
+    text.replace(&t.dir.path().to_string_lossy().into_owned(), "[ROOT]")
+}
+
+#[test]
+fn apps_show_lists_leftovers() {
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    insta::assert_snapshot!(snapshot_text(&t, &["apps", "show", "Tool"]));
+}
+
+#[test]
+fn apps_show_json_leftovers() {
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    let v = stdout_json(crumbs(&t).args(["apps", "show", "Tool", "--json"]));
+    let l = v["data"]["leftovers"].as_array().unwrap();
+    assert_eq!(l.len(), 2, "{l:?}");
+    assert_eq!(l[0]["confidence"], "high");
+    assert_eq!(l[0]["path"], "/home/user/.cache/Tool");
+    assert!(l[0].get("fingerprint").is_none());
+    assert_eq!(l[0]["shared"], false);
+}
+
+#[test]
+fn orphans_lists_high_and_medium() {
+    let t = fixture(FLATPAK_OK);
+    with_orphans(&t);
+    insta::assert_snapshot!(snapshot_text(&t, &["orphans"]));
+}
+
+#[test]
+fn orphans_show_low_includes_low() {
+    let t = fixture(FLATPAK_OK);
+    with_orphans(&t);
+    let plain = snapshot_text(&t, &["orphans"]);
+    assert!(!plain.contains("zzquux-thing"), "{plain}");
+    let all = snapshot_text(&t, &["orphans", "--show-low"]);
+    assert!(all.contains("zzquux-thing"), "{all}");
+    assert!(all.contains("low"), "{all}");
+}
+
+#[test]
+fn bad_user_rule_warns_but_succeeds() {
+    let t = fixture(FLATPAK_OK);
+    t.write("/home/user/.config/crumbs/rules.d/bad.toml", b"[[rule]\n");
+    let out = crumbs(&t).args(["orphans"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("warning: rules: ")
+    );
+    let v = stdout_json(crumbs(&t).args(["orphans", "--json"]));
+    assert_eq!(v["errors"][0]["source"], "rules");
+}

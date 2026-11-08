@@ -1,0 +1,9 @@
+---
+source: crates/crumbs-cli/tests/cli.rs
+expression: "snapshot_text(&t, &[\"orphans\"])"
+---
+CONF    SIZE     KIND          PATH                     REASON
+high    4.0 KiB  dot-dir       ~/.thunderbird           belongs to thunderbird, which is not installed
+medium  0 B      flatpak-data  ~/.var/app/org.gone.App  data of the Flatpak org.gone.App, which is not installed
+
+2 orphans, 4.0 KiB
