@@ -3,6 +3,7 @@ pub mod desktop;
 pub mod env;
 pub mod error;
 pub mod model;
+pub mod sources;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
