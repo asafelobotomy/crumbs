@@ -74,19 +74,19 @@ pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
 }
 
 /// [`execute`] with the command runner injected; `UserCommand` actions run
-/// through it, and it answers the escalation detection (only done when the
-/// plan holds privileged actions). There is no package post-check.
+/// through it. The escalation program is detected (only when the plan holds
+/// privileged actions) with the query runner, and never under a fake root:
+/// there the programs are user-writable fixtures, so every privileged
+/// action fails as if no escalation program existed. There is no package
+/// post-check.
 pub fn execute_with(
     env: &Env,
     cfg: &Config,
     plan: &Plan,
     runner: &dyn CommandRunner,
 ) -> ExecReport {
-    let esc = plan
-        .actions
-        .iter()
-        .any(is_privileged)
-        .then(|| detect_escalation(env, runner))
+    let esc = (env.root == Path::new("/") && plan.actions.iter().any(is_privileged))
+        .then(|| detect_escalation(env, &SystemRunner::new()))
         .flatten();
     execute_full(
         env,
@@ -110,8 +110,11 @@ pub fn execute_with(
 /// action that depends on another action is skipped (the batch runs before
 /// everything else). A step's marker with status 0 is success; any other
 /// status fails with the step's last output line; a missing marker means
-/// the escalation was cancelled or denied. A succeeded `PackageRemove` is
-/// re-checked with `post_check`; a package still installed fails it.
+/// the escalation was cancelled or denied. Every `PackageRemove` that was
+/// sent to the script is re-checked with `post_check`, whatever its step
+/// said: it succeeds only if the step did and nothing is still installed,
+/// its error lists what was removed and what is still installed, and its
+/// history entry's `packages` holds only what is gone.
 ///
 /// Then the remaining actions, in plan order. An action whose `depends_on`
 /// action (an earlier one) did not succeed is skipped: `ok: false`, with
@@ -248,6 +251,8 @@ fn run_privileged(
         };
         match step {
             Ok(step) => {
+                // Fails closed: only a marker read below can change this.
+                attempt.outcome = Err(ESCALATION_DENIED.into());
                 stepped.push(attempts.len());
                 steps.push(step);
             }
@@ -274,28 +279,101 @@ fn run_privileged(
             return (attempts, false);
         }
     };
-    let stdout = match priv_runner.run(esc, &script) {
-        Ok(out) => out,
+    let (ends, escalation_failed): (Vec<StepEnd>, bool) = match priv_runner.run(esc, &script) {
+        Ok(stdout) => {
+            let outcomes = parse_markers(&stdout, steps.len());
+            let ends: Vec<StepEnd> = (0..steps.len())
+                .map(|n| match outcomes.get(n).map(|o| (o.status, o)) {
+                    Some((Some(0), _)) => StepEnd::Succeeded,
+                    Some((Some(status), o)) => StepEnd::Exited(status, last_line(&o.output)),
+                    Some((None, _)) | None => StepEnd::NotRun(ESCALATION_DENIED.into()),
+                })
+                .collect();
+            let missing = ends.iter().any(|e| matches!(e, StepEnd::NotRun(_)));
+            (ends, missing)
+        }
         Err(e) => {
-            fail_all(&format!("privilege escalation failed: {e}"));
-            return (attempts, true);
+            let msg = format!("privilege escalation failed: {e}");
+            (vec![StepEnd::NotRun(msg); steps.len()], true)
         }
     };
-    let mut escalation_failed = false;
-    for (&k, step) in stepped.iter().zip(parse_markers(&stdout, steps.len())) {
+    for (&k, end) in stepped.iter().zip(ends) {
         let (i, attempt) = &mut attempts[k];
-        attempt.outcome =
-            match step.status {
-                None => {
-                    escalation_failed = true;
-                    Err(ESCALATION_DENIED.into())
+        let action = &plan.actions[*i].action;
+        attempt.outcome = match action {
+            Action::PackageRemove { .. } => check_packages(env, action, end, post_check, attempt),
+            _ => match end {
+                StepEnd::Succeeded => Ok(Done::default()),
+                StepEnd::Exited(status, line) => {
+                    Err(line.unwrap_or_else(|| format!("exited with status {status}")))
                 }
-                Some(0) => post_check_packages(env, &plan.actions[*i].action, post_check),
-                Some(status) => Err(last_line(&step.output)
-                    .unwrap_or_else(|| format!("exited with status {status}"))),
-            };
+                StepEnd::NotRun(msg) => Err(msg),
+            },
+        };
     }
     (attempts, escalation_failed)
+}
+
+/// How a batch step ended.
+#[derive(Clone)]
+enum StepEnd {
+    Succeeded,
+    /// A non-zero status, with the step's last output line.
+    Exited(i32, Option<String>),
+    /// No marker came back; why.
+    NotRun(String),
+}
+
+/// A `PackageRemove`'s outcome once its step ran (or should have): the
+/// packages `post_check` no longer finds are recorded as removed, and the
+/// action succeeds only if the step did and none is left.
+fn check_packages(
+    env: &Env,
+    action: &Action,
+    end: StepEnd,
+    post_check: &PostCheck<'_>,
+    attempt: &mut Attempt,
+) -> Result<Done, String> {
+    let Action::PackageRemove {
+        source,
+        names,
+        versions,
+        program,
+        ..
+    } = action
+    else {
+        return Err("not a package removal".into());
+    };
+    let still = post_check(env, *source, names);
+    let removed: Vec<(String, String)> = names
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| !still.contains(n))
+        .map(|(k, n)| (n.clone(), versions.get(k).cloned().unwrap_or_default()))
+        .collect();
+    let mut parts: Vec<String> = Vec::new();
+    match end {
+        StepEnd::Succeeded => {}
+        StepEnd::Exited(status, line) => parts.push(match line {
+            Some(line) => format!("{program} exited with status {status}: {line}"),
+            None => format!("{program} exited with status {status}"),
+        }),
+        StepEnd::NotRun(msg) => parts.push(msg),
+    }
+    let ok = parts.is_empty() && still.is_empty();
+    if !ok && !removed.is_empty() {
+        let names: Vec<&str> = removed.iter().map(|(n, _)| n.as_str()).collect();
+        parts.push(format!("removed: {}", names.join(", ")));
+    }
+    if !still.is_empty() {
+        parts.push(format!("still installed: {}", still.join(", ")));
+    }
+    attempt.packages = Some(removed);
+    if ok {
+        Ok(Done::default())
+    } else {
+        Err(parts.join("; "))
+    }
 }
 
 /// The batch step for a privileged action, filling in its history fields.
@@ -321,22 +399,7 @@ fn privileged_step(
             return Ok(Step { program: rm, args });
         }
         Action::PrivilegedCommand { program, args } => (program, args),
-        Action::PackageRemove {
-            names,
-            versions,
-            program,
-            args,
-            ..
-        } => {
-            attempt.packages = Some(
-                names
-                    .iter()
-                    .enumerate()
-                    .map(|(n, name)| (name.clone(), versions.get(n).cloned().unwrap_or_default()))
-                    .collect(),
-            );
-            (program, args)
-        }
+        Action::PackageRemove { program, args, .. } => (program, args),
         Action::Trash { .. } | Action::EditFile { .. } | Action::UserCommand { .. } => {
             return Err("not a privileged action".into());
         }
@@ -348,24 +411,6 @@ fn privileged_step(
         program: resolved,
         args: args.iter().map(OsString::from).collect(),
     })
-}
-
-/// A `PackageRemove` whose step succeeded still fails if `post_check` finds
-/// any of its packages installed.
-fn post_check_packages(
-    env: &Env,
-    action: &Action,
-    post_check: &PostCheck<'_>,
-) -> Result<Done, String> {
-    let Action::PackageRemove { source, names, .. } = action else {
-        return Ok(Done::default());
-    };
-    let still = post_check(env, *source, names);
-    if still.is_empty() {
-        Ok(Done::default())
-    } else {
-        Err(format!("still installed: {}", still.join(", ")))
-    }
 }
 
 /// The last non-empty line of a command's output, trimmed.

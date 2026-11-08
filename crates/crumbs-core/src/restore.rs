@@ -207,10 +207,14 @@ fn restore_one(
                 .flatten()
                 .map(|(name, _)| name.as_str())
                 .collect();
-            Err(format!(
-                "packages cannot be restored by crumbs; reinstall with: pacman -S {}",
-                names.join(" ")
-            ))
+            Err(if names.is_empty() {
+                "packages cannot be restored by crumbs".to_string()
+            } else {
+                format!(
+                    "packages cannot be restored by crumbs; reinstall with: pacman -S {}",
+                    names.join(" ")
+                )
+            })
         }
         HistoryAction::Trash => {
             let t = valid_trash(env, cfg, e).ok_or(INVALID_ENTRY)?;
@@ -893,6 +897,15 @@ mod tests {
             "packages cannot be restored by crumbs; reinstall with: pacman -S foo libfoo"
         );
         assert_eq!(by_id(1), "commands cannot be undone");
+        // An entry that names no packages gives no dangling command.
+        let mut e = read_history(&env).unwrap().0.remove(0);
+        for packages in [None, Some(Vec::new())] {
+            e.packages = packages;
+            assert_eq!(
+                restore_one(&env, &Config::default(), &e, true, "1"),
+                Err("packages cannot be restored by crumbs".to_string())
+            );
+        }
         // A batch restore skips both.
         let out = restore(&env, &Config::default(), &sel(&rep.batch), false).unwrap();
         assert_eq!(out.len(), 1);

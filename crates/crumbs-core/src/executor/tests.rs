@@ -1000,18 +1000,17 @@ fn escalation_denied_marks_all_failed_and_skips_dependents() {
         &FakeRunner::new(),
         &pr,
         Some(&esc()),
-        &no_post_check,
+        // Nothing ran, so the package is still there.
+        &|_, _, names| names.to_vec(),
     );
     assert_eq!(*pr.calls.lock().unwrap(), 1);
     assert!(report.escalation_failed);
-    for i in [0, 2] {
-        let r = &report.results[i];
-        assert!(!r.ok);
-        assert_eq!(
-            r.error.as_deref(),
-            Some("privilege escalation was cancelled or denied")
-        );
-    }
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("privilege escalation was cancelled or denied; still installed: foo")
+    );
+    assert_eq!(report.results[2].error.as_deref(), Some(ESCALATION_DENIED));
+    assert!(report.results.iter().all(|r| !r.ok));
     let r = &report.results[1];
     assert!(!r.ok);
     assert!(
@@ -1181,11 +1180,11 @@ fn privileged_step_failure_reports_last_output_line() {
         &FakeRunner::new(),
         &FakePrivilegedRunner::default(),
         Some(&esc()),
-        &no_post_check,
+        &|_, _, names| names.to_vec(),
     );
     assert_eq!(
         report.results[0].error.as_deref(),
-        Some("error: target not found: foo")
+        Some("pacman exited with status 1: error: target not found: foo; still installed: foo")
     );
     assert_eq!(
         report.results[1].error.as_deref(),
@@ -1285,7 +1284,7 @@ fn package_remove_post_check_still_installed() {
     assert!(!report.results[0].ok);
     assert_eq!(
         report.results[0].error.as_deref(),
-        Some("still installed: foo")
+        Some("removed: bar; still installed: foo")
     );
     assert!(report.results[1].ok, "{:?}", report.results[1]);
     assert_eq!(report.freed, 100);
@@ -1298,7 +1297,14 @@ fn package_remove_post_check_still_installed() {
     );
     let (hist, _) = read_history(&env).unwrap();
     assert!(!hist[0].ok);
-    assert_eq!(hist[0].error.as_deref(), Some("still installed: foo"));
+    assert_eq!(
+        hist[0].error.as_deref(),
+        Some("removed: bar; still installed: foo")
+    );
+    assert_eq!(
+        hist[0].packages.as_deref(),
+        Some(&[("bar".to_string(), "2.0-1".to_string())][..])
+    );
 }
 
 #[test]
@@ -1364,4 +1370,182 @@ fn history_records_packages() {
     assert!(text.contains("\"action\":\"package-remove\""), "{text}");
     assert!(text.contains("\"packages\":[[\"foo\",\"1.0-1\"]"), "{text}");
     assert!(text.contains("\"action\":\"privileged-command\""), "{text}");
+}
+
+#[test]
+fn execute_with_on_fake_root_never_escalates() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "", 0);
+    // An escalation program detection would otherwise pick.
+    let esc_log = t.dir.path().join("pkexec.log");
+    logging_program(&t, "pkexec", &esc_log, "", 0);
+    let env = t.env();
+    let plan = plan_of(vec![pkg_remove(&["foo"], &["1.0-1"])]);
+    let runner = FakeRunner::new();
+    let report = execute_with(&env, &Config::default(), &plan, &runner);
+    assert_eq!(report.results[0].error.as_deref(), Some(NO_ESCALATION));
+    assert!(report.escalation_failed);
+    assert!(!esc_log.exists(), "the escalation program ran");
+    assert!(!log.exists());
+    assert!(runner.calls().is_empty(), "{:?}", runner.calls());
+}
+
+/// A runner that hands back canned stdout without running anything.
+struct CannedRunner(Vec<u8>);
+
+impl PrivilegedRunner for CannedRunner {
+    fn run(&self, _: &Escalation, _: &[u8]) -> Result<Vec<u8>, crate::error::CoreError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[test]
+fn partial_markers_give_mixed_results() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "flatpak", &log, "", 0);
+    let env = t.env();
+    let plan = plan_of(vec![
+        priv_cmd("flatpak", &["a"]),
+        priv_cmd("flatpak", &["b"]),
+    ]);
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &CannedRunner(b"|done\n@@crumbs 0 0\n".to_vec()),
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    assert!(!report.results[1].ok);
+    assert_eq!(report.results[1].error.as_deref(), Some(ESCALATION_DENIED));
+    assert!(report.escalation_failed);
+}
+
+#[test]
+fn too_large_batch_fails_without_escalation_failure() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "flatpak", &log, "", 0);
+    let env = t.env();
+    let big = "x".repeat(130 * 1024);
+    let plan = plan_of(vec![
+        priv_cmd("flatpak", &["a"]),
+        priv_cmd("flatpak", &[&big]),
+    ]);
+    let pr = DeniedRunner::default();
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &pr,
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert_eq!(*pr.calls.lock().unwrap(), 0);
+    assert!(!report.escalation_failed);
+    for r in &report.results {
+        assert!(!r.ok);
+        assert!(
+            r.error.as_deref().unwrap().starts_with("too many items"),
+            "{r:?}"
+        );
+    }
+}
+
+#[test]
+fn dependent_of_package_failing_post_check_is_skipped() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "", 0);
+    t.write("home/user/.config/foo/a", b"a");
+    let env = t.env();
+    let mut leftover = planned(&env, trash("/home/user/.config/foo"));
+    leftover.depends_on = Some(0);
+    let plan = plan_of(vec![pkg_remove(&["foo"], &["1.0-1"]), leftover]);
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &FakePrivilegedRunner::default(),
+        Some(&esc()),
+        &|_, _, names| names.to_vec(),
+    );
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("still installed: foo")
+    );
+    assert!(!report.results[1].ok);
+    assert!(
+        report.results[1]
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with("skipped: ")
+    );
+    assert!(env.sys("/home/user/.config/foo/a").exists());
+}
+
+#[test]
+fn failed_package_step_reports_what_was_removed() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(
+        &t,
+        "pacman",
+        &log,
+        "error: failed to commit transaction\n",
+        1,
+    );
+    let env = t.env();
+    let plan = plan_of(vec![pkg_remove(&["a", "b", "c"], &["1", "2", "3"])]);
+    let still = |_: &Env, _: SourceKind, _: &[String]| vec!["c".to_string()];
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &FakePrivilegedRunner::default(),
+        Some(&esc()),
+        &still,
+    );
+    assert!(!report.results[0].ok);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some(
+            "pacman exited with status 1: error: failed to commit transaction; \
+             removed: a, b; still installed: c"
+        )
+    );
+    let (hist, _) = read_history(&env).unwrap();
+    assert_eq!(
+        hist[0].packages.as_deref(),
+        Some(&[("a".to_string(), "1".to_string()), ("b".into(), "2".into())][..])
+    );
+
+    // A missing marker: the post-check still says what is gone.
+    let t = FixtureTree::new();
+    logging_program(&t, "pacman", &log, "", 0);
+    let env = t.env();
+    let none_left = |_: &Env, _: SourceKind, _: &[String]| Vec::new();
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan_of(vec![pkg_remove(&["a"], &["1"])]),
+        &FakeRunner::new(),
+        &DeniedRunner::default(),
+        Some(&esc()),
+        &none_left,
+    );
+    assert!(!report.results[0].ok);
+    assert!(report.escalation_failed);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("privilege escalation was cancelled or denied; removed: a")
+    );
 }
