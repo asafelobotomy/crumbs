@@ -1,12 +1,15 @@
 //! The bloat model: categories of reclaimable space, the scanner registry
 //! and the parallel scan driver.
 
+mod browser;
 mod cache;
 mod dev;
 mod logs;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod scanner_tests;
+mod temp;
+mod trash;
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -154,6 +157,9 @@ pub fn scanners() -> Vec<Box<dyn Scanner>> {
     vec![
         Box::new(cache::CacheScanner),
         Box::new(cache::ThumbnailsScanner),
+        Box::new(trash::TrashScanner),
+        Box::new(temp::TempScanner),
+        Box::new(browser::BrowserCacheScanner),
         Box::new(dev::DevCacheScanner),
         Box::new(logs::LogsScanner),
     ]

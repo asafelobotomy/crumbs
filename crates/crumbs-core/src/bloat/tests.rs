@@ -277,3 +277,512 @@ fn protected_or_excluded_never_listed() {
     assert!(run(&t, &cfg, &i, Category::Logs).is_empty());
     assert!(run(&t, &cfg, &i, Category::DevCache).is_empty());
 }
+
+// ---- browser-cache, temp, trash ------------------------------------------
+
+use crate::command::CmdOutput;
+
+fn scan_one(
+    t: &FixtureTree,
+    cfg: &Config,
+    runner: &FakeRunner,
+    cat: Category,
+) -> Result<Vec<BloatItem>, CoreError> {
+    let env = t.env();
+    let i = inv(vec![]);
+    let cx = ScanContext {
+        env: &env,
+        cfg,
+        inv: &i,
+        runner,
+        now: SystemTime::now(),
+    };
+    scanners()
+        .into_iter()
+        .find(|s| s.category() == cat)
+        .unwrap()
+        .scan(&cx)
+}
+
+fn labels(items: &[BloatItem]) -> Vec<&str> {
+    items.iter().map(|i| i.label.as_str()).collect()
+}
+
+/// Sets atime and mtime of `p` (never following a symlink) to `days` ago.
+fn age_nofollow(p: &Path, days: u64) {
+    use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, utimensat};
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - days * 86_400
+        - 3600;
+    let ts = Timespec {
+        tv_sec: secs as i64,
+        tv_nsec: 0,
+    };
+    utimensat(
+        CWD,
+        p,
+        &Timestamps {
+            last_access: ts,
+            last_modification: ts,
+        },
+        AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .unwrap();
+}
+
+fn check_browser(t: &FixtureTree, items: &[BloatItem]) {
+    let cfg = Config::default();
+    check_common(t, &cfg, items);
+    for i in items {
+        assert_eq!(i.category, Category::BrowserCache);
+        assert!(i.rebuildable);
+        assert!(i.extra_paths.is_empty());
+    }
+}
+
+#[test]
+fn browser_profiles_found() {
+    let t = FixtureTree::new();
+    let ff = "home/user/.cache/mozilla/firefox/ab12.default-release";
+    t.write(&format!("{ff}/cache2/entries/e1"), b"x");
+    t.write(&format!("{ff}/startupCache/s"), b"x");
+    let brave = "home/user/.cache/BraveSoftware/Brave-Origin/Default";
+    t.write(&format!("{brave}/Cache/Cache_Data/d"), b"x");
+    t.write(&format!("{brave}/Code Cache/js/j"), b"x");
+    t.write(&format!("{brave}/GPUCache/g"), b"x");
+    t.write(&format!("{brave}/Other/o"), b"x");
+    t.write("home/user/.cache/google-chrome/Profile 1/Cache/c", b"x");
+    // A symlinked profile is never expanded.
+    t.write("home/user/Keep/Cache/precious", b"x");
+    t.symlink("home/user/.cache/google-chrome/Linked", "/home/user/Keep");
+    // A symlinked cache dir, or a plain file where a dir belongs, is skipped.
+    t.write("home/user/Keep2/precious", b"x");
+    t.symlink(
+        "home/user/.cache/chromium/Default/Cache",
+        "/home/user/Keep2",
+    );
+    t.write("home/user/.cache/vivaldi/Default/GPUCache", b"file");
+    let runner = FakeRunner::new();
+    let items = scan_one(&t, &Config::default(), &runner, Category::BrowserCache).unwrap();
+    let mut got: Vec<(PathBuf, String)> = items
+        .iter()
+        .map(|i| (i.path.clone().unwrap(), i.label.clone()))
+        .collect();
+    got.sort();
+    let c = "/home/user/.cache";
+    assert_eq!(
+        got,
+        [
+            (
+                PathBuf::from(format!("{c}/BraveSoftware/Brave-Origin/Default/Cache")),
+                "Brave (Brave-Origin/Default)".to_string()
+            ),
+            (
+                PathBuf::from(format!("{c}/BraveSoftware/Brave-Origin/Default/Code Cache")),
+                "Brave (Brave-Origin/Default)".to_string()
+            ),
+            (
+                PathBuf::from(format!("{c}/BraveSoftware/Brave-Origin/Default/GPUCache")),
+                "Brave (Brave-Origin/Default)".to_string()
+            ),
+            (
+                PathBuf::from(format!("{c}/google-chrome/Profile 1/Cache")),
+                "Chrome (Profile 1)".to_string()
+            ),
+            (
+                PathBuf::from(format!("{c}/mozilla/firefox/ab12.default-release/cache2")),
+                "Firefox (ab12.default-release)".to_string()
+            ),
+        ]
+    );
+    assert!(items.iter().all(|i| i.preselected && i.note.is_none()));
+    check_browser(&t, &items);
+    // No Flatpak cache dirs: flatpak is never asked.
+    assert!(runner.calls().is_empty());
+}
+
+#[test]
+fn browser_running_not_preselected() {
+    let t = FixtureTree::new();
+    t.write(
+        "home/user/.cache/BraveSoftware/Brave-Browser/Default/Cache/x",
+        b"x",
+    );
+    t.write("home/user/.cache/mozilla/firefox/p.default/cache2/x", b"x");
+    t.symlink("proc/77/exe", "/opt/brave.com/brave/brave");
+    t.symlink("proc/78/exe", "/usr/bin/bash");
+    let items = scan_one(
+        &t,
+        &Config::default(),
+        &FakeRunner::new(),
+        Category::BrowserCache,
+    )
+    .unwrap();
+    assert_eq!(items.len(), 2);
+    let brave = items.iter().find(|i| i.label.starts_with("Brave")).unwrap();
+    assert!(!brave.preselected);
+    assert_eq!(brave.note.as_deref(), Some("Brave is running"));
+    let ff = items
+        .iter()
+        .find(|i| i.label.starts_with("Firefox"))
+        .unwrap();
+    assert!(ff.preselected && ff.note.is_none());
+    check_browser(&t, &items);
+
+    // A browser whose binary was replaced by an update still counts.
+    t.symlink("proc/79/exe", "/usr/lib/firefox/firefox (deleted)");
+    let items = scan_one(
+        &t,
+        &Config::default(),
+        &FakeRunner::new(),
+        Category::BrowserCache,
+    )
+    .unwrap();
+    assert!(items.iter().all(|i| !i.preselected));
+    let ff = items
+        .iter()
+        .find(|i| i.label.starts_with("Firefox"))
+        .unwrap();
+    assert_eq!(ff.note.as_deref(), Some("Firefox is running"));
+}
+
+#[test]
+fn flatpak_browser_cache_found() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/flatpak", b"#!/bin/sh\n");
+    let ff = "home/user/.var/app/org.mozilla.firefox/cache/mozilla/firefox/xy.default";
+    t.write(&format!("{ff}/cache2/x"), b"x");
+    let br = "home/user/.var/app/com.brave.Browser/cache/BraveSoftware/Brave-Browser/Default";
+    t.write(&format!("{br}/GPUCache/x"), b"x");
+    // Another app's pattern under a browser's Flatpak id is not matched.
+    t.write(
+        "home/user/.var/app/org.mozilla.firefox/cache/chromium/Default/Cache/x",
+        b"x",
+    );
+    let ps = CmdOutput {
+        status: 0,
+        stdout: "com.brave.Browser\norg.other.App\n".into(),
+        stderr: String::new(),
+    };
+    let runner = FakeRunner::new().on("flatpak", &["ps", "--columns=application"], ps);
+    let items = scan_one(&t, &Config::default(), &runner, Category::BrowserCache).unwrap();
+    let mut got = paths(&items);
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            PathBuf::from(format!("/{br}/GPUCache")),
+            PathBuf::from(format!("/{ff}/cache2")),
+        ]
+    );
+    let brave = items.iter().find(|i| i.label.starts_with("Brave")).unwrap();
+    assert_eq!(brave.label, "Brave (Brave-Browser/Default)");
+    assert!(!brave.preselected);
+    assert_eq!(brave.note.as_deref(), Some("Brave is running"));
+    let fox = items
+        .iter()
+        .find(|i| i.label.starts_with("Firefox"))
+        .unwrap();
+    assert_eq!(fox.label, "Firefox (xy.default)");
+    assert!(fox.preselected && fox.note.is_none());
+    check_browser(&t, &items);
+    // Asked once, however many Flatpak items there are.
+    assert_eq!(runner.calls(), ["flatpak ps --columns=application"]);
+
+    // `flatpak ps` failing, or no trusted flatpak: fail closed.
+    let failing = FakeRunner::new().on(
+        "flatpak",
+        &["ps", "--columns=application"],
+        CmdOutput {
+            status: 1,
+            stdout: String::new(),
+            stderr: "boom".into(),
+        },
+    );
+    for runner in [FakeRunner::new(), failing] {
+        let items = scan_one(&t, &Config::default(), &runner, Category::BrowserCache).unwrap();
+        assert_eq!(items.len(), 2);
+        for i in &items {
+            assert!(!i.preselected);
+            let browser = i.label.split(' ').next().unwrap();
+            assert_eq!(
+                i.note.as_deref(),
+                Some(format!("could not check whether {browser} is running").as_str())
+            );
+        }
+    }
+    fs::remove_file(t.dir.path().join("usr/bin/flatpak")).unwrap();
+    let runner = FakeRunner::new();
+    let items = scan_one(&t, &Config::default(), &runner, Category::BrowserCache).unwrap();
+    assert!(items.iter().all(|i| !i.preselected));
+    assert!(runner.calls().is_empty());
+}
+
+fn check_temp(t: &FixtureTree, items: &[BloatItem]) {
+    let env = t.env();
+    let cfg = Config::default();
+    for i in items {
+        let p = i.path.as_ref().unwrap();
+        assert_eq!(i.category, Category::Temp);
+        assert_eq!(i.scope, Scope::UserTemp);
+        assert_eq!(i.action, ItemAction::Delete);
+        assert_eq!(
+            i.note.as_deref(),
+            Some("deleted permanently (temporary file)")
+        );
+        assert!(!i.rebuildable && i.preselected);
+        assert!(is_allowed_target(&env, &cfg, Scope::UserTemp, p));
+        verify(
+            &env,
+            &cfg,
+            Scope::UserTemp,
+            p,
+            i.fingerprint.as_ref().unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn temp_rules() {
+    use rustix::fs::{CWD, FileType, Mode, mknodat};
+    let t = FixtureTree::new();
+    let tmp = t.mkdir("tmp");
+    let sock = tmp.join("sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let fifo = tmp.join("fifo");
+    mknodat(CWD, &fifo, FileType::Fifo, Mode::from_raw_mode(0o600), 0).unwrap();
+    let mut old: Vec<PathBuf> = vec![sock, fifo];
+    for name in [
+        ".X11-unix",
+        ".ICE-unix",
+        ".font-unix",
+        "tmux-1000",
+        "ssh-XXXXabc",
+        "systemd-private-abc-colord.service-x",
+        "pulse-abc",
+    ] {
+        old.push(t.write(&format!("tmp/{name}/f"), b"x"));
+        old.push(tmp.join(name));
+    }
+    for name in ["krb5cc_1000", ".s.PGSQL.5432", ".X0-lock"] {
+        old.push(t.write(&format!("tmp/{name}"), b"x"));
+    }
+    t.write("tmp/fresh", b"x");
+    t.write("tmp/olddir-fresh/sub/new", b"x");
+    old.push(tmp.join("olddir-fresh/sub"));
+    old.push(tmp.join("olddir-fresh"));
+    old.push(t.write("tmp/oldfile", b"x"));
+    old.push(t.write("tmp/olddir-old/sub/a", b"x"));
+    old.push(t.write("tmp/olddir-old/b", b"x"));
+    old.push(tmp.join("olddir-old/sub"));
+    old.push(tmp.join("olddir-old"));
+    // A dir holding a socket may be live IPC: skipped.
+    let inner = tmp.join("olddir-sock");
+    fs::create_dir(&inner).unwrap();
+    let _l2 = std::os::unix::net::UnixListener::bind(inner.join("s")).unwrap();
+    old.push(inner.join("s"));
+    old.push(inner);
+    // An old symlink is never a candidate.
+    t.symlink("tmp/oldlink", "/tmp/oldfile");
+    old.push(tmp.join("oldlink"));
+    for p in &old {
+        age_nofollow(p, 30);
+    }
+    let items = scan_one(&t, &Config::default(), &FakeRunner::new(), Category::Temp).unwrap();
+    assert_eq!(
+        paths(&items),
+        [
+            PathBuf::from("/tmp/olddir-old"),
+            PathBuf::from("/tmp/oldfile")
+        ]
+    );
+    assert_eq!(labels(&items), ["/tmp/olddir-old", "/tmp/oldfile"]);
+    check_temp(&t, &items);
+
+    // The age threshold comes from the config.
+    let cfg = Config {
+        temp_age_days: 60,
+        ..Config::default()
+    };
+    assert!(
+        scan_one(&t, &cfg, &FakeRunner::new(), Category::Temp)
+            .unwrap()
+            .is_empty()
+    );
+    // Excluded paths are never listed.
+    let cfg = Config {
+        exclude: vec!["/tmp/oldfile".into()],
+        ..Config::default()
+    };
+    assert_eq!(
+        paths(&scan_one(&t, &cfg, &FakeRunner::new(), Category::Temp).unwrap()),
+        [PathBuf::from("/tmp/olddir-old")]
+    );
+}
+
+#[test]
+fn temp_dir_over_cap_skipped() {
+    let t = FixtureTree::new();
+    let big = t.mkdir("tmp/big");
+    for i in 0..10_001 {
+        let p = big.join(format!("f{i}"));
+        fs::write(&p, b"").unwrap();
+        age_nofollow(&p, 30);
+    }
+    age_nofollow(&big, 30);
+    let at_cap = t.mkdir("tmp/atcap");
+    for i in 0..10_000 {
+        let p = at_cap.join(format!("f{i}"));
+        fs::write(&p, b"").unwrap();
+        age_nofollow(&p, 30);
+    }
+    age_nofollow(&at_cap, 30);
+    let items = scan_one(&t, &Config::default(), &FakeRunner::new(), Category::Temp).unwrap();
+    assert_eq!(paths(&items), [PathBuf::from("/tmp/atcap")]);
+}
+
+#[test]
+fn temp_owner_rule() {
+    use std::os::unix::fs::MetadataExt;
+    let t = FixtureTree::new();
+    let f = t.write("tmp/f", b"x");
+    let d = t.mkdir("tmp/d");
+    t.symlink("tmp/l", "/tmp/f");
+    let fm = fs::symlink_metadata(&f).unwrap();
+    let dm = fs::symlink_metadata(&d).unwrap();
+    let lm = fs::symlink_metadata(t.dir.path().join("tmp/l")).unwrap();
+    let me = fm.uid();
+    let now = SystemTime::now();
+    let week = Duration::from_secs(7 * 86_400);
+    let old = now - Duration::from_secs(30 * 86_400);
+    let ok = |name: &str, owner: u32, ft: fs::FileType, mtime: SystemTime| {
+        super::temp::temp_candidate(std::ffi::OsStr::new(name), owner, me, ft, mtime, now, week)
+    };
+    assert!(ok("a", me, fm.file_type(), old));
+    assert!(ok("a", me, dm.file_type(), old));
+    // Someone else's file or dir.
+    assert!(!ok("a", me.wrapping_add(1), fm.file_type(), old));
+    assert!(!ok("a", 0, dm.file_type(), old));
+    assert!(!ok("a", me, lm.file_type(), old));
+    assert!(!ok("a", me, fm.file_type(), now));
+    // mtime in the future is not old.
+    assert!(!ok("a", me, fm.file_type(), now + week));
+    assert!(!ok("tmux-1000", me, dm.file_type(), old));
+}
+
+fn check_trash(t: &FixtureTree, items: &[BloatItem]) {
+    let env = t.env();
+    let cfg = Config::default();
+    for i in items {
+        assert_eq!(i.category, Category::Trash);
+        assert_eq!(i.scope, Scope::HomeTrash);
+        assert_eq!(i.action, ItemAction::Delete);
+        assert!(!i.rebuildable && i.preselected);
+        let p = i.path.as_ref().unwrap();
+        verify(
+            &env,
+            &cfg,
+            Scope::HomeTrash,
+            p,
+            i.fingerprint.as_ref().unwrap(),
+        )
+        .unwrap();
+        for (x, fp) in &i.extra_paths {
+            verify(&env, &cfg, Scope::HomeTrash, x, fp).unwrap();
+        }
+    }
+}
+
+#[test]
+fn trash_pairs_and_orphans() {
+    let t = FixtureTree::new();
+    let r = FakeRunner::new();
+    let cfg = Config::default();
+    // No trash yet: nothing to do, no error.
+    assert!(scan_one(&t, &cfg, &r, Category::Trash).unwrap().is_empty());
+    let tr = "home/user/.local/share/Trash";
+    let info = |name: &str, path: &str| {
+        let body = format!("[Trash Info]\nPath={path}\nDeletionDate=2026-01-01T00:00:00\n");
+        t.write(&format!("{tr}/info/{name}.trashinfo"), body.as_bytes());
+    };
+    t.write(&format!("{tr}/files/a.txt"), b"aaaa");
+    info("a.txt", "/home/user/My%20Docs/a.txt");
+    t.write(&format!("{tr}/files/d/inner"), b"x");
+    info("d", "/srv/caf%C3%A9");
+    t.write(&format!("{tr}/files/x"), b"orphan file");
+    info("y", "/home/user/y");
+    t.write(&format!("{tr}/info/z.trashinfo"), b"[Trash Info]\n");
+    t.write(&format!("{tr}/info/junk"), b"not a trashinfo");
+    let items = scan_one(&t, &cfg, &r, Category::Trash).unwrap();
+    let h = "/home/user/.local/share/Trash";
+    let got: Vec<(PathBuf, Vec<PathBuf>, &str)> = items
+        .iter()
+        .map(|i| {
+            (
+                i.path.clone().unwrap(),
+                i.extra_paths.iter().map(|(p, _)| p.clone()).collect(),
+                i.label.as_str(),
+            )
+        })
+        .collect();
+    let pb = |s: &str| PathBuf::from(format!("{h}/{s}"));
+    assert_eq!(
+        got,
+        [
+            (
+                pb("files/a.txt"),
+                vec![pb("info/a.txt.trashinfo")],
+                "~/My Docs/a.txt"
+            ),
+            (pb("files/d"), vec![pb("info/d.trashinfo")], "/srv/café"),
+            (pb("files/x"), vec![], "x (no trash info)"),
+            (pb("info/y.trashinfo"), vec![], "~/y"),
+            (pb("info/z.trashinfo"), vec![], "z (no trash info)"),
+        ]
+    );
+    check_trash(&t, &items);
+    // Protected entries are never listed.
+    let cfg = Config {
+        protect: vec![pb("files/a.txt")],
+        ..Config::default()
+    };
+    let items = scan_one(&t, &cfg, &r, Category::Trash).unwrap();
+    assert!(!paths(&items).contains(&pb("files/a.txt")));
+    assert_eq!(items.len(), 4);
+}
+
+#[test]
+fn trash_symlinked_files_dir_is_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = FixtureTree::new();
+    let r = FakeRunner::new();
+    let cfg = Config::default();
+    let tr = t.mkdir("home/user/.local/share/Trash");
+    t.mkdir("home/user/.local/share/Trash/info");
+    t.write("elsewhere/precious", b"x");
+    t.symlink("home/user/.local/share/Trash/files", "/elsewhere");
+    assert!(scan_one(&t, &cfg, &r, Category::Trash).is_err());
+    // A trash writable by others is refused too.
+    fs::remove_file(tr.join("files")).unwrap();
+    t.write("home/user/.local/share/Trash/files/x", b"x");
+    assert_eq!(scan_one(&t, &cfg, &r, Category::Trash).unwrap().len(), 1);
+    fs::set_permissions(&tr, fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(scan_one(&t, &cfg, &r, Category::Trash).is_err());
+    fs::set_permissions(&tr, fs::Permissions::from_mode(0o700)).unwrap();
+    // A missing `info` dir in an existing trash fails closed.
+    fs::remove_dir(tr.join("info")).unwrap();
+    assert!(scan_one(&t, &cfg, &r, Category::Trash).is_err());
+}
+
+#[test]
+fn registry_follows_category_order() {
+    let cats: Vec<Category> = scanners().iter().map(|s| s.category()).collect();
+    assert!(cats.windows(2).all(|w| w[0] < w[1]), "{cats:?}");
+    for c in [Category::Trash, Category::Temp, Category::BrowserCache] {
+        assert!(cats.contains(&c), "{c:?}");
+    }
+}
