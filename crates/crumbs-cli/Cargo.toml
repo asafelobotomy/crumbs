@@ -9,3 +9,18 @@ name = "crumbs"
 path = "src/main.rs"
 
 [dependencies]
+anstream = "1.0.0"
+anstyle = "1.0.14"
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+crumbs-core = { version = "0.1.0", path = "../crumbs-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+crumbs-core = { path = "../crumbs-core", features = ["test-support"] }
+insta = { version = "1.49.0", features = ["json", "filters"] }
+predicates = "3.1.4"
+serde_json = "1.0.154"
+tempfile = "3.27.0"
