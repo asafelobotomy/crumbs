@@ -10,10 +10,13 @@ use crate::error::CoreError;
 use crate::trash::Trashed;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum HistoryAction {
     Trash,
     Delete,
+    /// `edit-file`, like the plan's action tag. Lines written before that
+    /// spelling (`edit_file`) still parse.
+    #[serde(alias = "edit_file")]
     EditFile,
     Restore,
 }
@@ -185,6 +188,19 @@ mod tests {
         let line = br#"{"id":"1-0","batch":"1","time":"t","action":"trash","path":"/home/user/f","trashed":null,"backup":null,"size":1,"ok":true,"error":null,"app_id":null}"#;
         let e: HistoryEntry = serde_json::from_slice(line).unwrap();
         assert_eq!(e.restores, None);
+    }
+
+    #[test]
+    fn edit_file_action_is_kebab_case_and_reads_old_spelling() {
+        let v = serde_json::to_value(HistoryAction::EditFile).unwrap();
+        assert_eq!(v, "edit-file");
+        for spelling in ["\"edit-file\"", "\"edit_file\""] {
+            let a: HistoryAction = serde_json::from_str(spelling).unwrap();
+            assert_eq!(a, HistoryAction::EditFile, "{spelling}");
+        }
+        let line = br#"{"id":"1-0","batch":"1","time":"t","action":"edit_file","path":"/home/user/.config/mimeapps.list","trashed":null,"backup":"/home/user/.config/mimeapps.list.crumbs-bak-1","size":0,"ok":true,"error":null,"app_id":null,"restores":null}"#;
+        let e: HistoryEntry = serde_json::from_slice(line).unwrap();
+        assert_eq!(e.action, HistoryAction::EditFile);
     }
 
     #[test]

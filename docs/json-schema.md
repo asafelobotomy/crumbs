@@ -433,11 +433,11 @@ With `--leftovers-only`, the plan leaves out what launches or opens the app: its
 | `restored` | number | Entries of this batch that a later successful restore put back. |
 | `entries` | array | History entries (below). |
 
-**History entry**: `id` (`<batch>-<index>`), `batch`, `time`, `action` (`trash`, `delete`, `edit_file` or `restore`), `path`, `trashed` (null, or `{ original, files_path, info_path }`), `backup` (string or null), `size` (number), `ok` (boolean), `error` (string or null), `app_id` (string or null) and `restores` (string or null).
+**History entry**: `id` (`<batch>-<index>`), `batch`, `time`, `action` (`trash`, `delete`, `edit-file` or `restore`; lines written by earlier builds may say `edit_file`, which means the same), `path`, `trashed` (null, or `{ original, files_path, info_path }`), `backup` (string or null), `size` (number), `ok` (boolean), `error` (string or null), `app_id` (string or null) and `restores` (string or null).
 
 - `trashed` is set for `trash` entries, and on `restore` entries it repeats the trash record that was restored.
-- On an `edit_file` entry, `backup` is the copy of the file as it was before the edit.
-- On a `restore` entry, `restores` is the ID of the entry it restored. For a restored `edit_file`, `backup` is the **pre-restore backup**: a copy of the file as it was just before the restore overwrote it. For other entries `backup` is null.
+- On an `edit-file` entry, `backup` is the copy of the file as it was before the edit.
+- On a `restore` entry, `restores` is the ID of the entry it restored. For a restored `edit-file`, `backup` is the **pre-restore backup**: a copy of the file as it was just before the restore overwrote it. For other entries `backup` is null.
 - Failed attempts are recorded too (`ok` false, `error` set).
 
 `errors` has a `history` entry when unreadable lines were skipped. Exit 0. Example (a trashed orphan, then a restore of it; one batch of each):
