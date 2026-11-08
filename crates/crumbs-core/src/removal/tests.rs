@@ -326,6 +326,11 @@ mod unmanaged {
         a.display_name = name.into();
         a.desktop_ids.push(format!("{name}.desktop"));
         a.program = Some(PathBuf::from(program));
+        a.exec_names.extend(
+            Path::new(program)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned()),
+        );
         a
     }
 
@@ -489,6 +494,44 @@ mod unmanaged {
         assert_eq!(tg.path, Path::new("/opt/inky"));
         assert_eq!(tg.left_link.as_deref(), Some(Path::new("/usr/bin/inky")));
         assert!(tg.home_link.is_none());
+    }
+
+    #[test]
+    fn unmanaged_name_check_ignores_exec_names() {
+        let t = FixtureTree::new();
+        t.write_exec("opt/inky/Inky", b"");
+        t.write_exec("home/user/.local/bin/foo", b"");
+        let env = sys_env(&t);
+        // A planted entry whose only link to /opt/inky is its Exec line.
+        let mut evil = app("evil", "/opt/inky/Inky");
+        evil.display_name = "Totally Unrelated".into();
+        let i = inv(vec![evil.clone()], &["/usr/bin/true"], true);
+        assert!(reason(plan(&env, &i, &evil)).contains("does not match the app's name"));
+        let bar = app("bar", "/home/user/.local/bin/foo");
+        let i = inv(vec![bar.clone()], &["/usr/bin/true"], true);
+        assert!(reason(plan(&env, &i, &bar)).contains("does not match the app's name"));
+        // The display name counts; the genuine case still works.
+        let mut shown = app("evil", "/opt/inky/Inky");
+        shown.display_name = "Inky".into();
+        let i = inv(vec![shown.clone()], &["/usr/bin/true"], true);
+        assert!(plan(&env, &i, &shown).is_ok());
+        let inky = app("inky", "/opt/inky/Inky");
+        let i = inv(vec![inky.clone()], &["/usr/bin/true"], true);
+        assert!(plan(&env, &i, &inky).is_ok());
+    }
+
+    #[test]
+    fn unmanaged_same_id_is_not_sharing_but_other_app_is() {
+        let t = FixtureTree::new();
+        t.write_exec("opt/inky/Inky", b"");
+        let env = sys_env(&t);
+        let a = app("inky", "/opt/inky/Inky");
+        let i = inv(vec![a.clone(), a.clone()], &["/usr/bin/true"], true);
+        assert!(plan(&env, &i, &a).is_ok());
+        let mut other = a.clone();
+        other.id = "unmanaged:other.desktop".into();
+        let i = inv(vec![a.clone(), other], &["/usr/bin/true"], true);
+        assert!(reason(plan(&env, &i, &a)).contains("is shared with"));
     }
 
     #[test]

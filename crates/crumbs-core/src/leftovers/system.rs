@@ -53,6 +53,21 @@ pub(crate) fn app_name_sets(app: &App) -> (Vec<String>, Vec<NameKey>) {
     (names, keys)
 }
 
+/// Like [`app_name_sets`] but only names the user chose: no `Exec`
+/// basenames (derived from the program path, so they prove nothing about a
+/// path) and with the desktop entry's display `Name=` added.
+pub(crate) fn strong_name_sets(app: &App) -> (Vec<String>, Vec<NameKey>) {
+    let mut no_exec = app.clone();
+    no_exec.exec_names.clear();
+    let (mut names, _) = app_name_sets(&no_exec);
+    let key = NameKey::new(&app.display_name);
+    if usable(&app.display_name, &key.norm) && !names.contains(&app.display_name) {
+        names.push(app.display_name.clone());
+    }
+    let keys = names.iter().map(|n| NameKey::new(n)).collect();
+    (names, keys)
+}
+
 /// What one app claims in `/etc` and `/opt`, computed once per app.
 struct Claimant {
     /// `(path, reason)` of rule paths.

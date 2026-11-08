@@ -7,7 +7,7 @@ use crate::config::Config;
 use crate::env::{Env, display_path};
 use crate::inventory::Inventory;
 use crate::leftovers::candidates::NameKey;
-use crate::leftovers::system::app_name_sets;
+use crate::leftovers::system::strong_name_sets;
 use crate::model::App;
 use crate::ownership::tmpfiles_declared;
 use crate::safety::{self, Fingerprint, Scope};
@@ -22,6 +22,9 @@ pub struct UnmanagedTarget {
     pub fingerprint: Fingerprint,
     pub size: DiskUsage,
     pub left_link: Option<PathBuf>,
+    /// Whether `left_link` is in a protected path (else it is just outside
+    /// what can be removed here).
+    pub left_link_protected: bool,
     /// A symlink to the program in a non-protected home location, with its
     /// fingerprint: removed together with the target.
     pub home_link: Option<(PathBuf, Fingerprint)>,
@@ -124,12 +127,16 @@ pub fn plan_unmanaged(
         safety::verify_now(env, cfg, scope, &path).map_err(|e| refuse(format!("{e}")))?;
     let fingerprint = safety::fingerprint(env, &path).unwrap_or(verified);
     let mut left_link = None;
+    let mut left_link_protected = false;
     let mut home_link = None;
     if let Some(link) = app.program_link.clone().filter(|l| !l.starts_with(&path)) {
         let in_home = link.starts_with(&home);
         match safety::verify_now(env, cfg, Scope::Home, &link) {
             Ok(fp) if in_home => home_link = Some((link, fp)),
-            _ => left_link = Some(link),
+            _ => {
+                left_link_protected = safety::is_protected(env, cfg, &link);
+                left_link = Some(link);
+            }
         }
     }
     Ok(UnmanagedTarget {
@@ -138,14 +145,15 @@ pub fn plan_unmanaged(
         scope,
         fingerprint,
         left_link,
+        left_link_protected,
         home_link,
     })
 }
 
-/// Whether `leaf` is one of the app's names: exact (ignoring case) or by
+/// Whether `leaf` is one of the app's own names (never `Exec` basenames): exact (ignoring case) or by
 /// normalised key.
 fn matches_app(app: &App, leaf: &str) -> bool {
-    let (names, keys) = app_name_sets(app);
+    let (names, keys) = strong_name_sets(app);
     if names.iter().any(|n| n.eq_ignore_ascii_case(leaf)) {
         return true;
     }

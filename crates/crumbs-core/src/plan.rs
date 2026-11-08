@@ -200,8 +200,13 @@ pub fn build_plan_unmanaged(
             }
             if let Some(link) = &t.left_link {
                 notes.push(format!(
-                    "{} is left in place (protected path)",
-                    crate::env::display_path(env, link)
+                    "{} is left in place{}",
+                    crate::env::display_path(env, link),
+                    if t.left_link_protected {
+                        " (protected path)"
+                    } else {
+                        ""
+                    }
                 ));
             }
             skip_path = Some(t.path.clone());
@@ -451,6 +456,7 @@ mod tests {
             fingerprint: safety::fingerprint(&env, Path::new("/opt/inky")).unwrap(),
             size: disk_usage(&env, Path::new("/opt/inky")),
             left_link: Some("/usr/bin/inky".into()),
+            left_link_protected: true,
             home_link: None,
         };
         let home = finding(&env, "/home/user/.config/inky", FindingKind::Config);
