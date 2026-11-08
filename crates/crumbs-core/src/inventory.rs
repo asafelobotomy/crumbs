@@ -164,7 +164,7 @@ pub fn discover(
         apps,
         statuses,
         errors,
-        owned: OwnedIndex::new(owned, owned_dirs.into_iter().collect()),
+        owned: OwnedIndex::new(owned, owned_dirs, package_db_listed),
     }
 }
 
@@ -551,5 +551,28 @@ mod tests {
         let v = serde_json::to_value(&inv).unwrap();
         assert_eq!(v["statuses"][3]["source"], "unmanaged");
         assert!(v["apps"].is_array());
+    }
+
+    #[test]
+    fn owned_index_completeness_follows_package_db() {
+        let run = |t: &FixtureTree| {
+            discover(
+                &t.env(),
+                &FakeRunner::new(),
+                &ListOptions::default(),
+                &Config::default(),
+            )
+        };
+        let t = FixtureTree::new();
+        t.pacman_pkg("ok", "1-1", Some(1), &["opt/ok/"]);
+        let inv = run(&t);
+        assert!(inv.owned.is_complete());
+        assert!(inv.owned.owns(std::path::Path::new("/opt/ok")));
+
+        // One package's `files` is unreadable (a directory).
+        t.write("/var/lib/pacman/local/bad-1-1/desc", b"%NAME%\nbad\n\n");
+        t.write("/var/lib/pacman/local/bad-1-1/files/x", b"");
+        let inv = run(&t);
+        assert!(!inv.owned.is_complete());
     }
 }
