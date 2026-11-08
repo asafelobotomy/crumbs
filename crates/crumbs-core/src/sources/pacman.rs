@@ -184,6 +184,7 @@ fn owned_files(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crate::desktop::discover_desktop_entries;
     use crate::sources::ListOptions;
     use crate::testing::{FakeRunner, FixtureTree};
@@ -201,6 +202,7 @@ mod tests {
             runner: &runner,
             desktop: &desktop,
             opts: &opts,
+            config: &Config::default(),
         };
         PacmanSource.list(&cx).unwrap()
     }

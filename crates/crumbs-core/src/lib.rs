@@ -1,4 +1,5 @@
 pub mod command;
+pub mod config;
 pub mod desktop;
 pub mod doctor;
 pub mod env;

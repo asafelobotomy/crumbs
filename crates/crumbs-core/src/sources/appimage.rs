@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use crate::config::Config;
 use crate::desktop::{DesktopEntry, exec_basename};
 use crate::env::{Env, display_path};
 use crate::error::CoreError;
@@ -34,7 +35,7 @@ impl AppSource for AppImageSource {
         let mut desktop: Vec<&DesktopEntry> = cx.desktop.iter().collect();
         desktop.sort_by(|a, b| a.id.cmp(&b.id));
 
-        for (dir, needs_ext) in scan_dirs(cx.env) {
+        for (dir, needs_ext) in scan_dirs(cx.env, cx.config) {
             let Ok(rd) = std::fs::read_dir(&dir) else {
                 continue;
             };
@@ -66,7 +67,7 @@ impl AppSource for AppImageSource {
 
 /// Directories to scan, with whether the `.AppImage` extension is required.
 /// Duplicates (e.g. a launcher destination equal to a default) appear once.
-fn scan_dirs(env: &Env) -> Vec<(PathBuf, bool)> {
+fn scan_dirs(env: &Env, cfg: &Config) -> Vec<(PathBuf, bool)> {
     let mut dirs = vec![
         (env.home.join("Applications"), false),
         (env.home.join(".local/bin"), true),
@@ -77,6 +78,12 @@ fn scan_dirs(env: &Env) -> Vec<(PathBuf, bool)> {
         && !dirs.iter().any(|(d, _)| *d == dest)
     {
         dirs.push((dest, false));
+    }
+    for extra in &cfg.appimage_dirs {
+        let dir = env.sys(&extra.to_string_lossy());
+        if !dirs.iter().any(|(d, _)| *d == dir) {
+            dirs.push((dir, false));
+        }
     }
     dirs
 }
@@ -259,12 +266,17 @@ pub fn normalize_name(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crate::desktop::discover_desktop_entries;
     use crate::model::Installation;
     use crate::sources::ListOptions;
     use crate::testing::{FakeRunner, FixtureTree};
 
     fn list(t: &FixtureTree) -> SourceListing {
+        list_with(t, &Config::default())
+    }
+
+    fn list_with(t: &FixtureTree, cfg: &Config) -> SourceListing {
         let env = t.env();
         let desktop = discover_desktop_entries(&env);
         let runner = FakeRunner::new();
@@ -274,6 +286,7 @@ mod tests {
             runner: &runner,
             desktop: &desktop,
             opts: &opts,
+            config: cfg,
         };
         AppImageSource.list(&cx).unwrap()
     }
@@ -489,6 +502,33 @@ mod tests {
             ]
         );
         assert_eq!(l.apps[0].name, "X-1.0-x86_64.AppImage");
+    }
+
+    #[test]
+    fn appimage_dirs_scanned() {
+        let t = FixtureTree::new();
+        t.appimage("/home/user/Tools/Extra-1.0-x86_64.AppImage");
+        t.appimage("/home/user/Applications/Own.AppImage");
+        t.appimage("/mnt/apps/Abs.AppImage");
+        assert_eq!(list(&t).apps.len(), 1);
+        let cfg = Config {
+            appimage_dirs: vec![
+                PathBuf::from("/home/user/Tools"),
+                PathBuf::from("/home/user/Applications"),
+                PathBuf::from("/mnt/apps"),
+            ],
+            ..Config::default()
+        };
+        let l = list_with(&t, &cfg);
+        let ids: Vec<_> = l.apps.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "appimage:/mnt/apps/Abs.AppImage",
+                "appimage:~/Applications/Own.AppImage",
+                "appimage:~/Tools/Extra-1.0-x86_64.AppImage"
+            ]
+        );
     }
 
     #[test]

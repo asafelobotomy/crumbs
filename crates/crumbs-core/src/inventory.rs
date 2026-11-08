@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use serde::Serialize;
 
 use crate::command::CommandRunner;
+use crate::config::Config;
 use crate::desktop::discover_desktop_entries;
 use crate::env::Env;
 use crate::error::SourceError;
@@ -48,13 +49,19 @@ fn unavailable_reason(kind: SourceKind) -> &'static str {
 
 /// Lists apps from every available source, then unmanaged apps when a
 /// package database was read successfully.
-pub fn discover(env: &Env, runner: &dyn CommandRunner, opts: &ListOptions) -> Inventory {
+pub fn discover(
+    env: &Env,
+    runner: &dyn CommandRunner,
+    opts: &ListOptions,
+    cfg: &Config,
+) -> Inventory {
     let desktop = discover_desktop_entries(env);
     let cx = SourceContext {
         env,
         runner,
         desktop: &desktop,
         opts,
+        config: cfg,
     };
 
     let mut apps = Vec::new();
@@ -267,7 +274,12 @@ mod tests {
             "[Desktop Entry]\nType=Application\nName=Zed Foo\nExec=/opt/foo/foo\n",
         );
         t.appimage("/home/user/Applications/Tool-1.0-x86_64.AppImage");
-        let inv = discover(&t.env(), &FakeRunner::new(), &ListOptions::default());
+        let inv = discover(
+            &t.env(),
+            &FakeRunner::new(),
+            &ListOptions::default(),
+            &Config::default(),
+        );
         let kinds: Vec<_> = inv.statuses.iter().map(|s| s.source).collect();
         assert_eq!(
             kinds,
@@ -310,7 +322,12 @@ mod tests {
             "/usr/share/applications/foo.desktop",
             "[Desktop Entry]\nType=Application\nName=Foo\nExec=/opt/foo/foo\n",
         );
-        let inv = discover(&t.env(), &FakeRunner::new(), &ListOptions::default());
+        let inv = discover(
+            &t.env(),
+            &FakeRunner::new(),
+            &ListOptions::default(),
+            &Config::default(),
+        );
         assert!(!inv.errors.is_empty());
         let st = inv.statuses.last().unwrap();
         assert_eq!(st.source, SourceKind::Unmanaged);
@@ -335,7 +352,12 @@ mod tests {
             "/home/user/.local/share/applications/foo.desktop",
             "[Desktop Entry]\nType=Application\nName=Foo\nExec=~/.local/share/foo/appimage\n",
         );
-        let inv = discover(&t.env(), &FakeRunner::new(), &ListOptions::default());
+        let inv = discover(
+            &t.env(),
+            &FakeRunner::new(),
+            &ListOptions::default(),
+            &Config::default(),
+        );
         let ids: Vec<_> = inv.apps.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["appimage:~/Applications/Foo-1.0-x86_64.AppImage"]);
         assert_eq!(inv.apps[0].desktop_ids, ["foo.desktop"]);
@@ -349,7 +371,12 @@ mod tests {
             "/usr/share/applications/foo.desktop",
             "[Desktop Entry]\nType=Application\nName=Foo\nExec=/opt/foo/foo\n",
         );
-        let inv = discover(&t.env(), &FakeRunner::new(), &ListOptions::default());
+        let inv = discover(
+            &t.env(),
+            &FakeRunner::new(),
+            &ListOptions::default(),
+            &Config::default(),
+        );
         let st = inv.statuses.last().unwrap();
         assert_eq!(st.source, SourceKind::Unmanaged);
         assert_eq!(
@@ -371,7 +398,12 @@ mod tests {
         firefox(&t);
         t.write_exec("/usr/bin/flatpak", b"");
         t.appimage("/home/user/Applications/Tool-1.0-x86_64.AppImage");
-        let inv = discover(&t.env(), &FakeRunner::new(), &ListOptions::default());
+        let inv = discover(
+            &t.env(),
+            &FakeRunner::new(),
+            &ListOptions::default(),
+            &Config::default(),
+        );
         assert_eq!(inv.errors.len(), 1);
         assert_eq!(inv.errors[0].source, SourceKind::Flatpak);
         assert!(inv.apps.iter().any(|a| a.source == SourceKind::Pacman));
@@ -391,7 +423,12 @@ mod tests {
         );
         let runner =
             FakeRunner::new().on("flatpak", &FLATPAK_ARGS, ok("org.x.Y\tY\t1\tuser\t1 MB\n"));
-        let inv = discover(&t.env(), &runner, &ListOptions::default());
+        let inv = discover(
+            &t.env(),
+            &runner,
+            &ListOptions::default(),
+            &Config::default(),
+        );
         assert_eq!(inv.apps.len(), 1);
         assert_eq!(inv.apps[0].source, SourceKind::Flatpak);
     }
@@ -406,7 +443,12 @@ mod tests {
             &FLATPAK_ARGS,
             ok("org.mozilla.firefox\tFirefox\t1\tsystem\t1 MB\n"),
         );
-        let inv = discover(&t.env(), &runner, &ListOptions::default());
+        let inv = discover(
+            &t.env(),
+            &runner,
+            &ListOptions::default(),
+            &Config::default(),
+        );
         assert_eq!(inv.apps.len(), 2);
         assert_eq!(found(find_app(&inv, "firefox")).id, "pacman:firefox");
         assert_eq!(
@@ -457,7 +499,12 @@ mod tests {
     #[test]
     fn inventory_serializes() {
         let t = FixtureTree::new();
-        let inv = discover(&t.env(), &FakeRunner::new(), &ListOptions::default());
+        let inv = discover(
+            &t.env(),
+            &FakeRunner::new(),
+            &ListOptions::default(),
+            &Config::default(),
+        );
         let v = serde_json::to_value(&inv).unwrap();
         assert_eq!(v["statuses"][3]["source"], "unmanaged");
         assert!(v["apps"].is_array());

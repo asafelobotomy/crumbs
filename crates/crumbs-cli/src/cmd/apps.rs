@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use clap::{Subcommand, ValueEnum};
 use crumbs_core::command::SystemRunner;
+use crumbs_core::config::Config;
 use crumbs_core::inventory::{Inventory, Resolved, discover, find_app};
 use crumbs_core::sources::ListOptions;
 use crumbs_core::{App, Env, SourceKind};
@@ -63,7 +64,12 @@ fn list(
     sort: Sort,
     json: bool,
 ) -> anyhow::Result<ExitCode> {
-    let mut inv = discover(env, &SystemRunner, &ListOptions { include_all: all });
+    let mut inv = discover(
+        env,
+        &SystemRunner,
+        &ListOptions { include_all: all },
+        &Config::default(),
+    );
     if !sources.is_empty() {
         inv.apps.retain(|a| sources.contains(&a.source));
     }
@@ -106,7 +112,12 @@ fn list(
 }
 
 fn show(env: &Env, query: &str, json: bool) -> anyhow::Result<ExitCode> {
-    let inv: Inventory = discover(env, &SystemRunner, &ListOptions { include_all: true });
+    let inv: Inventory = discover(
+        env,
+        &SystemRunner,
+        &ListOptions { include_all: true },
+        &Config::default(),
+    );
     let mut err = anstream::stderr().lock();
     match find_app(&inv, query) {
         Resolved::Found(app) => {

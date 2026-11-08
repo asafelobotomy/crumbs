@@ -153,6 +153,7 @@ fn resolve_program(env: &Env, program: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crate::desktop::discover_desktop_entries;
     use crate::sources::ListOptions;
     use crate::testing::{FakeRunner, FixtureTree};
@@ -167,6 +168,7 @@ mod tests {
             runner: &runner,
             desktop: &desktop,
             opts: &opts,
+            config: &Config::default(),
         };
         let owned = owned.iter().map(PathBuf::from).collect();
         let claimed = claimed.iter().map(|s| s.to_string()).collect();

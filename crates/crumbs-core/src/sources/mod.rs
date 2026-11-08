@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::command::CommandRunner;
+use crate::config::Config;
 use crate::desktop::DesktopEntry;
 use crate::env::Env;
 use crate::error::{CoreError, SourceError};
@@ -22,6 +23,7 @@ pub struct SourceContext<'a> {
     pub runner: &'a dyn CommandRunner,
     pub desktop: &'a [DesktopEntry],
     pub opts: &'a ListOptions,
+    pub config: &'a Config,
 }
 
 #[derive(Debug, Default)]

@@ -1,5 +1,6 @@
 //! Environment health report for `crumbs doctor`.
 
+use crate::config::Config;
 use std::path::PathBuf;
 
 use rustix::fs::{Access, access};
@@ -41,7 +42,7 @@ fn trash_status(env: &Env) -> TrashStatus {
 }
 
 pub fn doctor(env: &Env, runner: &dyn CommandRunner) -> DoctorReport {
-    let inv = discover(env, runner, &ListOptions::default());
+    let inv = discover(env, runner, &ListOptions::default(), &Config::default());
     DoctorReport {
         crumbs_version: env!("CARGO_PKG_VERSION").to_string(),
         distro: env.distro.clone(),

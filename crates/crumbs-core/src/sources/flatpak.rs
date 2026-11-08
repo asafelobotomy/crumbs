@@ -112,6 +112,7 @@ pub fn parse_si_size(s: &str) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::command::CmdOutput;
+    use crate::config::Config;
     use crate::model::Installation;
     use crate::sources::ListOptions;
     use crate::testing::{FakeRunner, FixtureTree};
@@ -142,6 +143,7 @@ com.obsproject.Studio\tOBS Studio\t33.0.0\tsystem\t593.5 MB\n";
             runner,
             desktop: &[],
             opts: &opts,
+            config: &Config::default(),
         };
         FlatpakSource.list(&cx).unwrap()
     }
