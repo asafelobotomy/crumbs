@@ -6,7 +6,7 @@ use crate::model::{App, SourceKind};
 use crate::plan::Action;
 use crate::sources::pacman::{first, parse_sections};
 
-use super::{MSG_BUSY, RemovalError, RemovalPlan, invalid, lock_path, valid_name};
+use super::{MSG_BUSY, RemovalError, RemovalPlan, invalid, lock_path, refusal_text, valid_name};
 
 const DB_DIR: &str = "/var/lib/pacman/local";
 
@@ -32,23 +32,7 @@ pub(super) fn plan(
         )
         .map_err(|e| RemovalError::Refused(e.to_string()))?;
     if out.status != 0 {
-        // pacman prints the reason (`:: removing X breaks dependency ...`)
-        // on stdout and the summary on stderr.
-        let mut lines: Vec<&str> = Some(out.stderr.trim())
-            .filter(|l| !l.is_empty())
-            .into_iter()
-            .collect();
-        lines.extend(
-            out.stdout
-                .lines()
-                .map(str::trim)
-                .filter(|l| l.starts_with("::")),
-        );
-        return Err(RemovalError::Refused(if lines.is_empty() {
-            format!("pacman refused the removal (status {})", out.status)
-        } else {
-            lines.join("\n")
-        }));
+        return Err(RemovalError::Refused(refusal_text(&out)));
     }
 
     let mut names = vec![app.name.clone()];

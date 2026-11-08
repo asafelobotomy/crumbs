@@ -10,6 +10,7 @@ mod logs;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod scanner_tests;
+mod system;
 pub(crate) mod temp;
 mod trash;
 
@@ -42,10 +43,16 @@ pub enum Category {
     FlatpakUnused,
     AppimageOld,
     Logs,
+    PkgCache,
+    OrphanPkgs,
+    Journal,
+    Coredumps,
+    SystemTemp,
+    FlatpakUnusedSystem,
 }
 
 impl Category {
-    pub const ALL: [Category; 9] = [
+    pub const ALL: [Category; 15] = [
         Category::Cache,
         Category::Thumbnails,
         Category::Trash,
@@ -55,6 +62,12 @@ impl Category {
         Category::FlatpakUnused,
         Category::AppimageOld,
         Category::Logs,
+        Category::PkgCache,
+        Category::OrphanPkgs,
+        Category::Journal,
+        Category::Coredumps,
+        Category::SystemTemp,
+        Category::FlatpakUnusedSystem,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -68,7 +81,26 @@ impl Category {
             Category::FlatpakUnused => "flatpak-unused",
             Category::AppimageOld => "appimage-old",
             Category::Logs => "logs",
+            Category::PkgCache => "pkg-cache",
+            Category::OrphanPkgs => "orphan-pkgs",
+            Category::Journal => "journal",
+            Category::Coredumps => "coredumps",
+            Category::SystemTemp => "system-temp",
+            Category::FlatpakUnusedSystem => "flatpak-unused-system",
         }
+    }
+
+    /// Whether the category needs administrator rights to clean.
+    pub fn system(self) -> bool {
+        matches!(
+            self,
+            Category::PkgCache
+                | Category::OrphanPkgs
+                | Category::Journal
+                | Category::Coredumps
+                | Category::SystemTemp
+                | Category::FlatpakUnusedSystem
+        )
     }
 
     /// Whether the category is enabled when the config doesn't say.
@@ -94,7 +126,15 @@ impl FromStr for Category {
 pub enum ItemAction {
     Trash,
     Delete,
-    Command { program: String, args: Vec<String> },
+    Command {
+        program: String,
+        args: Vec<String>,
+    },
+    /// Run as root in the privileged batch; `program` is a bare name.
+    Privileged {
+        program: String,
+        args: Vec<String>,
+    },
 }
 
 fn paths_only<S: Serializer>(v: &[(PathBuf, Fingerprint)], s: S) -> Result<S::Ok, S::Error> {
@@ -109,7 +149,7 @@ fn paths_only<S: Serializer>(v: &[(PathBuf, Fingerprint)], s: S) -> Result<S::Ok
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BloatItem {
     pub category: Category,
-    /// In-system; `None` only for `Command` items.
+    /// In-system; `None` only for `Command` and `Privileged` items.
     pub path: Option<PathBuf>,
     /// Display string (the description of a command item).
     pub label: String,
@@ -138,6 +178,11 @@ pub struct ScanContext<'a> {
 pub trait Scanner: Send + Sync {
     fn category(&self) -> Category;
     fn scan(&self, cx: &ScanContext) -> Result<Vec<BloatItem>, CoreError>;
+    /// Why the category cannot be scanned here (a missing tool), checked
+    /// before [`Scanner::scan`]. Unavailable is not an error.
+    fn unavailable(&self, _cx: &ScanContext) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -151,6 +196,9 @@ pub struct CategoryReport {
     /// Always false from [`scan_all`]; the CLI sets it.
     #[serde(default)]
     pub skipped: bool,
+    /// The category cannot run here, for example `pacman not installed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -170,6 +218,12 @@ pub fn scanners() -> Vec<Box<dyn Scanner>> {
         Box::new(flatpak::FlatpakUnusedScanner),
         Box::new(appimage::AppimageOldScanner),
         Box::new(logs::LogsScanner),
+        Box::new(system::PkgCacheScanner),
+        Box::new(system::OrphanPkgsScanner),
+        Box::new(system::JournalScanner),
+        Box::new(system::CoredumpsScanner),
+        Box::new(system::SystemTempScanner),
+        Box::new(system::FlatpakUnusedSystemScanner),
     ]
 }
 
@@ -185,9 +239,14 @@ fn scan_with(cx: &ScanContext, scanners: &[Box<dyn Scanner>], which: &[Category]
         .par_iter()
         .filter(|s| which.contains(&s.category()))
         .map(|s| {
-            let (items, error) = match s.scan(cx) {
-                Ok(items) => (items, None),
-                Err(e) => (Vec::new(), Some(e.to_string())),
+            let unavailable = s.unavailable(cx);
+            let (items, error) = if unavailable.is_some() {
+                (Vec::new(), None)
+            } else {
+                match s.scan(cx) {
+                    Ok(items) => (items, None),
+                    Err(e) => (Vec::new(), Some(e.to_string())),
+                }
             };
             CategoryReport {
                 category: s.category(),
@@ -196,6 +255,7 @@ fn scan_with(cx: &ScanContext, scanners: &[Box<dyn Scanner>], which: &[Category]
                 unknown_sizes: 0,
                 error,
                 skipped: false,
+                unavailable,
             }
         })
         .collect();
@@ -253,8 +313,14 @@ mod tests {
             "flatpak-unused",
             "appimage-old",
             "logs",
+            "pkg-cache",
+            "orphan-pkgs",
+            "journal",
+            "coredumps",
+            "system-temp",
+            "flatpak-unused-system",
         ];
-        assert_eq!(Category::ALL.len(), 9);
+        assert_eq!(Category::ALL.len(), 15);
         for (c, n) in Category::ALL.iter().zip(names) {
             assert_eq!(c.as_str(), n);
             assert_eq!(Category::from_str(n).unwrap(), *c);
@@ -264,6 +330,7 @@ mod tests {
                 *c
             );
             assert_eq!(c.default_on(), *c != Category::DevCache);
+            assert_eq!(c.system(), names.iter().position(|x| x == &n).unwrap() >= 9);
         }
         assert!(Category::from_str("nope").is_err());
         assert!(Category::ALL.windows(2).all(|w| w[0] < w[1]));

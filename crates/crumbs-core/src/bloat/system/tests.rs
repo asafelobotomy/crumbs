@@ -1,0 +1,388 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::os::unix::fs::MetadataExt;
+use std::time::SystemTime;
+
+use super::super::*;
+use super::{parse_size, scale_1024};
+use crate::command::CmdOutput;
+use crate::config::journal_size_bytes;
+use crate::testing::{FakeRunner, FixtureTree};
+
+const PACCACHE_DRY: &str = "==> finished dry run: 1 candidates (disk space saved: 86.17 MiB)\n";
+const JOURNAL: &str = "Archived and active journals take up 719.1M in the file system.\n";
+const FLATPAK_LIST: [&str; 4] = ["list", "--system", "--runtime", "--columns=ref"];
+
+fn out(status: i32, stdout: &str, stderr: &str) -> CmdOutput {
+    CmdOutput {
+        status,
+        stdout: stdout.into(),
+        stderr: stderr.into(),
+        timed_out: false,
+    }
+}
+
+fn strings(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+fn scan_cfg(t: &FixtureTree, runner: &FakeRunner, cfg: &Config, cat: Category) -> CategoryReport {
+    let env = t.env();
+    let inv = Inventory {
+        apps: vec![],
+        statuses: vec![],
+        errors: vec![],
+    };
+    let cx = ScanContext {
+        env: &env,
+        cfg,
+        inv: &inv,
+        runner,
+        now: SystemTime::now(),
+    };
+    scan_all(&cx, &[cat]).categories.remove(0)
+}
+
+fn scan(t: &FixtureTree, runner: &FakeRunner, cat: Category) -> CategoryReport {
+    scan_cfg(t, runner, &Config::default(), cat)
+}
+
+fn priv_action(program: &str, args: &[&str]) -> ItemAction {
+    ItemAction::Privileged {
+        program: program.into(),
+        args: strings(args),
+    }
+}
+
+#[test]
+fn size_parsing() {
+    assert_eq!(parse_size("86.17 MiB"), Some(90_355_794));
+    assert_eq!(parse_size("719.1M"), Some(754_031_002));
+    assert_eq!(parse_size("8.0K"), Some(8192));
+    assert_eq!(parse_size("1G"), Some(1 << 30));
+    assert_eq!(parse_size("12 B"), Some(12));
+    assert_eq!(parse_size("1 furlongs"), None);
+    assert_eq!(scale_1024(2.0, "TiB"), Some(2 << 40));
+    assert_eq!(journal_size_bytes("500M"), Some(500 << 20));
+    assert_eq!(journal_size_bytes("1024"), Some(1024));
+    assert_eq!(journal_size_bytes("2T"), Some(2 << 40));
+    for bad in ["", "M", "1.5G", "-1M", "5 M", "5m", "99999999999999999999T"] {
+        assert_eq!(journal_size_bytes(bad), None, "{bad}");
+    }
+}
+
+#[test]
+fn pkg_cache_parses_dry_run() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/pacman", b"#!/bin/sh\n");
+    t.write_exec("usr/bin/paccache", b"#!/bin/sh\n");
+    let runner = FakeRunner::new().on("paccache", &["-dk2"], out(0, PACCACHE_DRY, ""));
+    let rep = scan(&t, &runner, Category::PkgCache);
+    assert!(rep.error.is_none() && rep.unavailable.is_none(), "{rep:?}");
+    assert_eq!(rep.items.len(), 1);
+    let i = &rep.items[0];
+    assert_eq!(i.category, Category::PkgCache);
+    assert_eq!(i.size, Some(90_355_794));
+    assert_eq!(i.action, priv_action("paccache", &["-rk2"]));
+    assert_eq!(i.scope, Scope::System);
+    assert!(i.path.is_none() && i.preselected && i.fingerprint.is_none());
+    assert_eq!(runner.calls(), ["paccache -dk2"]);
+
+    // The configured keep count is used.
+    let cfg = Config {
+        pkg_cache_keep: 0,
+        ..Config::default()
+    };
+    let runner = FakeRunner::new().on("paccache", &["-dk0"], out(0, PACCACHE_DRY, ""));
+    let rep = scan_cfg(&t, &runner, &cfg, Category::PkgCache);
+    assert_eq!(rep.items[0].action, priv_action("paccache", &["-rk0"]));
+
+    // Nothing to prune: no item.
+    let runner = FakeRunner::new().on(
+        "paccache",
+        &["-dk2"],
+        out(0, "==> no candidate packages found for pruning\n", ""),
+    );
+    let rep = scan(&t, &runner, Category::PkgCache);
+    assert!(rep.items.is_empty() && rep.error.is_none() && rep.unavailable.is_none());
+
+    // A failing paccache is a scanner error.
+    let runner = FakeRunner::new().on("paccache", &["-dk2"], out(1, "", "boom\n"));
+    let rep = scan(&t, &runner, Category::PkgCache);
+    assert!(rep.error.as_deref().unwrap().contains("boom"));
+}
+
+#[test]
+fn pkg_cache_without_paccache() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/pacman", b"#!/bin/sh\n");
+    let runner = FakeRunner::new();
+    let rep = scan(&t, &runner, Category::PkgCache);
+    assert_eq!(rep.items.len(), 1);
+    let i = &rep.items[0];
+    assert_eq!(i.size, None);
+    assert_eq!(i.action, priv_action("pacman", &["-Sc", "--noconfirm"]));
+    assert_eq!(
+        i.note.as_deref(),
+        Some("keeps only installed versions (pacman-contrib not installed)")
+    );
+    assert!(runner.calls().is_empty());
+}
+
+fn orphan_fixture() -> (FixtureTree, FakeRunner) {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/pacman", b"#!/bin/sh\n");
+    t.pacman_pkg("foo", "1.0-1", Some(1000), &[]);
+    t.pacman_pkg("bar", "2.0-1", Some(2000), &[]);
+    t.pacman_pkg("libbaz", "3-1", Some(3000), &[]);
+    t.pacman_pkg("keeper", "9-1", Some(9_000_000), &[]);
+    let runner = FakeRunner::new().on("pacman", &["-Qdtq"], out(0, "foo\nbar\n", ""));
+    (t, runner)
+}
+
+const SIM: [&str; 6] = ["-Rs", "--print", "--print-format", "%n %v", "foo", "bar"];
+
+#[test]
+fn orphan_pkgs_item_and_opt_in() {
+    let (t, runner) = orphan_fixture();
+    let runner = runner.on(
+        "pacman",
+        &SIM,
+        out(0, "foo 1.0-1\nbar 2.0-1\nlibbaz 3-1\n", ""),
+    );
+    let rep = scan(&t, &runner, Category::OrphanPkgs);
+    assert!(rep.error.is_none(), "{rep:?}");
+    assert_eq!(rep.items.len(), 1);
+    let i = &rep.items[0];
+    assert_eq!(i.label, "3 orphaned packages");
+    assert_eq!(i.size, Some(6000));
+    assert!(!i.preselected, "orphan-pkgs is opt-in");
+    assert_eq!(i.note.as_deref(), Some("foo, bar, libbaz"));
+    // The exact simulated closure, no -s.
+    assert_eq!(
+        i.action,
+        priv_action("pacman", &["-Rn", "--noconfirm", "foo", "bar", "libbaz"])
+    );
+    assert_eq!(i.scope, Scope::System);
+    assert_eq!(rep.total, 6000);
+}
+
+#[test]
+fn orphan_pkgs_note_truncates_after_five() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/pacman", b"#!/bin/sh\n");
+    let names = ["a", "b", "c", "d", "e", "f", "g"];
+    for n in names {
+        t.pacman_pkg(n, "1-1", Some(10), &[]);
+    }
+    let mut sim = vec!["-Rs", "--print", "--print-format", "%n %v"];
+    sim.extend(names);
+    let listing: String = names.iter().map(|n| format!("{n}\n")).collect();
+    let versions: String = names.iter().map(|n| format!("{n} 1-1\n")).collect();
+    let runner = FakeRunner::new()
+        .on("pacman", &["-Qdtq"], out(0, &listing, ""))
+        .on("pacman", &sim, out(0, &versions, ""));
+    let rep = scan(&t, &runner, Category::OrphanPkgs);
+    let i = &rep.items[0];
+    assert_eq!(i.label, "7 orphaned packages");
+    assert_eq!(i.note.as_deref(), Some("a, b, c, d, e, …"));
+    assert_eq!(i.size, Some(70));
+}
+
+#[test]
+fn orphan_pkgs_none_when_pacman_has_no_orphans() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/pacman", b"#!/bin/sh\n");
+    // pacman -Qdtq exits 1 with no output when there are no targets.
+    let runner = FakeRunner::new().on("pacman", &["-Qdtq"], out(1, "", ""));
+    let rep = scan(&t, &runner, Category::OrphanPkgs);
+    assert!(rep.items.is_empty() && rep.error.is_none());
+}
+
+#[test]
+fn orphan_pkgs_simulation_error() {
+    let (t, runner) = orphan_fixture();
+    let runner = runner.on(
+        "pacman",
+        &SIM,
+        out(
+            1,
+            ":: removing foo breaks dependency 'foo' required by keeper\n",
+            "error: failed to prepare transaction (could not satisfy dependencies)\n",
+        ),
+    );
+    let rep = scan(&t, &runner, Category::OrphanPkgs);
+    assert!(rep.items.is_empty());
+    let e = rep.error.unwrap();
+    assert!(
+        e.contains("breaks dependency 'foo' required by keeper"),
+        "{e}"
+    );
+    assert!(e.contains("failed to prepare transaction"), "{e}");
+}
+
+#[test]
+fn orphan_pkgs_refuses_odd_names() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/pacman", b"#!/bin/sh\n");
+    let runner = FakeRunner::new().on("pacman", &["-Qdtq"], out(0, "-rf\n", ""));
+    let rep = scan(&t, &runner, Category::OrphanPkgs);
+    assert!(rep.items.is_empty());
+    assert!(rep.error.is_some());
+}
+
+#[test]
+fn journal_over_limit() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/journalctl", b"#!/bin/sh\n");
+    let runner = FakeRunner::new().on("journalctl", &["--disk-usage"], out(0, JOURNAL, ""));
+    let cfg = Config {
+        journal_max: "700M".into(),
+        ..Config::default()
+    };
+    let rep = scan_cfg(&t, &runner, &cfg, Category::Journal);
+    assert!(rep.error.is_none(), "{rep:?}");
+    assert_eq!(rep.items.len(), 1);
+    let i = &rep.items[0];
+    assert_eq!(i.size, Some(754_031_002 - 700 * 1024 * 1024));
+    assert_eq!(i.action, priv_action("journalctl", &["--vacuum-size=700M"]));
+    assert_eq!(i.scope, Scope::System);
+    assert!(i.preselected);
+}
+
+#[test]
+fn journal_under_limit_no_item() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/journalctl", b"#!/bin/sh\n");
+    let runner = FakeRunner::new().on("journalctl", &["--disk-usage"], out(0, JOURNAL, ""));
+    // The default limit (500M) is below 719.1M; raise it.
+    let cfg = Config {
+        journal_max: "1G".into(),
+        ..Config::default()
+    };
+    let rep = scan_cfg(&t, &runner, &cfg, Category::Journal);
+    assert!(rep.items.is_empty() && rep.error.is_none() && rep.unavailable.is_none());
+}
+
+#[test]
+fn coredumps_items_system_scope() {
+    let t = FixtureTree::new();
+    let dir = "/var/lib/systemd/coredump";
+    t.write(&format!("{dir}/core.foo.1000.abc.123.zst"), &[7u8; 9000]);
+    t.write(&format!("{dir}/core.bar.1000.abc.456.zst"), &[7u8; 100]);
+    t.write(&format!("{dir}/notacore.txt"), b"x");
+    t.write(&format!("{dir}/core."), b"x");
+    t.symlink(&format!("{dir}/core.link"), "/etc/passwd");
+    t.mkdir(&format!("{dir}/core.dir"));
+    let runner = FakeRunner::new();
+    let rep = scan(&t, &runner, Category::Coredumps);
+    assert!(rep.error.is_none() && rep.unavailable.is_none(), "{rep:?}");
+    let labels: Vec<&str> = rep.items.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        ["core.foo.1000.abc.123.zst", "core.bar.1000.abc.456.zst"]
+    );
+    let env = t.env();
+    for i in &rep.items {
+        assert_eq!(i.scope, Scope::System);
+        assert_eq!(i.action, ItemAction::Delete);
+        assert!(i.fingerprint.is_some() && i.preselected);
+        let p = i.path.clone().unwrap();
+        assert!(p.starts_with(dir), "in-system path: {p:?}");
+        let blocks = std::fs::symlink_metadata(env.sys(p.to_str().unwrap()))
+            .unwrap()
+            .blocks()
+            * 512;
+        assert_eq!(i.size, Some(blocks));
+    }
+    assert!(runner.calls().is_empty());
+}
+
+#[test]
+fn system_temp_item() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/systemd-tmpfiles", b"#!/bin/sh\n");
+    let runner = FakeRunner::new();
+    let rep = scan(&t, &runner, Category::SystemTemp);
+    assert_eq!(rep.items.len(), 1);
+    let i = &rep.items[0];
+    assert_eq!(i.size, None);
+    assert_eq!(i.action, priv_action("systemd-tmpfiles", &["--clean"]));
+    assert_eq!(i.scope, Scope::System);
+    assert!(i.preselected);
+    assert!(runner.calls().is_empty());
+}
+
+#[test]
+fn flatpak_unused_system_opt_in() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/flatpak", b"#!/bin/sh\n");
+    let runner = FakeRunner::new().on(
+        "flatpak",
+        &FLATPAK_LIST,
+        out(0, "org.freedesktop.Platform/x86_64/23.08\n", ""),
+    );
+    let rep = scan(&t, &runner, Category::FlatpakUnusedSystem);
+    assert_eq!(rep.items.len(), 1);
+    let i = &rep.items[0];
+    assert!(!i.preselected, "flatpak-unused-system is opt-in");
+    assert_eq!(i.size, None);
+    assert_eq!(
+        i.action,
+        priv_action(
+            "flatpak",
+            &[
+                "uninstall",
+                "--system",
+                "--unused",
+                "-y",
+                "--noninteractive"
+            ]
+        )
+    );
+    assert_eq!(i.scope, Scope::System);
+
+    let runner = FakeRunner::new().on("flatpak", &FLATPAK_LIST, out(0, "\n", ""));
+    assert!(
+        scan(&t, &runner, Category::FlatpakUnusedSystem)
+            .items
+            .is_empty()
+    );
+    let runner = FakeRunner::new().on("flatpak", &FLATPAK_LIST, out(1, "", "boom\n"));
+    let rep = scan(&t, &runner, Category::FlatpakUnusedSystem);
+    assert!(rep.error.unwrap().contains("boom"));
+}
+
+#[test]
+fn unavailable_category_note() {
+    let t = FixtureTree::new();
+    let runner = FakeRunner::new();
+    let cases = [
+        (Category::PkgCache, "pacman not installed"),
+        (Category::OrphanPkgs, "pacman not installed"),
+        (Category::Journal, "journalctl not installed"),
+        (Category::SystemTemp, "systemd-tmpfiles not installed"),
+        (Category::FlatpakUnusedSystem, "flatpak not installed"),
+        (Category::Coredumps, "no coredump directory"),
+    ];
+    for (cat, reason) in cases {
+        let rep = scan(&t, &runner, cat);
+        assert_eq!(rep.unavailable.as_deref(), Some(reason), "{cat:?}");
+        assert!(rep.items.is_empty() && rep.error.is_none(), "{cat:?}");
+        let v = serde_json::to_value(&rep).unwrap();
+        assert_eq!(v["unavailable"], reason);
+    }
+    assert!(runner.calls().is_empty());
+
+    // Available categories omit the field.
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/systemd-tmpfiles", b"#!/bin/sh\n");
+    let v = serde_json::to_value(scan(&t, &runner, Category::SystemTemp)).unwrap();
+    assert!(v.get("unavailable").is_none());
+}
+
+#[test]
+fn registry_follows_category_order() {
+    let cats: Vec<Category> = scanners().iter().map(|s| s.category()).collect();
+    assert_eq!(cats, Category::ALL);
+}

@@ -43,6 +43,7 @@ fn skipped(category: Category) -> CategoryReport {
         unknown_sizes: 0,
         error: None,
         skipped: true,
+        unavailable: None,
     }
 }
 
@@ -57,7 +58,8 @@ pub fn run(env: &Env, args: &ScanArgs) -> anyhow::Result<ExitCode> {
     }
     let setup = ScanSetup::load(env)?;
     let listed: Vec<Category> = if args.categories.is_empty() {
-        Category::ALL.to_vec()
+        // System categories wait for `--system` (not wired yet).
+        Category::ALL.into_iter().filter(|c| !c.system()).collect()
     } else {
         Category::ALL
             .into_iter()

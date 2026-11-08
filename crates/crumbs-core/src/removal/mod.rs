@@ -48,6 +48,26 @@ pub(crate) fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'@' | b'.' | b'_' | b'+' | b'-'))
 }
 
+/// What pacman said when a `-Rs` simulation failed: the summary on stderr
+/// plus the `:: ... breaks dependency ...` reason lines from stdout.
+pub(crate) fn refusal_text(out: &crate::command::CmdOutput) -> String {
+    let mut lines: Vec<&str> = Some(out.stderr.trim())
+        .filter(|l| !l.is_empty())
+        .into_iter()
+        .collect();
+    lines.extend(
+        out.stdout
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("::")),
+    );
+    if lines.is_empty() {
+        format!("pacman refused the removal (status {})", out.status)
+    } else {
+        lines.join("\n")
+    }
+}
+
 pub(crate) fn invalid(what: &str, name: &str) -> RemovalError {
     RemovalError::InvalidName(format!(
         "refusing {what} {name:?}: not a plain package name"

@@ -22,6 +22,11 @@ pub struct Config {
     pub temp_age_days: u64,
     /// Minimum age of log files to list (days).
     pub log_age_days: u64,
+    /// Package versions `pkg-cache` keeps (`paccache -k`). Default 2.
+    pub pkg_cache_keep: u32,
+    /// Journal size above which `journal` offers a vacuum, as a
+    /// `journalctl` size string (`^[0-9]+[KMGT]?$`). Default `500M`.
+    pub journal_max: String,
     /// Categories skipped when none are named. Defaults to `[DevCache]`.
     pub categories_off: Vec<Category>,
     /// One message per entry dropped on load (never read from the file).
@@ -36,6 +41,8 @@ impl Default for Config {
             appimage_dirs: Vec::new(),
             temp_age_days: 7,
             log_age_days: 14,
+            pkg_cache_keep: 2,
+            journal_max: "500M".into(),
             categories_off: vec![Category::DevCache],
             warnings: Vec::new(),
         }
@@ -53,6 +60,8 @@ struct RawConfig {
     // Signed, so a negative value gets the same warning as zero.
     temp_age_days: Option<i64>,
     log_age_days: Option<i64>,
+    pkg_cache_keep: Option<i64>,
+    journal_max: Option<String>,
     categories_off: Option<Vec<String>>,
 }
 
@@ -144,6 +153,23 @@ pub fn load_config(env: &Env) -> Result<Config, CoreError> {
     };
     let temp_age_days = at_least_one("temp_age_days", raw.temp_age_days, 7);
     let log_age_days = at_least_one("log_age_days", raw.log_age_days, 14);
+    let pkg_cache_keep = match raw.pkg_cache_keep {
+        None => 2,
+        Some(n) => u32::try_from(n).unwrap_or_else(|_| {
+            warnings.push("config.toml: pkg_cache_keep must be at least 0; using 2".into());
+            2
+        }),
+    };
+    let journal_max = match raw.journal_max {
+        None => "500M".to_string(),
+        Some(s) if journal_size_bytes(&s).is_some() => s,
+        Some(s) => {
+            warnings.push(format!(
+                "config.toml: ignoring journal_max '{s}' (use digits and an optional K, M, G or T); using 500M"
+            ));
+            "500M".to_string()
+        }
+    };
     let paths = |v: Vec<String>| v.into_iter().map(PathBuf::from).collect();
     Ok(Config {
         protect: paths(protect),
@@ -151,9 +177,30 @@ pub fn load_config(env: &Env) -> Result<Config, CoreError> {
         appimage_dirs: paths(appimage_dirs),
         temp_age_days,
         log_age_days,
+        pkg_cache_keep,
+        journal_max,
         categories_off,
         warnings,
     })
+}
+
+/// Bytes of a `journalctl` size string: `^[0-9]+[KMGT]?$`, 1024-based.
+pub fn journal_size_bytes(s: &str) -> Option<u64> {
+    let (digits, unit) = match s.char_indices().last()? {
+        (i, c @ ('K' | 'M' | 'G' | 'T')) => (&s[..i], c),
+        _ => (s, 'B'),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let power = match unit {
+        'K' => 1,
+        'M' => 2,
+        'G' => 3,
+        'T' => 4,
+        _ => 0,
+    };
+    digits.parse::<u64>().ok()?.checked_mul(1024u64.pow(power))
 }
 
 /// Matches an in-system `path` against a glob `pattern`.
@@ -461,5 +508,25 @@ mod tests {
         let c = load_config(&t.env()).unwrap();
         assert!(c.categories_off.is_empty());
         assert!(c.warnings.is_empty());
+    }
+
+    #[test]
+    fn system_keys_defaults_and_invalid_values_warn() {
+        let t = FixtureTree::new();
+        let c = load_config(&t.env()).unwrap();
+        assert_eq!((c.pkg_cache_keep, c.journal_max.as_str()), (2, "500M"));
+
+        let write = |body: &str| t.write("/home/user/.config/crumbs/config.toml", body.as_bytes());
+        write("pkg_cache_keep = 0\njournal_max = \"2G\"\n");
+        let c = load_config(&t.env()).unwrap();
+        assert_eq!((c.pkg_cache_keep, c.journal_max.as_str()), (0, "2G"));
+        assert!(c.warnings.is_empty());
+
+        write("pkg_cache_keep = -1\njournal_max = \"1.5G\"\n");
+        let c = load_config(&t.env()).unwrap();
+        assert_eq!((c.pkg_cache_keep, c.journal_max.as_str()), (2, "500M"));
+        assert_eq!(c.warnings.len(), 2, "{:?}", c.warnings);
+        assert!(c.warnings[0].contains("pkg_cache_keep"));
+        assert!(c.warnings[1].contains("journal_max"));
     }
 }

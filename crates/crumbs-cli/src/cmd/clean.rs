@@ -52,6 +52,10 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
     let which: Vec<Category> = Category::ALL
         .into_iter()
         .filter(|c| {
+            // System categories need the privileged batch (not wired yet).
+            if c.system() {
+                return false;
+            }
             if named {
                 args.categories.contains(c)
             } else {
