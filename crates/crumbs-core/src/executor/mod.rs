@@ -385,9 +385,10 @@ pub const TREE_DB_UNREADABLE: &str = "the package database could not be read";
 pub const TREE_OWNED: &str = "a package owns files in it now";
 pub const TREE_NS_UNREADABLE: &str = "the mount namespace could not be read";
 
-/// The exit status of a tree step whose root shell is in another mount
-/// namespace than crumbs (the mount check above would not hold there).
-pub const NS_DIFFERS_STATUS: i32 = 97;
+/// The exit status of a tree step whose guard refused: pacman's lock is
+/// present, or the root shell is in another mount namespace than crumbs
+/// (the mount check above would not hold there).
+pub const GUARD_REFUSED_STATUS: i32 = 97;
 
 /// The re-checks for a [`Scope::SystemTree`] target, after
 /// `safety::verify`: pacman holds no lock, no mount point lies at or
@@ -420,16 +421,20 @@ fn recheck_system_tree(env: &Env, checks: &Rechecks, path: &Path) -> Result<OsSt
 
 /// The `sh -c` script of a tree step. It deletes `$2` only when pacman's
 /// database lock `lock` (root-joined, so a fixture stays inside its root)
-/// is absent and the root shell's mount namespace is `$1` (the user's), so
-/// the user-side checks describe what root sees; otherwise it exits
-/// [`NS_DIFFERS_STATUS`]. `readlink` and `rm` are trusted program paths.
+/// is absent (no file and no symlink, dangling or not) and the root shell's
+/// mount namespace is `$1` (the user's), so the user-side checks describe
+/// what root sees; otherwise it exits [`GUARD_REFUSED_STATUS`]. `readlink` and `rm` are trusted program paths.
 pub(crate) fn tree_script(lock: &Path, readlink: &Path, rm: &Path) -> OsString {
-    let mut script = b"[ ! -e ".to_vec();
-    script.extend(sh_quote(lock.as_os_str()));
+    let lock = sh_quote(lock.as_os_str());
+    // A dangling symlink at the lock counts as a lock too.
+    let mut script = b"{ [ -e ".to_vec();
+    script.extend_from_slice(&lock);
+    script.extend_from_slice(b" ] || [ -L ");
+    script.extend_from_slice(&lock);
     script.extend_from_slice(
         format!(
-            " ] || {{ echo \"pacman is busy (database lock present); not deleting\" >&2; \
-             exit {NS_DIFFERS_STATUS}; }}; test \"$("
+            " ]; }} && {{ echo \"pacman is busy (database lock present); not deleting\" >&2; \
+             exit {GUARD_REFUSED_STATUS}; }}; test \"$("
         )
         .as_bytes(),
     );
@@ -437,7 +442,7 @@ pub(crate) fn tree_script(lock: &Path, readlink: &Path, rm: &Path) -> OsString {
     script.extend_from_slice(
         format!(
             " /proc/self/ns/mnt)\" = \"$1\" || {{ echo \"mount namespace differs; not \
-             deleting\" >&2; exit {NS_DIFFERS_STATUS}; }}; exec "
+             deleting\" >&2; exit {GUARD_REFUSED_STATUS}; }}; exec "
         )
         .as_bytes(),
     );

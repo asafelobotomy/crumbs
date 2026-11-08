@@ -202,15 +202,29 @@ fn print_leftovers(env: &Env, leftovers: &[Finding]) -> anyhow::Result<()> {
         })
         .collect();
     print_table(&["CONF", "SIZE", "KIND", "PATH", "NOTE"], &rows)?;
-    let total: u64 = leftovers.iter().map(|f| f.size.bytes).sum();
-    let preselected = leftovers.iter().filter(|f| f.preselected).count();
     writeln!(
         anstream::stdout().lock(),
-        "\n{} leftovers, {} ({preselected} preselected)",
-        leftovers.len(),
-        fmt_size(total)
+        "\n{}",
+        leftovers_total(leftovers)
     )?;
     Ok(())
+}
+
+/// `N leftovers, <size> (M preselected)`; the size says `+ unknown` when
+/// some row's size is unknown (shown as `-`).
+fn leftovers_total(leftovers: &[Finding]) -> String {
+    let total: u64 = leftovers.iter().map(|f| f.size.bytes).sum();
+    let unknown = leftovers.iter().any(|f| finding_size(&f.size) == "-");
+    let preselected = leftovers.iter().filter(|f| f.preselected).count();
+    let size = if unknown {
+        format!("{} + unknown", fmt_size(total))
+    } else {
+        fmt_size(total)
+    };
+    format!(
+        "{} leftovers, {size} ({preselected} preselected)",
+        leftovers.len()
+    )
 }
 
 fn print_app(env: &Env, a: &App) -> anyhow::Result<()> {
@@ -246,4 +260,48 @@ fn print_app(env: &Env, a: &App) -> anyhow::Result<()> {
         writeln!(out, "{:<13} {v}", format!("{k}:"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crumbs_core::leftovers::{Confidence, FindingKind};
+    use crumbs_core::safety::Fingerprint;
+    use crumbs_core::size::DiskUsage;
+
+    fn finding(bytes: u64, errors: u64) -> Finding {
+        Finding {
+            path: "/opt/inky".into(),
+            kind: FindingKind::SystemData,
+            confidence: Confidence::Medium,
+            shared: false,
+            reason: String::new(),
+            size: DiskUsage {
+                bytes,
+                files: 0,
+                errors,
+            },
+            preselected: false,
+            scope: Scope::SystemTree,
+            fingerprint: Fingerprint::default(),
+            mime_lines: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn total_says_unknown_when_a_size_is() {
+        assert_eq!(
+            leftovers_total(&[finding(4096, 0)]),
+            "1 leftovers, 4.0 KiB (0 preselected)"
+        );
+        assert_eq!(
+            leftovers_total(&[finding(4096, 0), finding(0, 1)]),
+            "2 leftovers, 4.0 KiB + unknown (0 preselected)"
+        );
+        // Part read, something counted: known.
+        assert_eq!(
+            leftovers_total(&[finding(4096, 1)]),
+            "1 leftovers, 4.0 KiB (0 preselected)"
+        );
+    }
 }

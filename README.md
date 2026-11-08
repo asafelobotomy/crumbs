@@ -97,7 +97,7 @@ will run 3 commands
 - they are **deleted permanently, as root**, not moved to the trash, and `crumbs restore` cannot bring them back (`system files deleted as root cannot be restored`);
 - their confidence is never above medium, because something in `/etc` can be a local edit of a package you still have;
 - one you pick goes even if removing the app itself fails: you chose it, and no package owns it;
-- a runtime directory a package declares in tmpfiles.d (`/usr/lib`, `/usr/local/lib`, `/run` or `/etc/tmpfiles.d`) is never one, and a declared pattern such as `/opt/foo*` counts by its directory, so it protects everything it might match;
+- a runtime directory a package declares in tmpfiles.d (`/usr/lib`, `/usr/local/lib`, `/run` or `/etc/tmpfiles.d`) is never one, and a declared pattern such as `/opt/foo*` protects exactly the entries it could match (`/opt/foobar`, not `/opt/bar`);
 - when the size of one cannot be read, the preview shows `-` and the total says `+ unknown`.
 
 **Unmanaged apps.** `crumbs uninstall unmanaged:<id>` removes the files of an app that no package manager installed: the `/opt/<dir>` its program sits in (as root), or its directory in `~/opt` or `~/Applications`, or the single program in `~/bin` or `~/.local/bin` (trashed). It acts only when the target is unambiguous, and otherwise refuses with a reason and `--leftovers-only` as the fallback (exit 2):

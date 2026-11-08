@@ -2049,16 +2049,15 @@ fn system_tree_delete_runs_one_rm_rf_step() {
 #[test]
 fn system_tree_guard_text() {
     let env = FixtureTree::new().env();
-    let lock = env.sys("/var/lib/pacman/db.lck");
+    let lock = env.sys("/var/lib/pacman/db.lck").display().to_string();
     let readlink = env.sys("/usr/bin/readlink");
     let rm = env.sys("/usr/bin/rm");
     // Spelled out once here; every other test uses the builder.
     let want = format!(
-        "[ ! -e '{}' ] || {{ echo \"pacman is busy (database lock present); not deleting\" \
-         >&2; exit 97; }}; test \"$('{}' /proc/self/ns/mnt)\" = \"$1\" || {{ echo \"mount \
+        "{{ [ -e '{lock}' ] || [ -L '{lock}' ]; }} && {{ echo \"pacman is busy (database lock \
+         present); not deleting\" >&2; exit 97; }}; test \"$('{}' /proc/self/ns/mnt)\" = \"$1\" || {{ echo \"mount \
          namespace differs; not deleting\" >&2; exit 97; }}; exec '{}' -rf --one-file-system \
          -- \"$2\"",
-        lock.display(),
         readlink.display(),
         rm.display()
     );
@@ -2469,4 +2468,33 @@ fn unmanaged_uninstall_with_picked_system_leftover_runs_end_to_end() {
     assert!(!env.sys("/etc/inky").exists());
     assert!(!env.sys("/home/user/.cache/inky").exists());
     assert!(fs::symlink_metadata(env.sys("/home/user/.local/bin/inky")).is_err());
+}
+
+#[test]
+fn system_tree_step_refuses_dangling_symlink_lock() {
+    let (t, env) = system_tree_fixture();
+    // A dangling symlink appears at the lock inside the batch.
+    let lock = env.sys("/var/lib/pacman/db.lck");
+    let sh = format!(
+        "#!/bin/sh\nln -s /nonexistent-crumbs-target '{}'\nexec /bin/sh \"$@\"\n",
+        lock.display()
+    );
+    t.write_exec("usr/bin/sh", sh.as_bytes());
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, _) = run_tree(&env, &plan);
+    let r = &report.results[0];
+    assert!(!r.ok);
+    assert_eq!(
+        r.error.as_deref(),
+        Some("pacman is busy (database lock present); not deleting"),
+        "{r:?}"
+    );
+    assert!(
+        fs::symlink_metadata(&lock)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!lock.exists(), "dangling");
+    assert!(env.sys("/opt/inky/sub/b").exists());
 }

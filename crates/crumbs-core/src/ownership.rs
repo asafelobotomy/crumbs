@@ -111,48 +111,234 @@ pub const TMPFILES_DIRS: [&str; 4] = [
 pub struct TmpfilesDeclared {
     /// Literal paths.
     paths: BTreeSet<PathBuf>,
-    /// For a path with glob characters or `%` specifiers, its literal
-    /// directory prefix: anything at, below, or (by the pattern) inside it
-    /// may be declared.
-    patterns: BTreeSet<PathBuf>,
+    /// Paths with glob characters or `%` specifiers, as components; a
+    /// specifier is already `*`.
+    patterns: Vec<Vec<String>>,
 }
 
 impl TmpfilesDeclared {
-    /// True when a declared path lies at or below `p`, or a pattern's
-    /// directory lies at, below or above it (the pattern may match `p`).
-    /// Components are compared whole.
+    /// True when `p` (an absolute path, in practice a direct child of `/etc`
+    /// or `/opt`) may hold something declared: a literal path at or below
+    /// it, or a pattern at least as deep as `p` whose first components each
+    /// glob-match `p`'s (so it could match `p` or something inside it). A
+    /// declared ancestor of `p` does not cover it. Components are compared
+    /// whole.
     pub fn covers(&self, p: &Path) -> bool {
-        let at_or_below = |set: &BTreeSet<PathBuf>| {
-            set.range::<Path, _>((Bound::Included(p), Bound::Unbounded))
-                .next()
-                .is_some_and(|first| first.starts_with(p))
+        let literal = self
+            .paths
+            .range::<Path, _>((Bound::Included(p), Bound::Unbounded))
+            .next()
+            .is_some_and(|first| first.starts_with(p));
+        if literal {
+            return true;
+        }
+        let Some(comps) = components(p) else {
+            return false;
         };
-        at_or_below(&self.paths)
-            || at_or_below(&self.patterns)
-            || self.patterns.iter().any(|d| p.starts_with(d))
-    }
-
-    /// Every literal path and pattern directory, sorted.
-    pub fn all(&self) -> BTreeSet<PathBuf> {
-        self.paths.union(&self.patterns).cloned().collect()
+        self.patterns.iter().any(|pat| {
+            pat.len() >= comps.len()
+                && pat
+                    .iter()
+                    .zip(&comps)
+                    .all(|(g, c)| glob_component(g.as_bytes(), c))
+        })
     }
 }
 
-/// The literal directory prefix of a tmpfiles path with a glob character
-/// (`*?[`) or a `%` specifier: everything up to the last `/` before the
-/// first such character (`/` when that is the first one). `None` for a
-/// literal path.
-fn pattern_dir(p: &str) -> Option<PathBuf> {
-    let first = p.find(['*', '?', '[', '%'])?;
-    let dir = p[..first].rfind('/').map_or("", |slash| &p[..slash]);
-    Some(PathBuf::from(if dir.is_empty() { "/" } else { dir }))
+/// The normal components of an absolute path, as bytes; `None` for a
+/// relative one.
+fn components(p: &Path) -> Option<Vec<&[u8]>> {
+    use std::os::unix::ffi::OsStrExt;
+    if !p.is_absolute() {
+        return None;
+    }
+    Some(
+        p.components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(n) => Some(n.as_bytes()),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+/// fnmatch-style match of one path component: `*`, `?` and `[...]` (with
+/// `!` or `^` negation and `a-z` ranges; a `[` without a closing `]` is
+/// literal). Never crosses `/`: both sides are single components.
+fn glob_component(pat: &[u8], s: &[u8]) -> bool {
+    match pat.split_first() {
+        None => s.is_empty(),
+        Some((b'*', rest)) => (0..=s.len()).any(|k| glob_component(rest, &s[k..])),
+        Some((b'?', rest)) => !s.is_empty() && glob_component(rest, &s[1..]),
+        Some((b'[', rest)) => match class(rest) {
+            Some((matches, after)) => {
+                s.first().is_some_and(|&c| matches(c)) && glob_component(after, &s[1..])
+            }
+            None => s.first() == Some(&b'[') && glob_component(rest, &s[1..]),
+        },
+        Some((&c, rest)) => s.first() == Some(&c) && glob_component(rest, &s[1..]),
+    }
+}
+
+/// A bracket class after its `[`: a matcher and the pattern after the `]`,
+/// or `None` when there is no closing `]`.
+#[allow(clippy::type_complexity)]
+fn class(p: &[u8]) -> Option<(Box<dyn Fn(u8) -> bool + '_>, &[u8])> {
+    let (negate, body) = match p.first() {
+        Some(b'!' | b'^') => (true, &p[1..]),
+        _ => (false, p),
+    };
+    // A `]` right after the opening is a member, not the end.
+    let close = 1 + body.get(1..)?.iter().position(|&b| b == b']')?;
+    let set = &body[..close];
+    let after = &body[close + 1..];
+    let matcher = move |c: u8| {
+        let mut i = 0;
+        let mut hit = false;
+        while i < set.len() {
+            if i + 2 < set.len() && set[i + 1] == b'-' {
+                hit |= set[i] <= c && c <= set[i + 2];
+                i += 3;
+            } else {
+                hit |= set[i] == c;
+                i += 1;
+            }
+        }
+        hit != negate
+    };
+    Some((Box::new(matcher), after))
+}
+
+/// Unquotes a tmpfiles.d path field the way systemd does: a field starting
+/// with `"` runs to the closing `"` (whitespace included), and backslash
+/// escapes (`\\`, `\"`, `\'`, `\a \b \f \n \r \t \v`, `\xHH`, `\NNN` octal)
+/// are decoded. Returns the field and the rest of the line, or `Err(raw)`
+/// with the raw field text when it cannot be unquoted.
+fn path_field(line: &str) -> Option<Result<String, String>> {
+    let line = line.trim_start();
+    if line.is_empty() {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    let mut out: Vec<u8> = Vec::new();
+    let mut i = 0;
+    let mut quoted = false;
+    let fail = || {
+        Some(Err(line
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string()))
+    };
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'"' => {
+                quoted = !quoted;
+                i += 1;
+            }
+            b'\\' => {
+                let Some(&e) = bytes.get(i + 1) else {
+                    return fail();
+                };
+                let (v, used) = match e {
+                    b'\\' | b'"' | b'\'' => (e, 2),
+                    b'a' => (7, 2),
+                    b'b' => (8, 2),
+                    b'f' => (12, 2),
+                    b'n' => (b'\n', 2),
+                    b'r' => (b'\r', 2),
+                    b't' => (b'\t', 2),
+                    b'v' => (11, 2),
+                    b'x' => match bytes
+                        .get(i + 2..i + 4)
+                        .and_then(|h| std::str::from_utf8(h).ok())
+                        .and_then(|h| u8::from_str_radix(h, 16).ok())
+                    {
+                        Some(v) => (v, 4),
+                        None => return fail(),
+                    },
+                    b'0'..=b'7' => match bytes
+                        .get(i + 1..i + 4)
+                        .and_then(|o| std::str::from_utf8(o).ok())
+                        .and_then(|o| u8::from_str_radix(o, 8).ok())
+                    {
+                        Some(v) => (v, 4),
+                        None => return fail(),
+                    },
+                    _ => return fail(),
+                };
+                out.push(v);
+                i += used;
+            }
+            b' ' | b'\t' if !quoted => break,
+            _ => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    if quoted {
+        return fail();
+    }
+    match String::from_utf8(out) {
+        Ok(s) => Some(Ok(s)),
+        Err(_) => fail(),
+    }
+}
+
+/// Whether `p` has a glob character or a `%` specifier.
+fn is_pattern(p: &str) -> bool {
+    p.contains(['*', '?', '[', '%'])
+}
+
+/// A pattern path as components, each `%X` specifier as `*` (`%%` is a
+/// literal `%`).
+fn pattern_components(p: &str) -> Vec<String> {
+    p.split('/')
+        .filter(|c| !c.is_empty())
+        .map(|c| {
+            let mut out = String::new();
+            let mut chars = c.chars();
+            while let Some(ch) = chars.next() {
+                if ch == '%' {
+                    match chars.next() {
+                        Some('%') => out.push('%'),
+                        _ => out.push('*'),
+                    }
+                } else {
+                    out.push(ch);
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+/// For a field that cannot be unquoted: its literal directory prefix (up
+/// to the last `/` before the first special character) plus one `*`
+/// component, so it covers whatever that directory might hold.
+fn fallback_pattern(raw: &str) -> Option<Vec<String>> {
+    let raw = raw.trim_start_matches('"');
+    if !raw.starts_with('/') {
+        return None;
+    }
+    let first = raw
+        .find(['*', '?', '[', '%', '\\', '"'])
+        .unwrap_or(raw.len());
+    let dir = raw[..first].rfind('/').map_or("", |slash| &raw[..slash]);
+    let mut comps = pattern_components(dir);
+    comps.push("*".into());
+    Some(comps)
 }
 
 /// Reads [`TMPFILES_DIRS`], every `*.conf`. The second field of each line
-/// is the path; a path with glob characters or `%` specifiers counts by its
-/// literal directory prefix ([`TmpfilesDeclared::covers`]), conservatively.
-/// A path not starting with `/` (a leading specifier) is skipped. A missing
-/// directory is fine; an unreadable one is an error.
+/// is the path, unquoted as systemd does; a leading `%E` is `/etc`. A path
+/// with glob characters or `%` specifiers is a pattern
+/// ([`TmpfilesDeclared::covers`]); one that cannot be unquoted covers its
+/// literal directory conservatively. A path not starting with `/` (another
+/// leading specifier) is skipped. A missing directory is fine; an
+/// unreadable one is an error.
 pub fn tmpfiles_declared(env: &Env) -> Result<TmpfilesDeclared, CoreError> {
     let io_err = |path: &Path, source| CoreError::Io {
         path: path.to_path_buf(),
@@ -173,30 +359,68 @@ pub fn tmpfiles_declared(env: &Env) -> Result<TmpfilesDeclared, CoreError> {
             }
             let text = fs::read_to_string(&path).map_err(|e| io_err(&path, e))?;
             for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                let Some(p) = line.split_whitespace().nth(1) else {
-                    continue;
-                };
-                if !p.starts_with('/') {
-                    continue;
-                }
-                match pattern_dir(p) {
-                    Some(d) => out.patterns.insert(d),
-                    None => out.paths.insert(PathBuf::from(p.trim_end_matches('/'))),
-                };
+                out.add_line(line);
             }
         }
     }
     Ok(out)
 }
 
+impl TmpfilesDeclared {
+    /// Adds one `tmpfiles.d` line.
+    fn add_line(&mut self, line: &str) {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return;
+        }
+        // Skip the type field.
+        let Some(rest) = line.split_once([' ', '\t']).map(|(_, r)| r) else {
+            return;
+        };
+        let p = match path_field(rest) {
+            None => return,
+            Some(Ok(p)) => p,
+            Some(Err(raw)) => {
+                if let Some(pat) = fallback_pattern(&raw) {
+                    self.patterns.push(pat);
+                }
+                return;
+            }
+        };
+        let p = match p.strip_prefix("%E") {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("/etc{rest}"),
+            _ => p,
+        };
+        if !p.starts_with('/') {
+            return;
+        }
+        if is_pattern(&p) {
+            self.patterns.push(pattern_components(&p));
+            return;
+        }
+        let trimmed = p.trim_end_matches('/');
+        if !trimmed.is_empty() {
+            self.paths.insert(PathBuf::from(trimmed));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testing::FixtureTree;
+
+    fn declared(lines: &str) -> TmpfilesDeclared {
+        let mut d = TmpfilesDeclared::default();
+        for l in lines.lines() {
+            d.add_line(l);
+        }
+        d
+    }
+
+    fn covers(d: &TmpfilesDeclared, p: &str) -> bool {
+        d.covers(Path::new(p))
+    }
 
     #[test]
     fn tmpfiles_paths_are_parsed() {
@@ -210,24 +434,18 @@ mod tests {
         t.write("usr/local/lib/tmpfiles.d/c.conf", b"d /opt/local-dir\n");
         t.write("run/tmpfiles.d/d.conf", b"d /etc/runtime-dir\nd %S/state\n");
         let got = tmpfiles_declared(&t.env()).unwrap();
-        let want: BTreeSet<PathBuf> = [
-            "/etc/openvpn/client",
+        for p in [
+            "/etc/openvpn",
             "/opt/x",
             "/etc/y",
             "/opt/local-dir",
             "/etc/runtime-dir",
-            // `/run/%u`: its literal directory.
-            "/run",
-        ]
-        .iter()
-        .map(PathBuf::from)
-        .collect();
-        assert_eq!(got.all(), want);
-        assert!(got.covers(Path::new("/opt/local-dir")));
-        assert!(got.covers(Path::new("/etc/runtime-dir")));
-        assert!(got.covers(Path::new("/etc/openvpn")));
-        assert!(!got.covers(Path::new("/etc/ignored")));
-        assert!(!got.covers(Path::new("/opt/xy")));
+        ] {
+            assert!(covers(&got, p), "{p}");
+        }
+        for p in ["/etc/ignored", "/opt/xy", "/etc/state", "/opt/state"] {
+            assert!(!covers(&got, p), "{p}");
+        }
         assert_eq!(
             tmpfiles_declared(&FixtureTree::new().env()).unwrap(),
             TmpfilesDeclared::default()
@@ -235,31 +453,58 @@ mod tests {
     }
 
     #[test]
-    fn tmpfiles_globs_and_specifiers_count_by_literal_prefix() {
-        assert_eq!(pattern_dir("/opt/x"), None);
-        assert_eq!(pattern_dir("/etc/foo/*.json"), Some("/etc/foo".into()));
-        assert_eq!(pattern_dir("/opt/foo*"), Some("/opt".into()));
-        assert_eq!(pattern_dir("/opt/a/b?/c"), Some("/opt/a".into()));
-        assert_eq!(pattern_dir("/opt/tpm[0-9]/x"), Some("/opt".into()));
-        assert_eq!(
-            pattern_dir("/var/log/journal/%m"),
-            Some("/var/log/journal".into())
-        );
-        assert_eq!(pattern_dir("/*"), Some("/".into()));
+    fn tmpfiles_patterns_cover_only_what_they_can_match() {
+        // systemd-nspawn.conf: a pattern in `/` is shallower than any
+        // child of /opt.
+        let d = declared("R! /.#machine.*\n");
+        assert!(!covers(&d, "/opt/inky"));
+        assert!(!covers(&d, "/etc/inky"));
+        let d = declared("C /etc/tpm2-tss/fapi-profiles/*.json - - - -\n");
+        assert!(covers(&d, "/etc/tpm2-tss"));
+        assert!(!covers(&d, "/etc/tpm2"));
+        let d = declared("d /opt/foo*\n");
+        assert!(covers(&d, "/opt/foobar"));
+        assert!(covers(&d, "/opt/foo"));
+        assert!(!covers(&d, "/opt/bar"));
+        let d = declared("x /op*\n");
+        assert!(!covers(&d, "/opt/inky"));
+        // A declared ancestor covers nothing below it.
+        let d = declared("z /\nz /opt\n");
+        assert!(!covers(&d, "/opt/inky"));
+        assert!(!covers(&d, "/etc/inky"));
+        // Specifiers match like `*`, within one component.
+        let d = declared("d /opt/inky%b/run\nd /etc/%m.d/x\n");
+        assert!(covers(&d, "/opt/inky-1"));
+        assert!(!covers(&d, "/opt/other"));
+        assert!(covers(&d, "/etc/abc.d"));
+        assert!(!covers(&d, "/etc/abc"));
+        // Classes, negation and ranges.
+        let d = declared("d /opt/tpm[0-9]/x\nd /etc/[!a]x\nd /etc/[^b]y\n");
+        assert!(covers(&d, "/opt/tpm3"));
+        assert!(!covers(&d, "/opt/tpmx"));
+        assert!(covers(&d, "/etc/bx") && !covers(&d, "/etc/ax"));
+        assert!(covers(&d, "/etc/ay") && !covers(&d, "/etc/by"));
+        let d = declared("d /opt/a?c\n");
+        assert!(covers(&d, "/opt/abc") && !covers(&d, "/opt/ac"));
+    }
 
-        let t = FixtureTree::new();
-        t.write(
-            "usr/lib/tmpfiles.d/g.conf",
-            b"d /etc/tpm2-tss/fapi-profiles/*.json\nd /opt/inky%b/run\nd /var/tmp/x-*\n",
-        );
-        let got = tmpfiles_declared(&t.env()).unwrap();
-        // The prefix is declared: a target at or above it is covered.
-        assert!(got.covers(Path::new("/etc/tpm2-tss")));
-        // The pattern lives in `/opt` and may match any child of it.
-        assert!(got.covers(Path::new("/opt/inky")));
-        assert!(got.covers(Path::new("/opt/other")));
-        assert!(!got.covers(Path::new("/etc/inky")));
-        assert!(!got.covers(Path::new("/etc/tpm2")));
+    #[test]
+    fn tmpfiles_specifier_e_and_quoting() {
+        let d = declared("d %E/inky 0755\n");
+        assert!(covers(&d, "/etc/inky"));
+        let d = declared("d \"/opt/foo bar\" 0755\n");
+        assert!(covers(&d, "/opt/foo bar"));
+        assert!(!covers(&d, "/opt/foo"));
+        let d = declared("d /opt/a\\x20b 0755\n");
+        assert!(covers(&d, "/opt/a b"));
+        // Cannot be unquoted: covers everything its literal directory may
+        // hold.
+        let d = declared("d \"/opt/broken 0755\n");
+        assert!(covers(&d, "/opt/inky"));
+        assert!(!covers(&d, "/etc/inky"));
+        let d = declared("d /etc/x/y\\q 0755\n");
+        assert!(covers(&d, "/etc/x"));
+        assert!(!covers(&d, "/etc/inky"));
     }
 
     #[test]
