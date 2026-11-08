@@ -12,7 +12,6 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use serde::Serialize;
 
@@ -177,7 +176,7 @@ fn recheck_scope(env: &Env, cfg: &Config, scope: Scope, path: &Path) -> Result<(
     if scope != Scope::UserTemp {
         return Ok(());
     }
-    crate::bloat::temp::still_stale(env, cfg, path, SystemTime::now())
+    crate::bloat::temp::still_stale(env, cfg, path, env.now())
         .map_err(|reason| format!("refusing: {} {reason}", display_path(env, path)))
 }
 

@@ -25,7 +25,7 @@ fn run(t: &FixtureTree, cfg: &Config, inv: &Inventory, cat: Category) -> Vec<Blo
         cfg,
         inv,
         runner: &runner,
-        now: SystemTime::now(),
+        now: test_now(),
     };
     scanners()
         .into_iter()
@@ -33,6 +33,15 @@ fn run(t: &FixtureTree, cfg: &Config, inv: &Inventory, cat: Category) -> Vec<Blo
         .unwrap()
         .scan(&cx)
         .unwrap()
+}
+
+/// The scans' clock in these tests: 100 days ahead, so an entry made now
+/// already has a 100-day-old ctime (which cannot be set) and its mtime,
+/// set relative to this clock, decides its age.
+const CLOCK_SHIFT: Duration = Duration::from_secs(100 * 86_400);
+
+fn test_now() -> SystemTime {
+    SystemTime::now() + CLOCK_SHIFT
 }
 
 fn paths(items: &[BloatItem]) -> Vec<PathBuf> {
@@ -205,7 +214,7 @@ fn dev_cache_paths_listed_rebuildable() {
 
 fn age(p: &Path, days: u64) {
     let f = fs::File::options().write(true).open(p).unwrap();
-    f.set_modified(SystemTime::now() - Duration::from_secs(days * 86_400 + 3600))
+    f.set_modified(test_now() - Duration::from_secs(days * 86_400 + 3600))
         .unwrap();
 }
 
@@ -213,12 +222,15 @@ fn age(p: &Path, days: u64) {
 fn logs_age_filter() {
     let t = FixtureTree::new();
     let old = t.write("home/user/.local/state/app/old.log", b"x");
-    t.write("home/user/.local/state/app/fresh.log", b"x");
+    let fresh = t.write("home/user/.local/state/app/fresh.log", b"x");
     let nested = t.write("home/user/.local/state/a/b/c/deep.log", b"x");
     let other = t.write("home/user/.local/state/app/notes.txt", b"x");
     let xs = t.write("home/user/.xsession-errors", b"x");
     let xs_old = t.write("home/user/.xsession-errors.old", b"x");
-    t.write("home/user/.local/state/new/x.log", b"x");
+    let fresh_new = t.write("home/user/.local/state/new/x.log", b"x");
+    for p in [&fresh, &fresh_new] {
+        age(p, 0);
+    }
     t.write("home/user/Keep/data.log", b"x");
     t.symlink("home/user/.local/state/link", "/home/user/Keep");
     t.symlink(
@@ -233,7 +245,7 @@ fn logs_age_filter() {
         .write(true)
         .open(&xs_old)
         .unwrap()
-        .set_modified(SystemTime::now())
+        .set_modified(test_now())
         .unwrap();
     let cfg = Config::default();
     let items = run(&t, &cfg, &inv(vec![]), Category::Logs);
@@ -295,6 +307,29 @@ fn scan_one(
         cfg,
         inv: &i,
         runner,
+        now: test_now(),
+    };
+    scanners()
+        .into_iter()
+        .find(|s| s.category() == cat)
+        .unwrap()
+        .scan(&cx)
+}
+
+/// [`scan_one`] at the real time, unshifted.
+fn scan_real_now(
+    t: &FixtureTree,
+    cfg: &Config,
+    runner: &FakeRunner,
+    cat: Category,
+) -> Result<Vec<BloatItem>, CoreError> {
+    let env = t.env();
+    let i = inv(vec![]);
+    let cx = ScanContext {
+        env: &env,
+        cfg,
+        inv: &i,
+        runner,
         now: SystemTime::now(),
     };
     scanners()
@@ -308,10 +343,11 @@ fn labels(items: &[BloatItem]) -> Vec<&str> {
     items.iter().map(|i| i.label.as_str()).collect()
 }
 
-/// Sets atime and mtime of `p` (never following a symlink) to `days` ago.
+/// Sets atime and mtime of `p` (never following a symlink) to `days` (and
+/// an hour) before [`test_now`].
 fn age_nofollow(p: &Path, days: u64) {
     use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, utimensat};
-    let secs = SystemTime::now()
+    let secs = test_now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs()
@@ -589,8 +625,8 @@ fn temp_rules() {
     for name in ["krb5cc_1000", ".s.PGSQL.5432", ".X0-lock"] {
         old.push(t.write(&format!("tmp/{name}"), b"x"));
     }
-    t.write("tmp/fresh", b"x");
-    t.write("tmp/olddir-fresh/sub/new", b"x");
+    age_nofollow(&t.write("tmp/fresh", b"x"), 0);
+    age_nofollow(&t.write("tmp/olddir-fresh/sub/new", b"x"), 0);
     old.push(tmp.join("olddir-fresh/sub"));
     old.push(tmp.join("olddir-fresh"));
     old.push(t.write("tmp/oldfile", b"x"));
@@ -681,7 +717,7 @@ fn temp_owner_rule() {
         let st = super::temp::EntryStat {
             owner_uid: owner,
             file_type: ft,
-            mtime,
+            changed: mtime,
         };
         super::temp::temp_candidate(std::ffi::OsStr::new(name), &st, me, now, week)
     };
@@ -844,7 +880,7 @@ fn temp_extra_prefixes_kept() {
     let cfg = Config::default();
     let items = scan_one(&t, &cfg, &FakeRunner::new(), Category::Temp).unwrap();
     assert_eq!(paths(&items), [PathBuf::from("/tmp/plain")]);
-    super::temp::still_stale(&t.env(), &cfg, Path::new("/tmp/plain"), SystemTime::now()).unwrap();
+    super::temp::still_stale(&t.env(), &cfg, Path::new("/tmp/plain"), test_now()).unwrap();
 }
 
 #[test]
@@ -877,7 +913,7 @@ fn temp_open_files_kept() {
         &env,
         &Config::default(),
         Path::new("/tmp/app.lock"),
-        SystemTime::now(),
+        test_now(),
     )
     .unwrap_err();
     assert_eq!(err, "is open in a running process");
@@ -936,7 +972,7 @@ fn temp_scan_pipeline_then_still_stale() {
         cfg: &cfg,
         inv: &i,
         runner: &runner,
-        now: SystemTime::now(),
+        now: test_now(),
     };
     let rep = scan_all(&cx, &[Category::Temp]);
     assert_eq!(rep.categories.len(), 1);
@@ -949,7 +985,7 @@ fn temp_scan_pipeline_then_still_stale() {
     assert!(cat.items[0].size.unwrap() >= 8000);
     for item in &cat.items {
         let p = item.path.as_ref().unwrap();
-        super::temp::still_stale(&env, &cfg, p, SystemTime::now()).unwrap();
+        super::temp::still_stale(&env, &cfg, p, test_now()).unwrap();
         verify(
             &env,
             &cfg,
@@ -959,4 +995,69 @@ fn temp_scan_pipeline_then_still_stale() {
         )
         .unwrap();
     }
+}
+
+/// Archive extraction keeps old mtimes, but the ctime is when the file
+/// landed: such entries are not old.
+#[test]
+fn old_mtime_fresh_ctime_not_listed() {
+    let t = FixtureTree::new();
+    let tmp = t.mkdir("tmp");
+    let f = t.write("tmp/extracted.txt", b"x");
+    let inner = t.write("tmp/unpacked/sub/a", b"x");
+    let log = t.write("home/user/.local/state/app/old.log", b"x");
+    for p in [
+        &f,
+        &inner,
+        &tmp.join("unpacked/sub"),
+        &tmp.join("unpacked"),
+        &log,
+    ] {
+        // 30 days before the real time.
+        age_nofollow(p, 130);
+    }
+    let cfg = Config::default();
+    let r = FakeRunner::new();
+    assert!(
+        scan_real_now(&t, &cfg, &r, Category::Temp)
+            .unwrap()
+            .is_empty(),
+        "fresh ctime keeps temp entries"
+    );
+    assert!(
+        scan_real_now(&t, &cfg, &r, Category::Logs)
+            .unwrap()
+            .is_empty(),
+        "fresh ctime keeps logs"
+    );
+    assert!(
+        super::temp::still_stale(
+            &t.env(),
+            &cfg,
+            Path::new("/tmp/extracted.txt"),
+            SystemTime::now()
+        )
+        .is_err()
+    );
+    // The same entries 30 days later are old: the clock decides, not the
+    // test setup.
+    assert_eq!(scan_one(&t, &cfg, &r, Category::Temp).unwrap().len(), 2);
+    assert_eq!(scan_one(&t, &cfg, &r, Category::Logs).unwrap().len(), 1);
+}
+
+#[test]
+fn entry_stat_uses_later_of_mtime_and_ctime() {
+    let t = FixtureTree::new();
+    let f = t.write("tmp/f", b"x");
+    age_nofollow(&f, 130);
+    let m = fs::symlink_metadata(&f).unwrap();
+    let st = super::temp::EntryStat::of(&m).unwrap();
+    assert!(
+        st.changed > m.modified().unwrap(),
+        "ctime wins over an old mtime"
+    );
+    age_nofollow(&f, 0);
+    let m = fs::symlink_metadata(&f).unwrap();
+    let st = super::temp::EntryStat::of(&m).unwrap();
+    assert_eq!(st.changed, m.modified().unwrap(), "a later mtime wins");
 }

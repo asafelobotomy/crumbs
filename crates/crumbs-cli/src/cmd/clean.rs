@@ -3,7 +3,6 @@
 
 use std::io::Write;
 use std::process::ExitCode;
-use std::time::SystemTime;
 
 use clap::Args;
 use crumbs_core::Env;
@@ -65,7 +64,7 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
         cfg: &setup.cfg,
         inv: &setup.inv,
         runner: &SystemRunner,
-        now: SystemTime::now(),
+        now: env.now(),
     };
     let report = scan_all(&cx, &which);
 

@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
 
@@ -54,6 +55,20 @@ pub struct Env {
     pub data_dirs: Vec<PathBuf>,
     pub uid: u32,
     pub distro: Distro,
+    /// Added to the wall clock by [`Env::now`]. Always zero on the real
+    /// system; a fake root reads it from `CRUMBS_TEST_CLOCK_SHIFT_DAYS`, so
+    /// tests can make files look old by their ctime, which cannot be set.
+    pub clock_shift: Duration,
+}
+
+/// Days from `CRUMBS_TEST_CLOCK_SHIFT_DAYS`; only ever read for a fake root.
+fn test_clock_shift() -> Duration {
+    std::env::var("CRUMBS_TEST_CLOCK_SHIFT_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(Duration::ZERO, |d| {
+            Duration::from_secs(d.saturating_mul(86_400))
+        })
 }
 
 fn abs_var(name: &str) -> Option<PathBuf> {
@@ -110,6 +125,7 @@ impl Env {
             data_dirs,
             uid: rustix::process::getuid().as_raw(),
             distro,
+            clock_shift: Duration::ZERO,
         })
     }
 
@@ -131,7 +147,14 @@ impl Env {
             home,
             root: canon,
             distro,
+            clock_shift: test_clock_shift(),
         })
+    }
+
+    /// The current time, shifted by [`Env::clock_shift`] (zero on the real
+    /// system).
+    pub fn now(&self) -> SystemTime {
+        SystemTime::now() + self.clock_shift
     }
 
     /// Maps an in-system absolute path onto the root.

@@ -11,8 +11,11 @@ use crate::error::CoreError;
 
 pub struct LogsScanner;
 
-fn is_old(mtime: SystemTime, now: SystemTime, max_age: Duration) -> bool {
-    now.duration_since(mtime).is_ok_and(|age| age > max_age)
+/// Old by the later of mtime and ctime, so a file copied or unpacked
+/// with an old mtime is not old.
+fn is_old(meta: &fs::Metadata, now: SystemTime, max_age: Duration) -> bool {
+    super::temp::last_change(meta)
+        .is_some_and(|t| now.duration_since(t).is_ok_and(|age| age > max_age))
 }
 
 impl Scanner for LogsScanner {
@@ -41,7 +44,7 @@ impl Scanner for LogsScanner {
                         }
                     } else if ft.is_file()
                         && entry.path().extension().is_some_and(|e| e == "log")
-                        && meta.modified().is_ok_and(|m| is_old(m, cx.now, max_age))
+                        && is_old(&meta, cx.now, max_age)
                     {
                         found.push(entry.path());
                     }
@@ -50,9 +53,7 @@ impl Scanner for LogsScanner {
         }
         for name in [".xsession-errors", ".xsession-errors.old"] {
             let p = cx.env.home.join(name);
-            if fs::symlink_metadata(&p).is_ok_and(|m| {
-                m.is_file() && m.modified().is_ok_and(|t| is_old(t, cx.now, max_age))
-            }) {
+            if fs::symlink_metadata(&p).is_ok_and(|m| m.is_file() && is_old(&m, cx.now, max_age)) {
                 found.push(p);
             }
         }

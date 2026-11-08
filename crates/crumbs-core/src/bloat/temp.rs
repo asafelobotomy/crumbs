@@ -58,17 +58,28 @@ pub(crate) const ROOT_REFUSAL: &str = "temp cleanup is not available as root";
 pub(crate) struct EntryStat {
     pub owner_uid: u32,
     pub file_type: FileType,
-    pub mtime: SystemTime,
+    /// The later of mtime and ctime: archive extraction keeps old mtimes,
+    /// but the ctime says when the entry landed here.
+    pub changed: SystemTime,
 }
 
 impl EntryStat {
-    fn of(m: &Metadata) -> Option<Self> {
+    pub(crate) fn of(m: &Metadata) -> Option<Self> {
         Some(EntryStat {
             owner_uid: m.uid(),
             file_type: m.file_type(),
-            mtime: m.modified().ok()?,
+            changed: last_change(m)?,
         })
     }
+}
+
+/// `max(mtime, ctime)` of an lstat result.
+pub(crate) fn last_change(m: &Metadata) -> Option<SystemTime> {
+    let mtime = m.modified().ok()?;
+    let secs = u64::try_from(m.ctime()).ok()?;
+    let nanos = u32::try_from(m.ctime_nsec()).ok()?;
+    let ctime = SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs, nanos))?;
+    Some(mtime.max(ctime))
 }
 
 fn is_old(t: SystemTime, now: SystemTime, max_age: Duration) -> bool {
@@ -78,7 +89,7 @@ fn is_old(t: SystemTime, now: SystemTime, max_age: Duration) -> bool {
 /// Whether a direct child of `/tmp` may be listed, judged from its own
 /// lstat data: owned by the user, a regular file or directory (never a
 /// symlink, socket, fifo or device), no live-entry name prefix, and
-/// modified longer than `max_age` ago. A directory's contents
+/// neither modified nor changed (mtime, ctime) within `max_age`. A directory's contents
 /// are checked separately.
 pub(crate) fn temp_candidate(
     name: &OsStr,
@@ -91,7 +102,7 @@ pub(crate) fn temp_candidate(
     st.owner_uid == user_uid
         && (st.file_type.is_file() || st.file_type.is_dir())
         && !LIVE_PREFIXES.iter().any(|p| bytes.starts_with(p))
-        && is_old(st.mtime, now, max_age)
+        && is_old(st.changed, now, max_age)
 }
 
 /// `(dev, ino)` of every file a process has open, mapped, or as its
@@ -155,7 +166,7 @@ struct Ctx<'a> {
     open: &'a HashSet<(u64, u64)>,
 }
 
-/// Whether everything below `dir` (real path) is old (by mtime), owned by the user, a file, directory or symlink, on device
+/// Whether everything below `dir` (real path) is old (by max(mtime, ctime)), owned by the user, a file, directory or symlink, on device
 /// `dev`, and not open in any process, within [`WALK_CAP`] entries. Never
 /// follows symlinks; any read error fails closed.
 fn contents_old(dir: &Path, dev: u64, cx: &Ctx) -> bool {
@@ -181,7 +192,7 @@ fn contents_old(dir: &Path, dev: u64, cx: &Ctx) -> bool {
             if st.owner_uid != cx.user_uid
                 || meta.dev() != dev
                 || !(ft.is_file() || ft.is_dir() || ft.is_symlink())
-                || !is_old(st.mtime, cx.now, cx.max_age)
+                || !is_old(st.changed, cx.now, cx.max_age)
                 || cx.open.contains(&(meta.dev(), meta.ino()))
             {
                 return false;

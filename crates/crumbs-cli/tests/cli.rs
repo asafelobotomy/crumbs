@@ -1468,8 +1468,17 @@ const FLATPAK_RECORD: &str = "#!/bin/sh\nif [ \"$1\" = uninstall ]; then echo \"
 /// scanner) fails.
 const FLATPAK_RUNTIME_FAIL: &str = "#!/bin/sh\ncase \"$*\" in *--runtime*) echo boom >&2; exit 1;; esac\nprintf 'app.xemu.xemu\\txemu\\t0.8.136\\tuser\\t34.4 MB\\n'\n";
 
+/// Days `run_clean` moves crumbs' clock ahead: every fixture entry then
+/// has an old ctime (which cannot be set), so mtimes decide what is old.
+const CLOCK_SHIFT_DAYS: u64 = 100;
+
 fn run_clean(t: &FixtureTree, args: &[&str]) -> (i32, String, String) {
-    let out = crumbs(t).arg("clean").args(args).output().unwrap();
+    let out = crumbs(t)
+        .env("CRUMBS_TEST_CLOCK_SHIFT_DAYS", CLOCK_SHIFT_DAYS.to_string())
+        .arg("clean")
+        .args(args)
+        .output()
+        .unwrap();
     (
         out.status.code().unwrap(),
         String::from_utf8(out.stdout).unwrap(),
@@ -1477,10 +1486,13 @@ fn run_clean(t: &FixtureTree, args: &[&str]) -> (i32, String, String) {
     )
 }
 
-/// An old file of the user's directly in the fixture's `/tmp`.
+/// A file of the user's directly in the fixture's `/tmp`, 30 days old by
+/// the clock of [`run_clean`].
 fn old_temp(t: &FixtureTree, name: &str) {
     let p = t.write(&format!("/tmp/{name}"), &[1u8; 4000]);
-    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86_400);
+    let old = std::time::SystemTime::now()
+        + std::time::Duration::from_secs(CLOCK_SHIFT_DAYS * 86_400)
+        - std::time::Duration::from_secs(30 * 86_400);
     std::fs::File::options()
         .write(true)
         .open(&p)

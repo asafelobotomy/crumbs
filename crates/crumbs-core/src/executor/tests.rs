@@ -364,7 +364,7 @@ fn execute_passes_scope_to_verify() {
     let a = t.write("tmp/a", b"a");
     age_days(&a, 30);
     t.write("tmp/b", b"b");
-    let env = t.env();
+    let env = temp_env(&t);
     let mut temp = planned(&env, delete("/tmp/a"));
     temp.scope = Scope::UserTemp;
     let home = planned(&env, delete("/tmp/b"));
@@ -556,13 +556,26 @@ fn invalid_dependencies_fail_closed_and_skips_are_transitive() {
     }
 }
 
-/// Sets atime and mtime of `p` to `days` ago without following a symlink.
+/// Days the clock of [`temp_env`] runs ahead: an entry made now already
+/// has an old ctime (which cannot be set), so its mtime decides its age.
+const SHIFT_DAYS: u64 = 100;
+
+/// The fixture's env with its clock [`SHIFT_DAYS`] ahead.
+fn temp_env(t: &FixtureTree) -> crate::env::Env {
+    let mut env = t.env();
+    env.clock_shift = std::time::Duration::from_secs(SHIFT_DAYS * 86_400);
+    env
+}
+
+/// Sets atime and mtime of `p` to `days` before the [`temp_env`] clock,
+/// without following a symlink.
 fn age_days(p: &Path, days: u64) {
     use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, utimensat};
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs()
+        + SHIFT_DAYS * 86_400
         - days * 86_400;
     let ts = Timespec {
         tv_sec: secs as i64,
@@ -588,14 +601,14 @@ fn execute_rechecks_temp_staleness() {
     let gone = env_dir(&t, "tmp/gone");
     age_days(&g, 30);
     age_days(&gone, 30);
-    let env = t.env();
+    let env = temp_env(&t);
     let mut stale = planned(&env, delete("/tmp/work"));
     stale.scope = Scope::UserTemp;
     let mut ok = planned(&env, delete("/tmp/gone"));
     ok.scope = Scope::UserTemp;
     // Someone starts using the dir between scan and clean; the dir's own
     // inode is unchanged, so `verify` alone would pass.
-    t.write("tmp/work/new", b"fresh");
+    age_days(&t.write("tmp/work/new", b"fresh"), 0);
     age_days(&dir, 30);
     let report = execute(&env, &Config::default(), &plan_of(vec![stale, ok]));
     assert!(!report.results[0].ok);
@@ -711,7 +724,7 @@ fn temp_delete_verified_in_user_temp_scope() {
     let b = t.write("tmp/b", b"b");
     age_days(&a, 30);
     age_days(&b, 30);
-    let env = t.env();
+    let env = temp_env(&t);
     let item = |path: &str| {
         let p = PathBuf::from(path);
         BloatItem {
