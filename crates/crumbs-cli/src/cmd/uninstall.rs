@@ -7,6 +7,7 @@ use clap::Args;
 use crumbs_core::inventory::{Inventory, Resolved, find_app, find_app_exact};
 use crumbs_core::leftovers::{Finding, FindingKind, find_leftovers};
 use crumbs_core::plan::{PlanOptions, build_plan};
+use crumbs_core::safety;
 use crumbs_core::{App, Env, SourceKind};
 
 use super::act::{
@@ -61,6 +62,17 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
         );
         return out.fail(2, &msg);
     }
+    if !args.leftovers_only {
+        for app in &apps {
+            if let Err(reason) = appimage_removable(env, &cx, app) {
+                let msg = format!(
+                    "cannot remove {}: {reason}; use --leftovers-only to remove only its leftovers",
+                    app.id
+                );
+                return out.fail(1, &msg);
+            }
+        }
+    }
     if let Some(code) = refuse_source_errors(out, &cx.inv, &args.act)? {
         return Ok(code);
     }
@@ -90,6 +102,21 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
     }
     drop_overlaps(&mut targets);
     apply(env, &cx, out, &targets, &args.act)
+}
+
+/// Whether an AppImage's own file passes the same checks the executor runs
+/// before trashing it. Checked before anything is previewed, so an app is
+/// never half removed (leftovers gone, file refused).
+fn appimage_removable(env: &Env, cx: &Context, app: &App) -> Result<(), String> {
+    if app.source != SourceKind::AppImage {
+        return Ok(());
+    }
+    let Some(location) = &app.location else {
+        return Err("its file location is unknown".into());
+    };
+    safety::verify_now(env, &cx.cfg, location)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// A launcher of the app itself (named by one of its desktop IDs), or an

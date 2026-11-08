@@ -32,6 +32,10 @@ pub enum SafetyError {
     OutsideAllowedRoots(String),
     #[error("refusing: {0} changed since it was scanned")]
     Changed(String),
+    /// A directory between home and the target is a symlink. Holds the
+    /// display form of that directory (`~/…` under home).
+    #[error("refusing: {} is a symlink", .0.display())]
+    SymlinkedParent(PathBuf),
     #[error("refusing: {0} is not a canonical path")]
     NonCanonical(String),
     #[error("{0} no longer exists")]
@@ -224,6 +228,33 @@ pub fn verify(
     in_system: &Path,
     expected: &Fingerprint,
 ) -> Result<(), SafetyError> {
+    let path = check_location(env, cfg, in_system)?;
+    let shown = display_path(env, in_system);
+    match lstat(env, &path) {
+        Ok(fp) if fp == *expected => Ok(()),
+        Ok(_) => Err(SafetyError::Changed(shown)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(SafetyError::Missing(shown)),
+        Err(_) => Err(SafetyError::Changed(shown)),
+    }
+}
+
+/// The checks of [`verify`] for a path that has no scan-time fingerprint
+/// yet: whether it could be acted on right now. Returns its current
+/// fingerprint.
+pub fn verify_now(env: &Env, cfg: &Config, in_system: &Path) -> Result<Fingerprint, SafetyError> {
+    let path = check_location(env, cfg, in_system)?;
+    let shown = display_path(env, in_system);
+    match lstat(env, &path) {
+        Ok(fp) => Ok(fp),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(SafetyError::Missing(shown)),
+        Err(_) => Err(SafetyError::Changed(shown)),
+    }
+}
+
+/// Everything [`verify`] checks except the target itself: canonical,
+/// allowed, and no symlinked directory between home and the target.
+/// Returns the normalised path.
+fn check_location(env: &Env, cfg: &Config, in_system: &Path) -> Result<PathBuf, SafetyError> {
     let shown = display_path(env, in_system);
     if !is_canonical(in_system) {
         return Err(SafetyError::NonCanonical(shown));
@@ -248,19 +279,17 @@ pub fn verify(
         dir.push(comp.as_os_str());
         match lstat(env, &dir) {
             Ok(fp) if !fp.is_symlink => {}
-            Ok(_) => return Err(SafetyError::Changed(shown)),
+            Ok(_) => {
+                let parent = PathBuf::from(display_path(env, &dir));
+                return Err(SafetyError::SymlinkedParent(parent));
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(SafetyError::Missing(shown));
             }
             Err(_) => return Err(SafetyError::Changed(shown)),
         }
     }
-    match lstat(env, &path) {
-        Ok(fp) if fp == *expected => Ok(()),
-        Ok(_) => Err(SafetyError::Changed(shown)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(SafetyError::Missing(shown)),
-        Err(_) => Err(SafetyError::Changed(shown)),
-    }
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -469,10 +498,42 @@ mod tests {
         let fp = fingerprint(&env, &target).unwrap();
         std::fs::remove_dir_all(t.dir.path().join("home/user/.config")).unwrap();
         t.symlink("home/user/.config", "/home/user/elsewhere");
+        let err = verify(&env, &cfg, &target, &fp).unwrap_err();
+        assert_eq!(
+            err,
+            SafetyError::SymlinkedParent(PathBuf::from("~/.config"))
+        );
+        assert_eq!(err.to_string(), "refusing: ~/.config is a symlink");
+    }
+
+    #[test]
+    fn verify_now_checks_location_and_existence() {
+        let (t, env, cfg) = setup();
+        t.write("home/user/Applications/X.AppImage", b"x");
+        t.write("opt/apps/Y.AppImage", b"y");
+        let ok = p("/home/user/Applications/X.AppImage");
+        assert_eq!(
+            verify_now(&env, &cfg, &ok),
+            Ok(fingerprint(&env, &ok).unwrap())
+        );
         assert!(matches!(
-            verify(&env, &cfg, &target, &fp),
-            Err(SafetyError::Changed(_))
+            verify_now(&env, &cfg, &p("/opt/apps/Y.AppImage")),
+            Err(SafetyError::OutsideAllowedRoots(_))
         ));
+        assert!(matches!(
+            verify_now(&env, &cfg, &p("/home/user/Applications/Z.AppImage")),
+            Err(SafetyError::Missing(_))
+        ));
+        std::fs::rename(
+            t.dir.path().join("home/user/Applications"),
+            t.dir.path().join("home/user/real"),
+        )
+        .unwrap();
+        t.symlink("home/user/Applications", "real");
+        assert_eq!(
+            verify_now(&env, &cfg, &ok),
+            Err(SafetyError::SymlinkedParent(p("~/Applications")))
+        );
     }
 
     #[test]

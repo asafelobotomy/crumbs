@@ -870,3 +870,82 @@ fn uninstall_never_trashes_parent_of_excluded_path() {
     );
     assert!(real(&t, "/home/user/.config/Foobar/other").exists());
 }
+
+/// An AppImage whose file can't pass `safety::verify` is refused as a
+/// whole before anything is previewed or touched; its leftovers stay too.
+#[test]
+fn uninstall_refuses_appimage_in_symlinked_dir() {
+    let t = fixture(FLATPAK_OK);
+    std::fs::rename(
+        real(&t, "/home/user/Applications"),
+        real(&t, "/home/user/apps-real"),
+    )
+    .unwrap();
+    t.appimage("/home/user/apps-real/GutCheck-0.19.0-x86_64.AppImage");
+    t.symlink("/home/user/Applications", "apps-real");
+    t.write("/home/user/.config/GutCheck/settings.json", b"x");
+    let out = crumbs(&t)
+        .args(["uninstall", "GutCheck", "--yes"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains(
+            "error: cannot remove appimage:~/Applications/GutCheck-0.19.0-x86_64.AppImage: \
+             refusing: ~/Applications is a symlink; use --leftovers-only to remove only its leftovers"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(real(&t, "/home/user/.config/GutCheck/settings.json").exists());
+    assert!(real(&t, "/home/user/apps-real/GutCheck-0.19.0-x86_64.AppImage").exists());
+    assert!(trash_files(&t).is_empty());
+
+    let v = json_error(&t, &["uninstall", "GutCheck", "--json", "--yes"], 1);
+    assert!(v.to_string().contains("~/Applications is a symlink"), "{v}");
+    assert!(real(&t, "/home/user/.config/GutCheck/settings.json").exists());
+
+    // --leftovers-only never looks at the file.
+    crumbs(&t)
+        .args(["uninstall", "GutCheck", "--leftovers-only", "--yes"])
+        .assert()
+        .code(0);
+    assert!(!real(&t, "/home/user/.config/GutCheck").exists());
+    assert!(real(&t, "/home/user/apps-real/GutCheck-0.19.0-x86_64.AppImage").exists());
+}
+
+#[test]
+fn uninstall_refuses_appimage_outside_home() {
+    let t = fixture(FLATPAK_OK);
+    t.appimage("/opt/apps/Foo-1.0-x86_64.AppImage");
+    t.write("/home/user/.config/Foo/settings.json", b"x");
+    t.write(
+        "/home/user/.config/crumbs/config.toml",
+        b"appimage_dirs = [\"/opt/apps\"]\n",
+    );
+    let out = crumbs(&t)
+        .args([
+            "uninstall",
+            "appimage:/opt/apps/Foo-1.0-x86_64.AppImage",
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains(
+            "error: cannot remove appimage:/opt/apps/Foo-1.0-x86_64.AppImage: \
+             refusing: /opt/apps/Foo-1.0-x86_64.AppImage is outside the allowed roots; \
+             use --leftovers-only to remove only its leftovers"
+        ),
+        "{stderr}"
+    );
+    assert!(real(&t, "/home/user/.config/Foo/settings.json").exists());
+    assert!(real(&t, "/opt/apps/Foo-1.0-x86_64.AppImage").exists());
+}
