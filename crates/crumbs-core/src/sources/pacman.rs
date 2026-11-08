@@ -145,7 +145,7 @@ fn pkg_error(dir: &std::path::Path, message: String) -> SourceError {
 
 /// Splits a pacman db file into `%HEADER%` sections; each value is the lines
 /// up to the next blank line.
-fn parse_sections(text: &str) -> HashMap<String, Vec<String>> {
+pub(crate) fn parse_sections(text: &str) -> HashMap<String, Vec<String>> {
     let mut out = HashMap::new();
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
@@ -162,7 +162,7 @@ fn parse_sections(text: &str) -> HashMap<String, Vec<String>> {
     out
 }
 
-fn first(sections: &HashMap<String, Vec<String>>, key: &str) -> Option<String> {
+pub(crate) fn first(sections: &HashMap<String, Vec<String>>, key: &str) -> Option<String> {
     sections
         .get(key)?
         .first()

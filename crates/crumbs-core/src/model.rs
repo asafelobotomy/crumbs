@@ -40,11 +40,29 @@ impl FromStr for SourceKind {
     }
 }
 
-#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Installation {
     User,
     System,
+    /// A named Flatpak installation other than the user and system ones.
+    Custom(String),
+}
+
+impl Installation {
+    /// `user`, `system` or `custom:<name>`; also the JSON form.
+    pub fn label(&self) -> String {
+        match self {
+            Installation::User => "user".into(),
+            Installation::System => "system".into(),
+            Installation::Custom(name) => format!("custom:{name}"),
+        }
+    }
+}
+
+impl Serialize for Installation {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.label())
+    }
 }
 
 /// An installed application. Paths are in-system (`env.unsys` applied).

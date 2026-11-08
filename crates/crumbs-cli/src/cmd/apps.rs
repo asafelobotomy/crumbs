@@ -217,13 +217,7 @@ fn print_app(env: &Env, a: &App) -> anyhow::Result<()> {
         ("ID", sanitise(&a.id)),
         ("Source", a.source.as_str().to_string()),
         ("Version", a.version.clone().unwrap_or_else(|| "-".into())),
-        (
-            "Installation",
-            serde_json::to_value(a.installation)?
-                .as_str()
-                .unwrap_or("-")
-                .to_string(),
-        ),
+        ("Installation", sanitise(&a.installation.label())),
         ("Size", a.install_size.map_or_else(|| "-".into(), fmt_size)),
         (
             "Location",
