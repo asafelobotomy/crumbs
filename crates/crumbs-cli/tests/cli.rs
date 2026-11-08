@@ -1852,3 +1852,39 @@ fn clean_preview_sanitises_paths() {
     let v = stdout_json(crumbs(&t).args(["clean", "cache", "--dry-run", "--json"]));
     assert!(v.to_string().contains("\\r"), "{v}");
 }
+
+#[test]
+fn restore_mixed_clean_batch_skips_deletes() {
+    let t = scan_fixture(FLATPAK_OK);
+    old_temp(&t, "old-build.log");
+    let (code, stdout, stderr) = run_clean(&t, &["cache", "temp", "--yes"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!real(&t, "/tmp/old-build.log").exists());
+    let h = history_json(&t);
+    let batch = h["data"]["batches"][0]["batch"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let entries = h["data"]["batches"][0]["entries"].as_array().unwrap();
+    let delete_id = entries
+        .iter()
+        .find(|e| e["action"] == "delete")
+        .unwrap_or_else(|| panic!("{h}"))["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let out = crumbs(&t).args(["restore", &batch]).output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("✓ restored ~/.cache/foo"), "{stdout}");
+    assert!(!stdout.contains("old-build.log"), "{stdout}");
+    assert!(real(&t, "/home/user/.cache/foo/blob").exists());
+    // Named by its id, a delete still says why it cannot come back.
+    let out = crumbs(&t).args(["restore", &delete_id]).output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(3), "{stdout}");
+    assert!(
+        stdout.contains("permanently deleted; cannot be restored"),
+        "{stdout}"
+    );
+}

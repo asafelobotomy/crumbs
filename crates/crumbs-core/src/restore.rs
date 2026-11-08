@@ -132,7 +132,8 @@ fn restore_with(
 }
 
 /// Entries a selector names, oldest first. A path names its newest entry
-/// not yet restored. `Restore` entries are never selected.
+/// not yet restored. `Restore` entries are never selected; a batch skips
+/// `Command` and `Delete` entries.
 fn select<'a>(
     entries: &'a [HistoryEntry],
     sel: &str,
@@ -149,8 +150,9 @@ fn select<'a>(
     let batch: Vec<&HistoryEntry> = actions()
         .filter(|e| e.batch == sel && e.ok)
         .filter(|e| !(e.action == HistoryAction::EditFile && e.backup.is_none()))
-        // A command changed nothing that can be put back.
-        .filter(|e| e.action != HistoryAction::Command)
+        // A command or a permanent delete left nothing to put back; named
+        // by its id, such an entry still says why.
+        .filter(|e| !matches!(e.action, HistoryAction::Command | HistoryAction::Delete))
         .collect();
     if !batch.is_empty() {
         return batch;
