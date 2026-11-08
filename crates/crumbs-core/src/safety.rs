@@ -5,6 +5,7 @@
 //! `fingerprint` refuse non-canonical paths (trailing `/`, `.`, `//`, `..`)
 //! because the kernel resolves `link/` and `link/.` through the symlink.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
@@ -38,6 +39,77 @@ pub enum Scope {
     /// real directory owned by [`Env::system_owner_uid`] and writable by
     /// no one else.
     System,
+    /// A direct child of `/etc` or `/opt` that no package owns, removed
+    /// with root rights: a real directory or a regular file, never a
+    /// symlink, with every directory from `/` down to `/etc` or `/opt` a
+    /// real directory owned by [`Env::system_owner_uid`] and writable by no
+    /// one else.
+    SystemTree,
+}
+
+/// Names under `/etc` and `/opt` that are never offered for removal even
+/// when no package owns them: system configuration that crumbs must leave
+/// alone.
+pub const ETC_NEVER: &[&str] = &[
+    "passwd",
+    "shadow",
+    "group",
+    "gshadow",
+    "sudoers",
+    "sudoers.d",
+    "ssh",
+    "ssl",
+    "ca-certificates",
+    "pam.d",
+    "security",
+    "systemd",
+    "fstab",
+    "crypttab",
+    "hosts",
+    "hostname",
+    "machine-id",
+    "locale.conf",
+    "localtime",
+    "vconsole.conf",
+    "adjtime",
+    "ld.so.cache",
+    "ld.so.conf",
+    "ld.so.conf.d",
+    "os-release",
+    "pacman.conf",
+    "pacman.d",
+    "mkinitcpio.conf",
+    "mkinitcpio.d",
+    "modprobe.d",
+    "modules-load.d",
+    "sysctl.d",
+    "udev",
+    "X11",
+    "NetworkManager",
+    "polkit-1",
+    "dbus-1",
+    "default",
+    "skel",
+    "profile",
+    "profile.d",
+    "environment",
+];
+
+/// Whether `name` may be a [`Scope::SystemTree`] target: not in
+/// [`ETC_NEVER`], not a backup or package-manager leftover suffix, and not
+/// hidden.
+pub fn is_system_leftover_name(name: &OsStr) -> bool {
+    let b = name.as_bytes();
+    if b.is_empty() || b.starts_with(b".") || b.ends_with(b"-") {
+        return false;
+    }
+    if [&b".bak"[..], b".old", b".pacnew", b".pacsave"]
+        .iter()
+        .any(|suffix| b.ends_with(suffix))
+    {
+        return false;
+    }
+    !ETC_NEVER.iter().any(|n| n.as_bytes() == b)
 }
 
 /// In-system directory whose `core.*` files [`Scope::System`] allows.
@@ -201,6 +273,15 @@ pub fn is_allowed_target(env: &Env, cfg: &Config, scope: Scope, in_system: &Path
                 && !is_protected_by(&protected, &path)
                 && !is_excluded(cfg, &path)
         }
+        Scope::SystemTree => {
+            let in_root = path
+                .parent()
+                .is_some_and(|parent| scope_roots(env, scope).iter().any(|root| parent == root));
+            in_root
+                && path.file_name().is_some_and(is_system_leftover_name)
+                && !is_protected_by(&protected, &path)
+                && !is_excluded(cfg, &path)
+        }
     }
 }
 
@@ -215,6 +296,7 @@ fn scope_roots(env: &Env, scope: Scope) -> Vec<PathBuf> {
             vec![trash.join("files"), trash.join("info")]
         }
         Scope::System => vec![PathBuf::from(COREDUMP_DIR)],
+        Scope::SystemTree => vec![PathBuf::from("/etc"), PathBuf::from("/opt")],
     }
 }
 
@@ -365,6 +447,17 @@ pub fn verify_now(
         if !ft.is_file() {
             return Err(SafetyError::Ineligible(shown, "is not a regular file"));
         }
+    } else if scope == Scope::SystemTree {
+        let ft = meta.file_type();
+        if ft.is_symlink() {
+            return Err(SafetyError::Ineligible(shown, "is a symlink"));
+        }
+        if !(ft.is_file() || ft.is_dir()) {
+            return Err(SafetyError::Ineligible(
+                shown,
+                "is not a regular file or directory",
+            ));
+        }
     }
     Ok(fingerprint_of(&meta))
 }
@@ -421,7 +514,7 @@ fn check_location(
                 }
             }
         }
-        Scope::System => check_system_chain(env, parent, &shown)?,
+        Scope::System | Scope::SystemTree => check_system_chain(env, parent, &shown)?,
     }
     Ok(path)
 }
@@ -1204,6 +1297,125 @@ mod tests {
             verify_now(&env, &cfg, Scope::System, &target),
             Err(SafetyError::Ineligible(_, why)) if why.contains("not owned by root")
         ));
+    }
+
+    /// `/`, `/etc` and `/opt` as 0755 directories, so the root-owned chain
+    /// check passes (the fixture user stands in for root).
+    fn system_tree_env(t: &FixtureTree) -> Env {
+        use std::os::unix::fs::PermissionsExt;
+        t.mkdir("etc");
+        t.mkdir("opt");
+        for rel in ["", "etc", "opt"] {
+            fs::set_permissions(t.dir.path().join(rel), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut env = t.env();
+        env.set_system_owner_uid(env.uid);
+        env
+    }
+
+    #[test]
+    fn system_tree_allows_direct_children_only() {
+        let (t, _env, cfg) = setup();
+        let env = system_tree_env(&t);
+        let st = Scope::SystemTree;
+        for s in ["/opt/inky", "/etc/inky"] {
+            assert!(is_allowed_target(&env, &cfg, st, &p(s)), "{s}");
+        }
+        for s in [
+            "/opt/inky/sub",
+            "/opt",
+            "/etc",
+            "/var/foo",
+            "/etc/machine-id",
+            "/etc/passwd-",
+            "/etc/foo.pacsave",
+            "/etc/foo.pacnew",
+            "/etc/foo.bak",
+            "/etc/foo.old",
+            "/etc/.hidden",
+            "/etc/../etc/inky",
+        ] {
+            assert!(!is_allowed_target(&env, &cfg, st, &p(s)), "{s}");
+        }
+        let mut cfg = cfg;
+        cfg.exclude.push("/opt/inky".into());
+        assert!(!is_allowed_target(&env, &cfg, st, &p("/opt/inky")));
+    }
+
+    #[test]
+    fn system_leftover_names() {
+        for n in ETC_NEVER {
+            assert!(!is_system_leftover_name(OsStr::new(n)), "{n}");
+        }
+        assert!(!is_system_leftover_name(OsStr::new("")));
+        assert!(is_system_leftover_name(OsStr::new("inky")));
+        assert!(is_system_leftover_name(OsStr::new("inky.conf")));
+    }
+
+    #[test]
+    fn system_tree_refuses_symlink_and_writable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        let (t, _env, cfg) = setup();
+        let env = system_tree_env(&t);
+        t.symlink("opt/x", "/etc");
+        assert!(matches!(
+            verify_now(&env, &cfg, Scope::SystemTree, &p("/opt/x")),
+            Err(SafetyError::Ineligible(_, "is a symlink"))
+        ));
+        t.mkdir("opt/inky");
+        t.write("opt/file", b"x");
+        verify_now(&env, &cfg, Scope::SystemTree, &p("/opt/inky")).unwrap();
+        verify_now(&env, &cfg, Scope::SystemTree, &p("/opt/file")).unwrap();
+        fs::set_permissions(t.dir.path().join("opt"), fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(matches!(
+            verify_now(&env, &cfg, Scope::SystemTree, &p("/opt/inky")),
+            Err(SafetyError::Ineligible(_, "is writable by group or others"))
+        ));
+    }
+
+    #[test]
+    fn system_tree_refuses_special_files() {
+        let (t, _env, cfg) = setup();
+        let env = system_tree_env(&t);
+        let fifo = t.dir.path().join("opt/fifo");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_now(&env, &cfg, Scope::SystemTree, &p("/opt/fifo")),
+            Err(SafetyError::Ineligible(_, why)) if why.contains("regular file or directory")
+        ));
+    }
+
+    #[test]
+    fn system_tree_verify_accepts_root_owned_chain() {
+        let (t, _env, cfg) = setup();
+        let env = system_tree_env(&t);
+        t.mkdir("opt/inky");
+        let target = p("/opt/inky");
+        let st = Scope::SystemTree;
+        let fp = verify_now(&env, &cfg, st, &target).unwrap();
+        verify(&env, &cfg, st, &target, &fp).unwrap();
+        // Keep the old directory alive so the new one has another inode.
+        fs::rename(t.dir.path().join("opt/inky"), t.dir.path().join("opt/kept")).unwrap();
+        t.mkdir("opt/inky");
+        assert!(matches!(
+            verify(&env, &cfg, st, &target, &fp),
+            Err(SafetyError::Changed(_))
+        ));
+    }
+
+    #[test]
+    fn system_tree_serde_is_kebab_case() {
+        assert_eq!(
+            serde_json::to_string(&Scope::SystemTree).unwrap(),
+            "\"system-tree\""
+        );
     }
 
     #[test]

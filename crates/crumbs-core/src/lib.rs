@@ -10,6 +10,7 @@ pub mod history;
 pub mod inventory;
 pub mod leftovers;
 pub mod model;
+pub mod mounts;
 pub mod ownership;
 pub mod plan;
 pub mod privilege;

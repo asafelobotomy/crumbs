@@ -1907,3 +1907,27 @@ fn execute_many_denied_fails_every_plan() {
         Some(ESCALATION_DENIED)
     );
 }
+
+#[test]
+fn system_tree_delete_fails_closed_until_it_has_a_step() {
+    let t = FixtureTree::new();
+    fixture_rm(&t);
+    t.write("opt/inky/a", b"a");
+    let env = t.env();
+    let mut pa = planned(&env, delete("/opt/inky"));
+    pa.scope = Scope::SystemTree;
+    let plan = plan_of(vec![pa]);
+    let pr = FakePrivilegedRunner::default();
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &pr,
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert!(!report.results[0].ok, "{:?}", report.results[0]);
+    assert!(env.sys("/opt/inky/a").exists());
+    assert!(pr.calls.lock().unwrap().is_empty());
+}

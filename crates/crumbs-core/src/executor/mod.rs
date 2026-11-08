@@ -314,7 +314,7 @@ impl Attempt {
 fn is_privileged(pa: &crate::plan::PlannedAction) -> bool {
     match pa.action {
         Action::PrivilegedCommand { .. } | Action::PackageRemove { .. } => true,
-        Action::Delete { .. } => pa.scope == Scope::System,
+        Action::Delete { .. } => matches!(pa.scope, Scope::System | Scope::SystemTree),
         Action::Trash { .. } | Action::EditFile { .. } | Action::UserCommand { .. } => false,
     }
 }
@@ -572,6 +572,11 @@ fn privileged_step(
         resolve_trusted(env, program).ok_or_else(|| format!("{program} is not installed"))
     };
     let (program, args) = match &pa.action {
+        // Task 3 builds the step for a system tree; until then it fails
+        // closed rather than reach anything else.
+        Action::Delete { .. } if pa.scope == Scope::SystemTree => {
+            return Err("removing system leftovers is not supported yet".into());
+        }
         Action::Delete { path } => {
             verify_path(env, cfg, pa, path)?;
             let rm = resolve("rm")?;
