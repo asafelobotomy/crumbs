@@ -21,6 +21,11 @@ pub enum HistoryAction {
     Restore,
     /// A `UserCommand` ran; it cannot be undone.
     Command,
+    /// A `PackageRemove` ran as root; `packages` says what it removed.
+    /// Packages cannot be restored by crumbs.
+    PackageRemove,
+    /// A `PrivilegedCommand` ran as root; it cannot be undone.
+    PrivilegedCommand,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,9 +44,13 @@ pub struct HistoryEntry {
     /// `Restore` entries only: the id of the entry this one restored.
     #[serde(default)]
     pub restores: Option<String>,
-    /// `Command` entries only: the program's arguments.
+    /// `Command`, `PrivilegedCommand` and `PackageRemove` entries only: the
+    /// program's arguments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argv: Option<Vec<String>>,
+    /// `PackageRemove` entries only: each package's `(name, version)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packages: Option<Vec<(String, String)>>,
     /// The command whose batch this is: [`KIND_UNINSTALL`],
     /// [`KIND_ORPHANS`] or [`KIND_CLEAN`]. Missing in lines written before
     /// it existed, and in `Restore` entries.
@@ -175,6 +184,7 @@ mod tests {
             kind: Some(KIND_UNINSTALL.into()),
             restores: None,
             argv: None,
+            packages: None,
         }
     }
 

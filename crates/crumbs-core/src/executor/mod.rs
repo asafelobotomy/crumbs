@@ -6,7 +6,7 @@ pub(crate) mod files;
 #[cfg(test)]
 mod tests;
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
@@ -19,8 +19,12 @@ use crate::command::{CommandRunner, SystemRunner, USER_COMMAND_TIMEOUT, resolve_
 use crate::config::Config;
 use crate::env::{Env, display_path};
 use crate::history::{self, HistoryAction, HistoryEntry};
-use crate::model::App;
+use crate::model::{App, SourceKind};
 use crate::plan::{Action, Plan};
+use crate::privilege::batch::{
+    PrivilegedRunner, Step, SystemPrivilegedRunner, build_script, parse_markers,
+};
+use crate::privilege::{Escalation, detect_escalation};
 use crate::safety::{self, Fingerprint, Scope};
 use crate::size;
 use crate::trash::{self, Trashed};
@@ -38,6 +42,7 @@ pub struct ExecReport {
     pub batch: String,
     pub results: Vec<ActionResult>,
     pub freed: u64,
+    pub escalation_failed: bool,
 }
 
 /// What a successful action leaves for the history entry.
@@ -47,14 +52,18 @@ struct Done {
     backup: Option<PathBuf>,
 }
 
-/// Runs every action in order. An action whose `depends_on` action did not
-/// succeed is skipped: `ok: false`, with the reason, and recorded like any
-/// other. Each attempt becomes one history entry,
-/// appended (and synced) right after the attempt, so an interrupted run
-/// still leaves a record of what it did. When an entry can't be written,
-/// that result's error gets `"<append error>; history not written"` (its
-/// `ok` still describes what happened on disk); other entries are
-/// unaffected.
+/// Why every privileged action failed when no escalation program exists.
+pub const NO_ESCALATION: &str =
+    "no way to get administrator rights (install systemd ≥ 256, polkit or sudo)";
+/// Why a privileged step failed when its marker never came back.
+pub const ESCALATION_DENIED: &str = "privilege escalation was cancelled or denied";
+
+/// Reports which of `names` are still installed from `source`, after a
+/// `PackageRemove` claimed success.
+pub type PostCheck<'a> = dyn Fn(&Env, SourceKind, &[String]) -> Vec<String> + 'a;
+
+/// Runs every action (see [`execute_full`]) with the system runners and
+/// the escalation program [`detect_escalation`] finds.
 pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
     execute_with(
         env,
@@ -65,81 +74,357 @@ pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
 }
 
 /// [`execute`] with the command runner injected; `UserCommand` actions run
-/// through it.
+/// through it, and it answers the escalation detection (only done when the
+/// plan holds privileged actions). There is no package post-check.
 pub fn execute_with(
     env: &Env,
     cfg: &Config,
     plan: &Plan,
     runner: &dyn CommandRunner,
 ) -> ExecReport {
+    let esc = plan
+        .actions
+        .iter()
+        .any(is_privileged)
+        .then(|| detect_escalation(env, runner))
+        .flatten();
+    execute_full(
+        env,
+        cfg,
+        plan,
+        runner,
+        &SystemPrivilegedRunner,
+        esc.as_ref(),
+        &|_, _, _| Vec::new(),
+    )
+}
+
+/// Runs a plan.
+///
+/// First the privileged actions (`PrivilegedCommand`, `PackageRemove`, and
+/// `Delete` in [`Scope::System`], which becomes `rm -f -- <path>`), in plan
+/// order, as one root script run once through `priv_runner`: each program
+/// is resolved in the trusted directories and each System `Delete`
+/// verified (as the user) right before the script is built; one that fails
+/// is left out of it. No script runs when nothing is left, and a privileged
+/// action that depends on another action is skipped (the batch runs before
+/// everything else). A step's marker with status 0 is success; any other
+/// status fails with the step's last output line; a missing marker means
+/// the escalation was cancelled or denied. A succeeded `PackageRemove` is
+/// re-checked with `post_check`; a package still installed fails it.
+///
+/// Then the remaining actions, in plan order. An action whose `depends_on`
+/// action (an earlier one) did not succeed is skipped: `ok: false`, with
+/// the reason, and recorded like any other.
+///
+/// Each attempt becomes one history entry, appended (and synced) right
+/// after it ran (the privileged ones right after the batch, in plan
+/// order), so an interrupted run still leaves a record of what it did.
+/// When an entry can't be written, that result's error gets `"<append
+/// error>; history not written"` (its `ok` still describes what happened);
+/// other entries are unaffected. Results are in plan order.
+///
+/// `escalation_failed` is set when privileged steps were due but `esc` is
+/// `None`, or a step's marker never came back.
+pub fn execute_full(
+    env: &Env,
+    cfg: &Config,
+    plan: &Plan,
+    runner: &dyn CommandRunner,
+    priv_runner: &dyn PrivilegedRunner,
+    esc: Option<&Escalation>,
+    post_check: &PostCheck<'_>,
+) -> ExecReport {
     let batch = history::next_batch_id(env);
-    let mut results = Vec::with_capacity(plan.actions.len());
+    let mut results: Vec<Option<ActionResult>> = vec![None; plan.actions.len()];
     let mut freed = 0u64;
+    let (attempts, escalation_failed) =
+        run_privileged(env, cfg, plan, priv_runner, esc, post_check);
+    for (i, attempt) in attempts {
+        let pa = &plan.actions[i];
+        if attempt.outcome.is_ok() {
+            freed = freed.saturating_add(pa.size);
+        }
+        results[i] = Some(record(env, plan, &batch, i, attempt));
+    }
     for (i, pa) in plan.actions.iter().enumerate() {
-        let id = format!("{batch}-{i}");
-        let mut path = action_target(&pa.action);
-        let mut argv = None;
-        let outcome = match skip_reason(env, plan, &results, pa.depends_on) {
+        if results[i].is_some() {
+            continue;
+        }
+        let mut attempt = Attempt::new(action_target(&pa.action));
+        attempt.outcome = match skip_reason(env, plan, &results, i, pa.depends_on) {
             Some(reason) => Err(reason),
             // A command has no path to verify; its program is resolved in
             // the trusted directories right now instead.
-            None if matches!(pa.action, Action::UserCommand { .. }) => {
-                run_command(env, &pa.action, runner, &mut path, &mut argv)
-            }
-            None => safety::verify(env, cfg, pa.scope, &path, &pa.fingerprint)
-                .map_err(|e| e.to_string())
-                .and_then(|()| recheck_scope(env, cfg, pa.scope, &path))
+            None if matches!(pa.action, Action::UserCommand { .. }) => run_command(
+                env,
+                &pa.action,
+                runner,
+                &mut attempt.path,
+                &mut attempt.argv,
+            ),
+            None => verify_path(env, cfg, pa, &attempt.path)
                 .and_then(|()| act(env, &pa.action, &pa.fingerprint, &batch)),
         };
-        let (ok, error, done) = match outcome {
-            Ok(done) => (true, None, done),
-            Err(e) => (false, Some(e), Done::default()),
-        };
-        if ok {
+        if attempt.outcome.is_ok() {
             freed = freed.saturating_add(pa.size);
         }
-        let entry = HistoryEntry {
-            id: id.clone(),
-            batch: batch.clone(),
-            time: history::now_rfc3339(),
-            action: match pa.action {
-                Action::Trash { .. } => HistoryAction::Trash,
-                Action::Delete { .. } => HistoryAction::Delete,
-                Action::EditFile { .. } => HistoryAction::EditFile,
-                Action::UserCommand { .. } => HistoryAction::Command,
-            },
-            path,
-            trashed: done.trashed,
-            backup: done.backup,
-            size: pa.size,
-            ok,
-            error: error.clone(),
-            app_id: plan.app_id.clone(),
-            restores: None,
-            argv,
-            kind: plan.kind.clone(),
-        };
-        let error = match history::append(env, std::slice::from_ref(&entry)) {
-            Ok(()) => error,
-            Err(e) => {
-                let suffix = format!("{e}; history not written");
-                Some(match error {
-                    Some(prev) => format!("{prev}; {suffix}"),
-                    None => suffix,
-                })
-            }
-        };
-        results.push(ActionResult {
-            action: pa.action.clone(),
-            ok,
-            error,
-            history_id: id,
-        });
+        results[i] = Some(record(env, plan, &batch, i, attempt));
     }
     ExecReport {
         batch,
-        results,
+        results: results.into_iter().flatten().collect(),
         freed,
+        escalation_failed,
+    }
+}
+
+/// One action's attempt, as it goes into its history entry.
+struct Attempt {
+    /// In-system target: the path, or the program for a command.
+    path: PathBuf,
+    argv: Option<Vec<String>>,
+    packages: Option<Vec<(String, String)>>,
+    outcome: Result<Done, String>,
+}
+
+impl Attempt {
+    fn new(path: PathBuf) -> Self {
+        Attempt {
+            path,
+            argv: None,
+            packages: None,
+            outcome: Ok(Done::default()),
+        }
+    }
+}
+
+/// Whether the action goes into the privileged batch.
+fn is_privileged(pa: &crate::plan::PlannedAction) -> bool {
+    match pa.action {
+        Action::PrivilegedCommand { .. } | Action::PackageRemove { .. } => true,
+        Action::Delete { .. } => pa.scope == Scope::System,
+        Action::Trash { .. } | Action::EditFile { .. } | Action::UserCommand { .. } => false,
+    }
+}
+
+/// `safety::verify` plus the scope's own re-checks, right before acting.
+fn verify_path(
+    env: &Env,
+    cfg: &Config,
+    pa: &crate::plan::PlannedAction,
+    path: &Path,
+) -> Result<(), String> {
+    safety::verify(env, cfg, pa.scope, path, &pa.fingerprint)
+        .map_err(|e| e.to_string())
+        .and_then(|()| recheck_scope(env, cfg, pa.scope, path))
+}
+
+/// Runs the privileged actions as one batch; returns their attempts in plan
+/// order (with plan indices) and whether escalation failed.
+fn run_privileged(
+    env: &Env,
+    cfg: &Config,
+    plan: &Plan,
+    priv_runner: &dyn PrivilegedRunner,
+    esc: Option<&Escalation>,
+    post_check: &PostCheck<'_>,
+) -> (Vec<(usize, Attempt)>, bool) {
+    let mut attempts: Vec<(usize, Attempt)> = Vec::new();
+    let mut steps: Vec<Step> = Vec::new();
+    // Indices into `attempts` of the actions that became `steps`, in order.
+    let mut stepped: Vec<usize> = Vec::new();
+    for (i, pa) in plan.actions.iter().enumerate() {
+        if !is_privileged(pa) {
+            continue;
+        }
+        let mut attempt = Attempt::new(action_target(&pa.action));
+        let step = match pa.depends_on {
+            Some(dep) => Err(format!(
+                "skipped: privileged actions run first and cannot wait for {}",
+                shown_action(env, plan, dep)
+            )),
+            None => privileged_step(env, cfg, pa, &mut attempt),
+        };
+        match step {
+            Ok(step) => {
+                stepped.push(attempts.len());
+                steps.push(step);
+            }
+            Err(e) => attempt.outcome = Err(e),
+        }
+        attempts.push((i, attempt));
+    }
+    if steps.is_empty() {
+        return (attempts, false);
+    }
+    let mut fail_all = |msg: &str| {
+        for &k in &stepped {
+            attempts[k].1.outcome = Err(msg.to_string());
+        }
+    };
+    let Some(esc) = esc else {
+        fail_all(NO_ESCALATION);
+        return (attempts, true);
+    };
+    let script = match build_script(&steps) {
+        Ok(s) => s,
+        Err(e) => {
+            fail_all(&e.to_string());
+            return (attempts, false);
+        }
+    };
+    let stdout = match priv_runner.run(esc, &script) {
+        Ok(out) => out,
+        Err(e) => {
+            fail_all(&format!("privilege escalation failed: {e}"));
+            return (attempts, true);
+        }
+    };
+    let mut escalation_failed = false;
+    for (&k, step) in stepped.iter().zip(parse_markers(&stdout, steps.len())) {
+        let (i, attempt) = &mut attempts[k];
+        attempt.outcome =
+            match step.status {
+                None => {
+                    escalation_failed = true;
+                    Err(ESCALATION_DENIED.into())
+                }
+                Some(0) => post_check_packages(env, &plan.actions[*i].action, post_check),
+                Some(status) => Err(last_line(&step.output)
+                    .unwrap_or_else(|| format!("exited with status {status}"))),
+            };
+    }
+    (attempts, escalation_failed)
+}
+
+/// The batch step for a privileged action, filling in its history fields.
+/// A System `Delete` is verified now; a program not installed fails.
+fn privileged_step(
+    env: &Env,
+    cfg: &Config,
+    pa: &crate::plan::PlannedAction,
+    attempt: &mut Attempt,
+) -> Result<Step, String> {
+    let resolve = |program: &str| {
+        resolve_trusted(env, program).ok_or_else(|| format!("{program} is not installed"))
+    };
+    let (program, args) = match &pa.action {
+        Action::Delete { path } => {
+            verify_path(env, cfg, pa, path)?;
+            let rm = resolve("rm")?;
+            let args = vec![
+                OsString::from("-f"),
+                OsString::from("--"),
+                env.sys_path(path).into_os_string(),
+            ];
+            return Ok(Step { program: rm, args });
+        }
+        Action::PrivilegedCommand { program, args } => (program, args),
+        Action::PackageRemove {
+            names,
+            versions,
+            program,
+            args,
+            ..
+        } => {
+            attempt.packages = Some(
+                names
+                    .iter()
+                    .enumerate()
+                    .map(|(n, name)| (name.clone(), versions.get(n).cloned().unwrap_or_default()))
+                    .collect(),
+            );
+            (program, args)
+        }
+        Action::Trash { .. } | Action::EditFile { .. } | Action::UserCommand { .. } => {
+            return Err("not a privileged action".into());
+        }
+    };
+    attempt.argv = Some(args.clone());
+    let resolved = resolve(program)?;
+    attempt.path = env.unsys(&resolved);
+    Ok(Step {
+        program: resolved,
+        args: args.iter().map(OsString::from).collect(),
+    })
+}
+
+/// A `PackageRemove` whose step succeeded still fails if `post_check` finds
+/// any of its packages installed.
+fn post_check_packages(
+    env: &Env,
+    action: &Action,
+    post_check: &PostCheck<'_>,
+) -> Result<Done, String> {
+    let Action::PackageRemove { source, names, .. } = action else {
+        return Ok(Done::default());
+    };
+    let still = post_check(env, *source, names);
+    if still.is_empty() {
+        Ok(Done::default())
+    } else {
+        Err(format!("still installed: {}", still.join(", ")))
+    }
+}
+
+/// The last non-empty line of a command's output, trimmed.
+fn last_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
+}
+
+/// Writes the attempt's history entry and returns its result.
+fn record(env: &Env, plan: &Plan, batch: &str, i: usize, attempt: Attempt) -> ActionResult {
+    let pa = &plan.actions[i];
+    let id = format!("{batch}-{i}");
+    let (ok, error, done) = match attempt.outcome {
+        Ok(done) => (true, None, done),
+        Err(e) => (false, Some(e), Done::default()),
+    };
+    let entry = HistoryEntry {
+        id: id.clone(),
+        batch: batch.to_string(),
+        time: history::now_rfc3339(),
+        action: match pa.action {
+            Action::Trash { .. } => HistoryAction::Trash,
+            Action::Delete { .. } => HistoryAction::Delete,
+            Action::EditFile { .. } => HistoryAction::EditFile,
+            Action::UserCommand { .. } => HistoryAction::Command,
+            Action::PrivilegedCommand { .. } => HistoryAction::PrivilegedCommand,
+            Action::PackageRemove { .. } => HistoryAction::PackageRemove,
+        },
+        path: attempt.path,
+        trashed: done.trashed,
+        backup: done.backup,
+        size: pa.size,
+        ok,
+        error: error.clone(),
+        app_id: plan.app_id.clone(),
+        restores: None,
+        argv: attempt.argv,
+        packages: attempt.packages,
+        kind: plan.kind.clone(),
+    };
+    let error = match history::append(env, std::slice::from_ref(&entry)) {
+        Ok(()) => error,
+        Err(e) => {
+            let suffix = format!("{e}; history not written");
+            Some(match error {
+                Some(prev) => format!("{prev}; {suffix}"),
+                None => suffix,
+            })
+        }
+    };
+    ActionResult {
+        action: pa.action.clone(),
+        ok,
+        error,
+        history_id: id,
     }
 }
 
@@ -147,7 +432,9 @@ pub fn execute_with(
 /// command its program name.
 fn action_target(action: &Action) -> PathBuf {
     match action {
-        Action::UserCommand { program, .. } => PathBuf::from(program),
+        Action::UserCommand { program, .. }
+        | Action::PrivilegedCommand { program, .. }
+        | Action::PackageRemove { program, .. } => PathBuf::from(program),
         other => other.path().map(Path::to_path_buf).unwrap_or_default(),
     }
 }
@@ -186,16 +473,7 @@ fn run_command(
     if out.status == 0 {
         return Ok(Done::default());
     }
-    Err(out
-        .stderr
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map_or_else(
-            || format!("exited with status {}", out.status),
-            str::to_string,
-        ))
+    Err(last_line(&out.stderr).unwrap_or_else(|| format!("exited with status {}", out.status)))
 }
 
 /// Scope rules beyond `verify` that are re-run right before acting: a
@@ -209,22 +487,35 @@ fn recheck_scope(env: &Env, cfg: &Config, scope: Scope, path: &Path) -> Result<(
 }
 
 /// Why an action must not run: the earlier action it depends on failed or
-/// was itself skipped.
+/// was itself skipped. A dependency on itself or a later action never
+/// succeeds.
 fn skip_reason(
     env: &Env,
     plan: &Plan,
-    results: &[ActionResult],
+    results: &[Option<ActionResult>],
+    index: usize,
     depends_on: Option<usize>,
 ) -> Option<String> {
     let dep = depends_on?;
-    if results.get(dep).is_some_and(|r| r.ok) {
+    if dep < index
+        && results
+            .get(dep)
+            .is_some_and(|r| r.as_ref().is_some_and(|r| r.ok))
+    {
         return None;
     }
-    let shown = plan.actions.get(dep).map_or_else(
-        || format!("action {dep}"),
+    Some(format!(
+        "skipped: {} was not removed",
+        shown_action(env, plan, dep)
+    ))
+}
+
+/// The action at `index` as shown in a skip reason.
+fn shown_action(env: &Env, plan: &Plan, index: usize) -> String {
+    plan.actions.get(index).map_or_else(
+        || format!("action {index}"),
         |d| display_path(env, &action_target(&d.action)),
-    );
-    Some(format!("skipped: {shown} was not removed"))
+    )
 }
 
 fn io_msg(env: &Env, in_system: &Path, e: &io::Error) -> String {
@@ -249,7 +540,9 @@ fn act(env: &Env, action: &Action, fp: &Fingerprint, batch: &str) -> Result<Done
                 trashed: None,
                 backup,
             }),
-        Action::UserCommand { .. } => Err("a command cannot be run as a path action".into()),
+        Action::UserCommand { .. }
+        | Action::PrivilegedCommand { .. }
+        | Action::PackageRemove { .. } => Err("a command cannot be run as a path action".into()),
     }
 }
 

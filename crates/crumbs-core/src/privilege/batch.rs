@@ -74,9 +74,10 @@ pub enum BatchError {
 /// One command in the batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
-    /// Absolute path written into the script as-is. Production callers pass
-    /// the in-system path (`env.unsys` of a `resolve_trusted` result); tests
-    /// running the script as the user pass root-joined fixture paths.
+    /// Absolute path written into the script as-is. The executor passes the
+    /// `resolve_trusted` result: root-joined, so the in-system path on the
+    /// real system (root `/`) and the fixture program in tests, which run
+    /// the script as the user.
     pub program: PathBuf,
     pub args: Vec<OsString>,
 }

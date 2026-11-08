@@ -108,6 +108,7 @@ fn restore_with(
                     app_id: e.app_id.clone(),
                     restores: Some(e.id.clone()),
                     argv: None,
+                    packages: None,
                     kind: None,
                 };
                 logged += 1;
@@ -134,7 +135,7 @@ fn restore_with(
 
 /// Entries a selector names, oldest first. A path names its newest entry
 /// not yet restored. `Restore` entries are never selected; a batch skips
-/// `Command` and `Delete` entries.
+/// `Command`, `PrivilegedCommand`, `PackageRemove` and `Delete` entries.
 fn select<'a>(
     entries: &'a [HistoryEntry],
     sel: &str,
@@ -151,9 +152,17 @@ fn select<'a>(
     let batch: Vec<&HistoryEntry> = actions()
         .filter(|e| e.batch == sel && e.ok)
         .filter(|e| !(e.action == HistoryAction::EditFile && e.backup.is_none()))
-        // A command or a permanent delete left nothing to put back; named
-        // by its id, such an entry still says why.
-        .filter(|e| !matches!(e.action, HistoryAction::Command | HistoryAction::Delete))
+        // A command, a package removal or a permanent delete left nothing
+        // to put back; named by its id, such an entry still says why.
+        .filter(|e| {
+            !matches!(
+                e.action,
+                HistoryAction::Command
+                    | HistoryAction::Delete
+                    | HistoryAction::PackageRemove
+                    | HistoryAction::PrivilegedCommand
+            )
+        })
         .collect();
     if !batch.is_empty() {
         return batch;
@@ -188,7 +197,21 @@ fn restore_one(
     match e.action {
         HistoryAction::Delete => Err("permanently deleted; cannot be restored".into()),
         HistoryAction::Restore => Err(INVALID_ENTRY.into()),
-        HistoryAction::Command => Err("commands cannot be undone".into()),
+        HistoryAction::Command | HistoryAction::PrivilegedCommand => {
+            Err("commands cannot be undone".into())
+        }
+        HistoryAction::PackageRemove => {
+            let names: Vec<&str> = e
+                .packages
+                .iter()
+                .flatten()
+                .map(|(name, _)| name.as_str())
+                .collect();
+            Err(format!(
+                "packages cannot be restored by crumbs; reinstall with: pacman -S {}",
+                names.join(" ")
+            ))
+        }
         HistoryAction::Trash => {
             let t = valid_trash(env, cfg, e).ok_or(INVALID_ENTRY)?;
             check_parents(env, &t.original)?;
@@ -799,6 +822,78 @@ mod tests {
         assert!(!out[0].ok);
         assert_eq!(out[0].error.as_deref(), Some("commands cannot be undone"));
         // By batch: commands are skipped like other no-op entries.
+        let out = restore(&env, &Config::default(), &sel(&rep.batch), false).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].error.as_deref(), Some(NO_MATCH));
+    }
+
+    #[test]
+    fn restore_refuses_packages_with_reinstall_hint() {
+        let t = FixtureTree::new();
+        t.write_exec("usr/bin/pacman", b"#!/bin/sh\n");
+        t.write_exec("usr/bin/flatpak", b"#!/bin/sh\n");
+        let env = t.env();
+        let unfp = |action| PlannedAction {
+            action,
+            size: 0,
+            fingerprint: crate::safety::Fingerprint {
+                dev: 0,
+                ino: 0,
+                is_symlink: false,
+                ctime: 0,
+                ctime_nsec: 0,
+            },
+            scope: crate::safety::Scope::Home,
+            depends_on: None,
+            reason: "test".into(),
+        };
+        let plan = Plan {
+            app_id: Some("pacman:foo".into()),
+            kind: None,
+            actions: vec![
+                unfp(Action::PackageRemove {
+                    source: crate::model::SourceKind::Pacman,
+                    names: vec!["foo".into(), "libfoo".into()],
+                    versions: vec!["1.0-1".into(), "2.0-1".into()],
+                    program: "pacman".into(),
+                    args: vec!["-Rns".into(), "--noconfirm".into(), "foo".into()],
+                }),
+                unfp(Action::PrivilegedCommand {
+                    program: "flatpak".into(),
+                    args: vec!["uninstall".into()],
+                }),
+            ],
+            total_size: 0,
+            notes: Vec::new(),
+        };
+        let esc = crate::privilege::Escalation {
+            kind: crate::privilege::EscalationKind::Pkexec,
+            program: "/usr/bin/pkexec".into(),
+            requires_tty: false,
+        };
+        let rep = crate::executor::execute_full(
+            &env,
+            &Config::default(),
+            &plan,
+            &crate::testing::FakeRunner::new(),
+            &crate::testing::FakePrivilegedRunner::default(),
+            Some(&esc),
+            &|_, _, _| Vec::new(),
+        );
+        assert!(rep.results.iter().all(|r| r.ok), "{rep:?}");
+        let by_id = |i: usize| {
+            let id = rep.results[i].history_id.clone();
+            let out = restore(&env, &Config::default(), &sel(&id), false).unwrap();
+            assert_eq!(out.len(), 1);
+            assert!(!out[0].ok);
+            out[0].error.clone().unwrap()
+        };
+        assert_eq!(
+            by_id(0),
+            "packages cannot be restored by crumbs; reinstall with: pacman -S foo libfoo"
+        );
+        assert_eq!(by_id(1), "commands cannot be undone");
+        // A batch restore skips both.
         let out = restore(&env, &Config::default(), &sel(&rep.batch), false).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].error.as_deref(), Some(NO_MATCH));

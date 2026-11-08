@@ -32,16 +32,33 @@ pub enum Action {
         program: String,
         args: Vec<String>,
     },
+    /// Runs a trusted program as root, in the run's single privileged batch.
+    PrivilegedCommand {
+        program: String,
+        args: Vec<String>,
+    },
+    /// Removes packages with the exact command `program args` (run as root
+    /// in the batch); `names` and `versions` are recorded in the history.
+    PackageRemove {
+        source: SourceKind,
+        names: Vec<String>,
+        versions: Vec<String>,
+        program: String,
+        args: Vec<String>,
+    },
 }
 
 impl Action {
-    /// The in-system path the action works on; `None` for a command.
+    /// The in-system path the action works on; `None` for a command or a
+    /// package removal.
     pub fn path(&self) -> Option<&Path> {
         match self {
             Action::Trash { path } | Action::Delete { path } | Action::EditFile { path, .. } => {
                 Some(path)
             }
-            Action::UserCommand { .. } => None,
+            Action::UserCommand { .. }
+            | Action::PrivilegedCommand { .. }
+            | Action::PackageRemove { .. } => None,
         }
     }
 }
@@ -307,6 +324,8 @@ mod tests {
                 Action::Delete { .. } => "delete",
                 Action::EditFile { .. } => "edit",
                 Action::UserCommand { .. } => "command",
+                Action::PrivilegedCommand { .. } => "privileged-command",
+                Action::PackageRemove { .. } => "package-remove",
             })
             .collect()
     }
@@ -675,5 +694,28 @@ mod tests {
             path: PathBuf::from("/home/user/x"),
         };
         assert_eq!(trash.path(), Some(Path::new("/home/user/x")));
+    }
+
+    #[test]
+    fn privileged_actions_have_no_path_and_kebab_tags() {
+        let cmd = Action::PrivilegedCommand {
+            program: "flatpak".into(),
+            args: vec!["uninstall".into()],
+        };
+        let pkg = Action::PackageRemove {
+            source: SourceKind::Pacman,
+            names: vec!["foo".into()],
+            versions: vec!["1.0-1".into()],
+            program: "pacman".into(),
+            args: vec!["-Rns".into(), "--noconfirm".into(), "foo".into()],
+        };
+        assert_eq!(cmd.path(), None);
+        assert_eq!(pkg.path(), None);
+        let v = serde_json::to_value(&cmd).unwrap();
+        assert_eq!(v["type"], "privileged-command");
+        let v = serde_json::to_value(&pkg).unwrap();
+        assert_eq!(v["type"], "package-remove");
+        assert_eq!(v["source"], "pacman");
+        assert_eq!(v["names"][0], "foo");
     }
 }

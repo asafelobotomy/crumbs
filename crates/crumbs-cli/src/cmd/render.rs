@@ -14,7 +14,8 @@ fn verb(a: &Action) -> &'static str {
         Action::Trash { .. } => "trash",
         Action::Delete { .. } => "delete",
         Action::EditFile { .. } => "edit",
-        Action::UserCommand { .. } => "run",
+        Action::UserCommand { .. } | Action::PrivilegedCommand { .. } => "run",
+        Action::PackageRemove { .. } => "remove",
     }
 }
 
@@ -42,7 +43,7 @@ pub fn shown_path(env: &Env, in_system: &std::path::Path) -> String {
 /// its whole command line.
 fn target(env: &Env, a: &Action) -> String {
     match a {
-        Action::UserCommand { program, args } => {
+        Action::UserCommand { program, args } | Action::PrivilegedCommand { program, args } => {
             let mut line = program.clone();
             for arg in args {
                 line.push(' ');
@@ -50,6 +51,7 @@ fn target(env: &Env, a: &Action) -> String {
             }
             sanitise(&line)
         }
+        Action::PackageRemove { names, .. } => sanitise(&names.join(" ")),
         _ => a.path().map(|p| shown_path(env, p)).unwrap_or_default(),
     }
 }
@@ -78,7 +80,9 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
                 .map(|a| {
                     let size = match a.action {
                         // Flatpak decides what goes; the size is unknown.
-                        Action::UserCommand { .. } => "—".to_string(),
+                        Action::UserCommand { .. } | Action::PrivilegedCommand { .. } => {
+                            "—".to_string()
+                        }
                         _ => fmt_size(a.size),
                     };
                     vec![
@@ -116,7 +120,12 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
     let (trashed, trash_size) = tally(|a| matches!(a, Action::Trash { .. }));
     let (deleted, delete_size) = tally(|a| matches!(a, Action::Delete { .. }));
     let (edits, _) = tally(|a| matches!(a, Action::EditFile { .. }));
-    let (commands, _) = tally(|a| matches!(a, Action::UserCommand { .. }));
+    let (commands, _) = tally(|a| {
+        matches!(
+            a,
+            Action::UserCommand { .. } | Action::PrivilegedCommand { .. }
+        )
+    });
     let mut out = anstream::stdout().lock();
     writeln!(out)?;
     if trashed > 0 {
@@ -179,10 +188,12 @@ pub fn report(env: &Env, runs: &[(&Plan, &ExecReport)]) -> anyhow::Result<bool> 
                         "deleted"
                     }
                     Action::EditFile { .. } => "edited",
-                    Action::UserCommand { ref program, .. } => {
+                    Action::UserCommand { ref program, .. }
+                    | Action::PrivilegedCommand { ref program, .. } => {
                         ran.get_or_insert(program);
                         "ran"
                     }
+                    Action::PackageRemove { .. } => "removed",
                 };
                 writeln!(out, "✓ {done} {shown}")?;
                 restorable |= can_undo(&res.action);
