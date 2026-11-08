@@ -133,11 +133,13 @@ fn print_human(report: &ScanReport, details: bool) -> anyhow::Result<()> {
         let (items, size) = if rep.skipped || rep.error.is_some() {
             ("-".to_string(), "-".to_string())
         } else {
-            let plus = if rep.unknown_sizes > 0 { "+" } else { "" };
-            (
-                rep.items.len().to_string(),
-                format!("{}{plus}", fmt_size(rep.total)),
-            )
+            let size = match (rep.total, rep.unknown_sizes) {
+                // Nothing known to add up: the size is unknown, not 0.
+                (0, n) if n > 0 => "?".to_string(),
+                (total, 0) => fmt_size(total),
+                (total, _) => format!("{}+", fmt_size(total)),
+            };
+            (rep.items.len().to_string(), size)
         };
         rows.push(vec![rep.category.as_str().to_string(), items, size, note]);
         item_lines.push(if details {

@@ -1986,3 +1986,18 @@ fn clean_trash_is_opt_in() {
     assert_eq!(code, 0, "{stdout}{stderr}");
     assert!(!real(&t, "/home/user/.local/share/Trash/files/old.txt").exists());
 }
+
+#[test]
+fn scan_unknown_only_size_is_question_mark() {
+    let t = scan_fixture(FLATPAK_OK);
+    let out = crumbs(&t).arg("scan").output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("flatpak-unused"))
+        .unwrap_or_else(|| panic!("{text}"));
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    assert_eq!(cols.get(1..3), Some(&["1", "?"][..]), "{line}");
+    // A known size with unknown extras keeps its `+`.
+    assert!(!text.contains("0 B+"), "{text}");
+}

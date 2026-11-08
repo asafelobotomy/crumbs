@@ -12,7 +12,7 @@ trash           1      8.0 KiB
 temp            0      0 B
 browser-cache   0      0 B
 dev-cache       -      -        off (enable with --category or config)
-flatpak-unused  1      0 B+
+flatpak-unused  1      ?
     - ?  unused Flatpak runtimes (user)  decided by flatpak
 appimage-old    0      0 B
 logs            0      0 B
