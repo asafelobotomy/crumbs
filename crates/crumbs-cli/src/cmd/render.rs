@@ -7,6 +7,7 @@ use crumbs_core::env::display_path;
 use crumbs_core::executor::ExecReport;
 use crumbs_core::plan::{Action, Plan};
 
+use super::manual::{is_privileged, root_command};
 use crate::output::{fmt_size, print_table_with_details};
 
 fn verb(a: &Action) -> &'static str {
@@ -14,7 +15,8 @@ fn verb(a: &Action) -> &'static str {
         Action::Trash { .. } => "trash",
         Action::Delete { .. } => "delete",
         Action::EditFile { .. } => "edit",
-        Action::UserCommand { .. } => "run",
+        Action::UserCommand { .. } | Action::PrivilegedCommand { .. } => "run",
+        Action::PackageRemove { .. } => "remove",
     }
 }
 
@@ -42,7 +44,7 @@ pub fn shown_path(env: &Env, in_system: &std::path::Path) -> String {
 /// its whole command line.
 fn target(env: &Env, a: &Action) -> String {
     match a {
-        Action::UserCommand { program, args } => {
+        Action::UserCommand { program, args } | Action::PrivilegedCommand { program, args } => {
             let mut line = program.clone();
             for arg in args {
                 line.push(' ');
@@ -50,9 +52,58 @@ fn target(env: &Env, a: &Action) -> String {
             }
             sanitise(&line)
         }
-        _ => shown_path(env, a.path()),
+        Action::PackageRemove { source, names, .. } => sanitise(&format!(
+            "{}: {}",
+            source.as_str(),
+            names.first().map_or("", String::as_str)
+        )),
+        _ => a.path().map(|p| shown_path(env, p)).unwrap_or_default(),
     }
 }
+
+/// [`target`] as the preview shows it: a package removal also names the
+/// version of the app's own package.
+fn preview_target(env: &Env, a: &Action) -> String {
+    match a {
+        Action::PackageRemove {
+            source,
+            names,
+            versions,
+            ..
+        } => sanitise(&format!(
+            "{}: {} {}",
+            source.as_str(),
+            names.first().map_or("", String::as_str),
+            versions.first().map_or("", String::as_str)
+        )),
+        _ => target(env, a),
+    }
+}
+
+/// `also removed: <name> <version>, …` for the packages a removal takes
+/// besides the app's own, or `None`.
+fn also_removed(a: &Action) -> Option<String> {
+    let Action::PackageRemove {
+        names, versions, ..
+    } = a
+    else {
+        return None;
+    };
+    // Every name, even one without a version: nothing may go unlisted.
+    let others: Vec<String> = names
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(i, n)| match versions.get(i) {
+            Some(v) => format!("{n} {v}"),
+            None => n.clone(),
+        })
+        .collect();
+    (!others.is_empty()).then(|| sanitise(&format!("also removed: {}", others.join(", "))))
+}
+
+pub const NOTE_PRIVILEGED: &str =
+    "these steps run with administrator rights; you will be asked once";
 
 fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
@@ -77,19 +128,22 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
                 .iter()
                 .map(|a| {
                     let size = match a.action {
-                        // Flatpak decides what goes; the size is unknown.
-                        Action::UserCommand { .. } => "—".to_string(),
+                        // The program decides what goes; the size is unknown.
+                        Action::UserCommand { .. }
+                        | Action::PrivilegedCommand { .. }
+                        | Action::PackageRemove { .. } => "—".to_string(),
                         _ => fmt_size(a.size),
                     };
                     vec![
                         verb(&a.action).to_string(),
                         size,
-                        target(env, &a.action),
+                        preview_target(env, &a.action),
                         sanitise(&a.reason),
                     ]
                 })
                 .collect();
-            // An edit shows the exact lines it removes.
+            // An edit shows the exact lines it removes; a privileged
+            // action the exact command run as root.
             let details: Vec<Vec<String>> = plan
                 .actions
                 .iter()
@@ -97,17 +151,25 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
                     Action::EditFile { remove_lines, .. } => {
                         remove_lines.iter().map(|l| sanitise(l)).collect()
                     }
-                    _ => Vec::new(),
+                    _ => root_command(env, a)
+                        .map(|c| vec![format!("as root: {c}")])
+                        .unwrap_or_default(),
                 })
                 .collect();
             print_table_with_details(&["ACTION", "SIZE", "PATH", "REASON"], &rows, &details)?;
         }
         let mut out = anstream::stdout().lock();
+        for line in plan.actions.iter().filter_map(|a| also_removed(&a.action)) {
+            writeln!(out, "{line}")?;
+        }
         for n in &plan.notes {
             writeln!(out, "note: {}", sanitise(n))?;
         }
     }
     let all = || plans.iter().flat_map(|(_, p)| &p.actions);
+    if all().any(is_privileged) {
+        writeln!(anstream::stdout().lock(), "note: {NOTE_PRIVILEGED}")?;
+    }
     let tally = |want: fn(&Action) -> bool| {
         all()
             .filter(|a| want(&a.action))
@@ -116,7 +178,12 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
     let (trashed, trash_size) = tally(|a| matches!(a, Action::Trash { .. }));
     let (deleted, delete_size) = tally(|a| matches!(a, Action::Delete { .. }));
     let (edits, _) = tally(|a| matches!(a, Action::EditFile { .. }));
-    let (commands, _) = tally(|a| matches!(a, Action::UserCommand { .. }));
+    let (commands, _) = tally(|a| {
+        matches!(
+            a,
+            Action::UserCommand { .. } | Action::PrivilegedCommand { .. }
+        )
+    });
     let mut out = anstream::stdout().lock();
     writeln!(out)?;
     if trashed > 0 {
@@ -179,10 +246,12 @@ pub fn report(env: &Env, runs: &[(&Plan, &ExecReport)]) -> anyhow::Result<bool> 
                         "deleted"
                     }
                     Action::EditFile { .. } => "edited",
-                    Action::UserCommand { ref program, .. } => {
+                    Action::UserCommand { ref program, .. }
+                    | Action::PrivilegedCommand { ref program, .. } => {
                         ran.get_or_insert(program);
                         "ran"
                     }
+                    Action::PackageRemove { .. } => "removed",
                 };
                 writeln!(out, "✓ {done} {shown}")?;
                 restorable |= can_undo(&res.action);
@@ -221,6 +290,18 @@ pub fn report(env: &Env, runs: &[(&Plan, &ExecReport)]) -> anyhow::Result<bool> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn also_removed_lists_every_name() {
+        let a = Action::PackageRemove {
+            source: crumbs_core::SourceKind::Pacman,
+            names: vec!["app".into(), "b".into(), "c".into()],
+            versions: vec!["1".into(), "2".into()],
+            program: "pacman".into(),
+            args: Vec::new(),
+        };
+        assert_eq!(also_removed(&a).as_deref(), Some("also removed: b 2, c"));
+    }
 
     #[test]
     fn only_trash_and_edit_can_be_undone() {

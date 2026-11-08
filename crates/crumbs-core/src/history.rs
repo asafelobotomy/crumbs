@@ -1,6 +1,9 @@
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::unix::fs::{DirBuilderExt, FileExt, OpenOptionsExt};
+
+use rustix::fs::{FileType, Mode as RawMode, OFlags};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -21,6 +24,11 @@ pub enum HistoryAction {
     Restore,
     /// A `UserCommand` ran; it cannot be undone.
     Command,
+    /// A `PackageRemove` ran as root; `packages` says what it removed.
+    /// Packages cannot be restored by crumbs.
+    PackageRemove,
+    /// A `PrivilegedCommand` ran as root; it cannot be undone.
+    PrivilegedCommand,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,9 +47,13 @@ pub struct HistoryEntry {
     /// `Restore` entries only: the id of the entry this one restored.
     #[serde(default)]
     pub restores: Option<String>,
-    /// `Command` entries only: the program's arguments.
+    /// `Command`, `PrivilegedCommand` and `PackageRemove` entries only: the
+    /// program's arguments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argv: Option<Vec<String>>,
+    /// `PackageRemove` entries only: each package's `(name, version)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packages: Option<Vec<(String, String)>>,
     /// The command whose batch this is: [`KIND_UNINSTALL`],
     /// [`KIND_ORPHANS`] or [`KIND_CLEAN`]. Missing in lines written before
     /// it existed, and in `Restore` entries.
@@ -108,6 +120,11 @@ pub fn append(env: &Env, entries: &[HistoryEntry]) -> Result<(), CoreError> {
         .mode(0o700)
         .create(&dir)
         .map_err(|e| io_err(&dir, e))?;
+    // Opened without following a symlink, then everything goes through this
+    // descriptor: a swapped path cannot redirect the chmod or the log.
+    let dirfd = open_dir_nofollow(&dir).map_err(|e| io_err(&dir, e))?;
+    // Warnings go out through `harden_files`, which the CLI calls at start-up.
+    let _ = tighten_fds(&dirfd, &dir);
     let mut buf = Vec::new();
     for e in entries {
         serde_json::to_writer(&mut buf, e).map_err(|e| CoreError::Parse {
@@ -116,20 +133,116 @@ pub fn append(env: &Env, entries: &[HistoryEntry]) -> Result<(), CoreError> {
         })?;
         buf.push(b'\n');
     }
-    let mut f = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(|e| io_err(&path, e))?;
-    f.write_all(&buf).map_err(|e| io_err(&path, e))?;
+    // Never follows a symlink: a planted link must not redirect the log.
+    let fd = rustix::fs::openat(
+        &dirfd,
+        HISTORY_FILE,
+        OFlags::RDWR | OFlags::APPEND | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        RawMode::from_raw_mode(0o600),
+    )
+    .map_err(|e| io_err(&path, e.into()))?;
+    let f = fs::File::from(fd);
+    // A torn last line (no newline) must not swallow the next entry.
+    let len = f.metadata().map_err(|e| io_err(&path, e))?.len();
+    if len > 0 {
+        let mut last = [0u8; 1];
+        f.read_exact_at(&mut last, len - 1)
+            .map_err(|e| io_err(&path, e))?;
+        if last[0] != b'\n' {
+            buf.insert(0, b'\n');
+        }
+    }
+    (&f).write_all(&buf).map_err(|e| io_err(&path, e))?;
     f.sync_data().map_err(|e| io_err(&path, e))
+}
+
+const HISTORY_FILE: &str = "history.jsonl";
+
+/// Opens a directory without following a symlink at its last component.
+fn open_dir_nofollow(dir: &Path) -> io::Result<OwnedFd> {
+    rustix::fs::open(
+        dir,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        RawMode::empty(),
+    )
+    .map_err(io::Error::from)
+}
+
+/// `mode` with group and other bits removed and the owner's `owner` bits
+/// forced on.
+fn tightened(mode: u32, owner: u32) -> u32 {
+    (mode & owner) | owner
+}
+
+/// chmod on the open `fd` (of `shown`) down to owner-only when it carries more.
+fn tighten_one(fd: impl AsFd, shown: &Path, owner: u32, changed: &mut Vec<String>) {
+    let Ok(st) = rustix::fs::fstat(&fd) else {
+        return;
+    };
+    let mode = st.st_mode & 0o7777;
+    let want = tightened(mode, owner);
+    if want == mode {
+        return;
+    }
+    // `fd` is an `O_PATH` descriptor (opened without needing any permission
+    // bit, so a mode like 0o044 can be repaired), which `fchmod` rejects;
+    // chmod through /proc/self/fd still acts on that exact inode.
+    let via_proc = format!("/proc/self/fd/{}", fd.as_fd().as_raw_fd());
+    match rustix::fs::chmod(&via_proc, RawMode::from_raw_mode(want)) {
+        Ok(()) => changed.push(format!(
+            "{} had mode {mode:o}; tightened to {want:o}",
+            shown.display()
+        )),
+        Err(e) => changed.push(format!(
+            "{} has mode {mode:o} and could not be tightened: {e}",
+            shown.display()
+        )),
+    }
+}
+
+/// Tightens the history directory (open as `dirfd`) and the file in it to
+/// owner-only, keeping the owner's bits (`0o700` / `0o600`). Returns what
+/// was changed, one message each. A symlinked file is left alone.
+fn tighten_fds(dirfd: &OwnedFd, dir: &Path) -> Vec<String> {
+    let mut changed = Vec::new();
+    tighten_one(dirfd, dir, 0o700, &mut changed);
+    let file = dir.join(HISTORY_FILE);
+    if let Ok(fd) = rustix::fs::openat(
+        dirfd,
+        HISTORY_FILE,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        RawMode::empty(),
+    ) && rustix::fs::fstat(&fd)
+        .is_ok_and(|st| FileType::from_raw_mode(st.st_mode) == FileType::RegularFile)
+    {
+        tighten_one(&fd, &file, 0o600, &mut changed);
+    }
+    changed
+}
+
+/// Tightens loose modes on the history directory and file and returns a
+/// message for each change, to be shown as `warning: history: <message>`.
+/// Does nothing under a symlinked directory.
+pub fn harden_files(env: &Env) -> Vec<String> {
+    let dir = env.state_home.join("crumbs");
+    match open_dir_nofollow(&dir) {
+        Ok(fd) => tighten_fds(&fd, &dir),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Entries in file order plus the number of unparseable (non-blank) lines.
 pub fn read_history(env: &Env) -> Result<(Vec<HistoryEntry>, usize), CoreError> {
     let path = history_path(env);
-    let bytes = match fs::read(&path) {
+    // A symlinked history file is an error, as for `append`.
+    let bytes = match OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+        .open(&path)
+        .and_then(|mut f| {
+            let mut b = Vec::new();
+            io::Read::read_to_end(&mut f, &mut b).map(|_| b)
+        }) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((vec![], 0)),
         Err(e) => return Err(io_err(&path, e)),
@@ -175,6 +288,7 @@ mod tests {
             kind: Some(KIND_UNINSTALL.into()),
             restores: None,
             argv: None,
+            packages: None,
         }
     }
 
@@ -197,6 +311,110 @@ mod tests {
         let text = fs::read_to_string(dir.join("history.jsonl")).unwrap();
         assert_eq!(text.lines().count(), 3);
         assert!(text.contains("\"action\":\"trash\""));
+    }
+
+    #[test]
+    fn history_refuses_symlink() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        let dir = env.state_home.join("crumbs");
+        fs::create_dir_all(&dir).unwrap();
+        let target = t.write("home/user/elsewhere", b"");
+        std::os::unix::fs::symlink(&target, dir.join("history.jsonl")).unwrap();
+        assert!(append(&env, &[entry(0, "1")]).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"");
+    }
+
+    #[test]
+    fn history_tightens_modes() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        append(&env, &[entry(0, "1")]).unwrap();
+        let dir = env.state_home.join("crumbs");
+        let file = dir.join("history.jsonl");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        let warnings = harden_files(&env);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&file), 0o600);
+        assert!(harden_files(&env).is_empty());
+        // `append` alone tightens too.
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o666)).unwrap();
+        append(&env, &[entry(1, "1")]).unwrap();
+        assert_eq!(mode(&file), 0o600);
+    }
+
+    #[test]
+    fn history_refuses_symlinked_dir() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        let elsewhere = t.dir.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::create_dir_all(&env.state_home).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, env.state_home.join("crumbs")).unwrap();
+        assert!(append(&env, &[entry(0, "1")]).is_err());
+        assert!(!elsewhere.join("history.jsonl").exists());
+    }
+
+    #[test]
+    fn harden_skips_symlinked_dir() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        let elsewhere = t.dir.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o755)).unwrap();
+        let f = elsewhere.join("history.jsonl");
+        fs::write(&f, b"").unwrap();
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::create_dir_all(&env.state_home).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, env.state_home.join("crumbs")).unwrap();
+        assert!(harden_files(&env).is_empty());
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&f), 0o644);
+        assert_eq!(mode(&elsewhere), 0o755);
+    }
+
+    #[test]
+    fn tightening_keeps_owner_bits() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        append(&env, &[entry(0, "1")]).unwrap();
+        let dir = env.state_home.join("crumbs");
+        let file = dir.join("history.jsonl");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o044)).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o055)).unwrap();
+        assert_eq!(harden_files(&env).len(), 2);
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&file), 0o600);
+        assert_eq!(mode(&dir), 0o700);
+    }
+
+    #[test]
+    fn history_read_refuses_symlink() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        let dir = env.state_home.join("crumbs");
+        fs::create_dir_all(&dir).unwrap();
+        let target = t.write("home/user/elsewhere", b"");
+        std::os::unix::fs::symlink(&target, dir.join("history.jsonl")).unwrap();
+        assert!(read_history(&env).is_err());
+    }
+
+    #[test]
+    fn history_repairs_torn_line() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        append(&env, &[entry(0, "1")]).unwrap();
+        let p = env.state_home.join("crumbs/history.jsonl");
+        let mut text = fs::read_to_string(&p).unwrap();
+        text.push_str("{\"id\":\"torn");
+        fs::write(&p, text).unwrap();
+        append(&env, &[entry(1, "1")]).unwrap();
+        let (got, skipped) = read_history(&env).unwrap();
+        assert_eq!(got, vec![entry(0, "1"), entry(1, "1")]);
+        assert_eq!(skipped, 1);
     }
 
     #[test]

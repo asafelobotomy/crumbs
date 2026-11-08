@@ -32,37 +32,77 @@ pub enum Action {
         program: String,
         args: Vec<String>,
     },
+    /// Runs a trusted program as root, in the run's single privileged batch.
+    PrivilegedCommand {
+        program: String,
+        args: Vec<String>,
+    },
+    /// Removes packages with the exact command `program args` (run as root
+    /// in the batch); `names` and `versions` are recorded in the history.
+    PackageRemove {
+        source: SourceKind,
+        names: Vec<String>,
+        versions: Vec<String>,
+        program: String,
+        args: Vec<String>,
+    },
 }
 
 impl Action {
-    /// The in-system path the action works on. A command has none; its
-    /// program name stands in so it can be shown.
-    pub fn path(&self) -> &Path {
+    /// The in-system path the action works on; `None` for a command or a
+    /// package removal.
+    pub fn path(&self) -> Option<&Path> {
         match self {
             Action::Trash { path } | Action::Delete { path } | Action::EditFile { path, .. } => {
-                path
+                Some(path)
             }
-            Action::UserCommand { program, .. } => Path::new(program),
+            Action::UserCommand { .. }
+            | Action::PrivilegedCommand { .. }
+            | Action::PackageRemove { .. } => None,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlannedAction {
     pub action: Action,
     pub size: u64,
-    /// Taken at scan time; the executor re-verifies against it.
-    #[serde(skip)]
+    /// Taken at scan time; the executor re-verifies against it. Not part
+    /// of the JSON.
     pub fingerprint: Fingerprint,
     /// Where the path may lie; the executor verifies it in this scope.
-    /// Left out of the JSON when it is `Home`, as in M2.
-    #[serde(default, skip_serializing_if = "Scope::is_home")]
+    /// Left out of the JSON when it is `Home` (as in M2) and for an action
+    /// without a path, where it means nothing.
     pub scope: Scope,
     /// Index of an earlier action in the same plan that must have succeeded
-    /// first; the executor skips this action otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// first; the executor skips this action otherwise. Left out of the
+    /// JSON when `None`.
     pub depends_on: Option<usize>,
+    /// `(plan index, action index)` of an action in an earlier plan of the
+    /// same run that covered this action's dependency (see the CLI's
+    /// `drop_overlaps`); [`execute_many`](crate::executor::execute_many)
+    /// skips this action unless that action succeeded. Not part of the JSON.
+    pub depends_on_plan: Option<(usize, usize)>,
     pub reason: String,
+}
+
+impl Serialize for PlannedAction {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let with_scope = self.action.path().is_some() && !self.scope.is_home();
+        let fields = 3 + usize::from(with_scope) + usize::from(self.depends_on.is_some());
+        let mut st = s.serialize_struct("PlannedAction", fields)?;
+        st.serialize_field("action", &self.action)?;
+        st.serialize_field("size", &self.size)?;
+        if with_scope {
+            st.serialize_field("scope", &self.scope)?;
+        }
+        if let Some(d) = self.depends_on {
+            st.serialize_field("depends_on", &d)?;
+        }
+        st.serialize_field("reason", &self.reason)?;
+        st.end()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -124,6 +164,7 @@ pub fn build_plan(
                 fingerprint,
                 scope: Scope::Home,
                 depends_on: None,
+                depends_on_plan: None,
                 reason: REASON_APPIMAGE.into(),
             });
             skip_path = Some(location);
@@ -154,6 +195,7 @@ pub fn build_plan(
             fingerprint: f.fingerprint,
             scope: Scope::Home,
             depends_on: None,
+            depends_on_plan: None,
             reason: f.reason.clone(),
         });
     }
@@ -187,9 +229,10 @@ pub const NOTE_PERMANENT_TRASH: &str = "permanently delete (emptying the trash)"
 
 /// Builds a plan for `clean` from scanned items. Trash items are trashed
 /// (deleted with `--permanent`), delete items are always deleted, command
-/// items become `UserCommand`. A `UserTemp` or `HomeTrash` item may only be
-/// deleted, never trashed. Extra paths (a trashed entry's `.trashinfo`) are
-/// deleted right after their item and depend on it.
+/// items become `UserCommand` and privileged items `PrivilegedCommand`. A
+/// `UserTemp` or `HomeTrash` item may only be deleted, never trashed. Extra
+/// paths (a trashed entry's `.trashinfo`) are deleted right after their item
+/// and depend on it.
 pub fn build_clean_plan(
     _env: &Env,
     items: &[BloatItem],
@@ -202,20 +245,27 @@ pub fn build_clean_plan(
             what: format!("clean item {}", item.label),
             message: message.into(),
         };
-        if let ItemAction::Command { program, args } = &item.action {
+        let command = match &item.action {
+            ItemAction::Command { program, args } => Some(Action::UserCommand {
+                program: program.clone(),
+                args: args.clone(),
+            }),
+            // Run as root in the run's one batch; the executor resolves the
+            // bare program name from the trusted directories.
+            ItemAction::Privileged { program, args } => Some(Action::PrivilegedCommand {
+                program: program.clone(),
+                args: args.clone(),
+            }),
+            ItemAction::Trash | ItemAction::Delete => None,
+        };
+        if let Some(action) = command {
             actions.push(PlannedAction {
-                action: Action::UserCommand {
-                    program: program.clone(),
-                    args: args.clone(),
-                },
+                action,
                 size: item.size.unwrap_or(0),
-                fingerprint: Fingerprint {
-                    dev: 0,
-                    ino: 0,
-                    is_symlink: false,
-                },
+                fingerprint: Fingerprint::default(),
                 scope: item.scope,
                 depends_on: None,
+                depends_on_plan: None,
                 reason,
             });
             continue;
@@ -238,6 +288,7 @@ pub fn build_clean_plan(
             fingerprint,
             scope: item.scope,
             depends_on: None,
+            depends_on_plan: None,
             reason: reason.clone(),
         });
         for (extra, fp) in &item.extra_paths {
@@ -249,6 +300,7 @@ pub fn build_clean_plan(
                 fingerprint: *fp,
                 scope: item.scope,
                 depends_on: Some(main),
+                depends_on_plan: None,
                 reason: reason.clone(),
             });
         }
@@ -306,6 +358,8 @@ mod tests {
                 Action::Delete { .. } => "delete",
                 Action::EditFile { .. } => "edit",
                 Action::UserCommand { .. } => "command",
+                Action::PrivilegedCommand { .. } => "privileged-command",
+                Action::PackageRemove { .. } => "package-remove",
             })
             .collect()
     }
@@ -330,7 +384,7 @@ mod tests {
         assert!(plan.total_size > 0);
         assert_eq!(
             plan.actions[0].action.path(),
-            Path::new("/home/user/.config/foo")
+            Some(Path::new("/home/user/.config/foo"))
         );
         assert_eq!(plan.actions[0].fingerprint, fs[0].fingerprint);
         assert_eq!(plan.actions[0].reason, fs[0].reason);
@@ -405,7 +459,7 @@ mod tests {
         assert_eq!(kinds(&plan), ["trash"]);
         assert_eq!(
             plan.actions[0].action.path(),
-            Path::new("/home/user/.config/foo")
+            Some(Path::new("/home/user/.config/foo"))
         );
         assert_eq!(plan.notes, [NOTE_APP_STAYS]);
         assert_eq!(plan.app_id.as_deref(), Some("appimage:Foo.AppImage"));
@@ -477,7 +531,7 @@ mod tests {
 
         let plan = build_plan(&env, Some(&app), &fs, &PlanOptions::default()).unwrap();
         assert_eq!(kinds(&plan), ["trash", "trash"]);
-        assert_eq!(plan.actions[0].action.path(), loc);
+        assert_eq!(plan.actions[0].action.path(), Some(loc.as_path()));
 
         app.location = None;
         assert!(build_plan(&env, Some(&app), &fs, &PlanOptions::default()).is_err());
@@ -603,6 +657,29 @@ mod tests {
     }
 
     #[test]
+    fn privileged_items_become_privileged_commands() {
+        use crate::bloat::ItemAction;
+        let mut item = command_item();
+        item.category = crate::bloat::Category::Journal;
+        item.scope = Scope::System;
+        item.action = ItemAction::Privileged {
+            program: "journalctl".into(),
+            args: vec!["--vacuum-size=500M".into()],
+        };
+        let t = FixtureTree::new();
+        let plan = build_clean_plan(&t.env(), &[item], &PlanOptions::default()).unwrap();
+        assert_eq!(kinds(&plan), ["privileged-command"]);
+        assert_eq!(
+            plan.actions[0].action,
+            Action::PrivilegedCommand {
+                program: "journalctl".into(),
+                args: vec!["--vacuum-size=500M".into()],
+            }
+        );
+        assert_eq!(plan.actions[0].scope, Scope::System);
+    }
+
+    #[test]
     fn clean_plan_trash_pairs() {
         use crate::bloat::ItemAction;
         let t = FixtureTree::new();
@@ -660,6 +737,88 @@ mod tests {
                     "{scope:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn action_path_none_for_commands() {
+        let cmd = Action::UserCommand {
+            program: "flatpak".into(),
+            args: vec![],
+        };
+        assert_eq!(cmd.path(), None);
+        let trash = Action::Trash {
+            path: PathBuf::from("/home/user/x"),
+        };
+        assert_eq!(trash.path(), Some(Path::new("/home/user/x")));
+    }
+
+    #[test]
+    fn privileged_actions_have_no_path_and_kebab_tags() {
+        let cmd = Action::PrivilegedCommand {
+            program: "flatpak".into(),
+            args: vec!["uninstall".into()],
+        };
+        let pkg = Action::PackageRemove {
+            source: SourceKind::Pacman,
+            names: vec!["foo".into()],
+            versions: vec!["1.0-1".into()],
+            program: "pacman".into(),
+            args: vec!["-Rns".into(), "--noconfirm".into(), "foo".into()],
+        };
+        assert_eq!(cmd.path(), None);
+        assert_eq!(pkg.path(), None);
+        let v = serde_json::to_value(&cmd).unwrap();
+        assert_eq!(v["type"], "privileged-command");
+        let v = serde_json::to_value(&pkg).unwrap();
+        assert_eq!(v["type"], "package-remove");
+        assert_eq!(v["source"], "pacman");
+        assert_eq!(v["names"][0], "foo");
+    }
+
+    #[test]
+    fn scope_serialised_only_for_paths_outside_home() {
+        let pa = |action: Action, scope: Scope| PlannedAction {
+            action,
+            size: 0,
+            fingerprint: Fingerprint {
+                dev: 0,
+                ino: 0,
+                is_symlink: false,
+                ctime: 0,
+                ctime_nsec: 0,
+            },
+            scope,
+            depends_on: Some(0),
+            depends_on_plan: None,
+            reason: "r".into(),
+        };
+        let cmd = pa(
+            Action::PrivilegedCommand {
+                program: "flatpak".into(),
+                args: Vec::new(),
+            },
+            Scope::System,
+        );
+        let v = serde_json::to_value(&cmd).unwrap();
+        assert!(v.get("scope").is_none(), "{v}");
+        assert_eq!(v["depends_on"], 0);
+        assert_eq!(v["reason"], "r");
+        let del = pa(
+            Action::Delete {
+                path: "/var/lib/systemd/coredump/core.1".into(),
+            },
+            Scope::System,
+        );
+        let v = serde_json::to_value(&del).unwrap();
+        assert_eq!(v["scope"], serde_json::to_value(Scope::System).unwrap());
+        let home = pa(trash_action(), Scope::Home);
+        assert!(serde_json::to_value(&home).unwrap().get("scope").is_none());
+    }
+
+    fn trash_action() -> Action {
+        Action::Trash {
+            path: "/home/user/x".into(),
         }
     }
 }

@@ -74,6 +74,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     };
     #[cfg(not(debug_assertions))]
     let env = Env::from_system()?;
+    for w in crumbs_core::history::harden_files(&env) {
+        eprintln!("warning: history: {}", cmd::render::sanitise(&w));
+    }
     match cli.command {
         Command::Apps(c) => cmd::apps::run(c, &env),
         Command::Uninstall(args) => cmd::uninstall::run(&env, &args),
@@ -106,9 +109,34 @@ fn json_command(command: &Command) -> Option<&'static str> {
     }
 }
 
+/// Why a release build refuses to start: the variables that point a debug
+/// build at a fixture tree or a test stand-in would be silently ignored,
+/// so the run would act on the real system instead.
+#[cfg(any(test, not(debug_assertions)))]
+const DEBUG_ONLY_ENV: &str = "CRUMBS_ROOT and CRUMBS_TEST_* are honoured only by debug builds";
+
+/// Whether any of `names` is `CRUMBS_ROOT` or starts with `CRUMBS_TEST_`.
+#[cfg(any(test, not(debug_assertions)))]
+fn has_debug_only_env<I: IntoIterator<Item = std::ffi::OsString>>(names: I) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    names.into_iter().any(|k| {
+        let k = k.as_bytes();
+        k == b"CRUMBS_ROOT" || k.starts_with(b"CRUMBS_TEST_")
+    })
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let json_command = json_command(&cli.command);
+    #[cfg(not(debug_assertions))]
+    if has_debug_only_env(std::env::vars_os().map(|(k, _)| k)) {
+        eprintln!("error: {DEBUG_ONLY_ENV}");
+        if let Some(command) = json_command {
+            let entry = output::ErrorEntry::new("cli", DEBUG_ONLY_ENV.to_string());
+            let _ = output::print_json_entries(command, &serde_json::Value::Null, &[entry]);
+        }
+        return ExitCode::from(2);
+    }
     match run(cli) {
         Ok(code) => code,
         Err(e) => {
@@ -134,5 +162,24 @@ fn main() -> ExitCode {
             }
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_only_env_names() {
+        let names = |v: &[&str]| v.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert!(has_debug_only_env(names(&["HOME", "CRUMBS_ROOT"])));
+        assert!(has_debug_only_env(names(&["CRUMBS_TEST_PRIV_RUNNER"])));
+        assert!(has_debug_only_env(names(&["CRUMBS_TEST_"])));
+        assert!(!has_debug_only_env(names(&["CRUMBS_ROOTS", "CRUMBS_TEST"])));
+        assert!(!has_debug_only_env(names(&[
+            "CRUMBS_ALLOW_REAL_ESCALATION"
+        ])));
+        assert!(!has_debug_only_env(names(&[])));
+        assert!(DEBUG_ONLY_ENV.contains("debug builds"));
     }
 }

@@ -108,6 +108,7 @@ fn restore_with(
                     app_id: e.app_id.clone(),
                     restores: Some(e.id.clone()),
                     argv: None,
+                    packages: None,
                     kind: None,
                 };
                 logged += 1;
@@ -134,7 +135,7 @@ fn restore_with(
 
 /// Entries a selector names, oldest first. A path names its newest entry
 /// not yet restored. `Restore` entries are never selected; a batch skips
-/// `Command` and `Delete` entries.
+/// `Command`, `PrivilegedCommand`, `PackageRemove` and `Delete` entries.
 fn select<'a>(
     entries: &'a [HistoryEntry],
     sel: &str,
@@ -151,9 +152,17 @@ fn select<'a>(
     let batch: Vec<&HistoryEntry> = actions()
         .filter(|e| e.batch == sel && e.ok)
         .filter(|e| !(e.action == HistoryAction::EditFile && e.backup.is_none()))
-        // A command or a permanent delete left nothing to put back; named
-        // by its id, such an entry still says why.
-        .filter(|e| !matches!(e.action, HistoryAction::Command | HistoryAction::Delete))
+        // A command, a package removal or a permanent delete left nothing
+        // to put back; named by its id, such an entry still says why.
+        .filter(|e| {
+            !matches!(
+                e.action,
+                HistoryAction::Command
+                    | HistoryAction::Delete
+                    | HistoryAction::PackageRemove
+                    | HistoryAction::PrivilegedCommand
+            )
+        })
         .collect();
     if !batch.is_empty() {
         return batch;
@@ -182,13 +191,19 @@ fn restore_one(
     dry_run: bool,
     batch: &str,
 ) -> Result<Option<PathBuf>, String> {
+    if e.action == HistoryAction::PackageRemove {
+        return Err(reinstall_hint(e));
+    }
     if !e.ok {
         return Err("the original action failed; nothing to restore".into());
     }
     match e.action {
         HistoryAction::Delete => Err("permanently deleted; cannot be restored".into()),
         HistoryAction::Restore => Err(INVALID_ENTRY.into()),
-        HistoryAction::Command => Err("commands cannot be undone".into()),
+        HistoryAction::Command | HistoryAction::PrivilegedCommand => {
+            Err("commands cannot be undone".into())
+        }
+        HistoryAction::PackageRemove => Err(reinstall_hint(e)),
         HistoryAction::Trash => {
             let t = valid_trash(env, cfg, e).ok_or(INVALID_ENTRY)?;
             check_parents(env, &t.original)?;
@@ -209,6 +224,44 @@ fn restore_one(
             check_parents(env, &e.path)?;
             restore_backup(env, &e.path, backup, dry_run, batch)
         }
+    }
+}
+
+/// Why a package removal cannot be restored, with the pacman commands that
+/// reinstall what it removed (`packages`), also when the removal failed
+/// part-way. The package the entry's `app_id` names (`pacman:<name>`, the
+/// one the user asked to uninstall) is reinstalled explicitly; the others
+/// were removed as its dependencies, or as orphans, so `--asdeps` keeps
+/// them marked as dependencies.
+fn reinstall_hint(e: &HistoryEntry) -> String {
+    const CANNOT: &str = "packages cannot be restored by crumbs";
+    let asked = e.app_id.as_deref().and_then(|a| a.strip_prefix("pacman:"));
+    let (explicit, deps): (Vec<&str>, Vec<&str>) = e
+        .packages
+        .iter()
+        .flatten()
+        .map(|(name, _)| name.as_str())
+        .partition(|n| Some(*n) == asked);
+    let mut commands = Vec::new();
+    if !explicit.is_empty() {
+        commands.push(format!("pacman -S {}", explicit.join(" ")));
+    }
+    if !deps.is_empty() {
+        commands.push(format!("pacman -S --asdeps {}", deps.join(" ")));
+    }
+    let prefix = if e.ok {
+        CANNOT.to_string()
+    } else {
+        format!("the original removal only partly ran; {CANNOT}")
+    };
+    if commands.is_empty() {
+        if e.ok {
+            prefix
+        } else {
+            "the original action failed; nothing to restore".into()
+        }
+    } else {
+        format!("{prefix}; reinstall with: {}", commands.join(" && "))
     }
 }
 
@@ -358,9 +411,10 @@ mod tests {
             .into_iter()
             .map(|action| PlannedAction {
                 size: 1,
-                fingerprint: fingerprint(env, action.path()).unwrap(),
+                fingerprint: fingerprint(env, action.path().unwrap()).unwrap(),
                 scope: crate::safety::Scope::Home,
                 depends_on: None,
+                depends_on_plan: None,
                 reason: "test".into(),
                 action,
             })
@@ -764,6 +818,7 @@ mod tests {
                 status: 0,
                 stdout: String::new(),
                 stderr: String::new(),
+                timed_out: false,
             },
         );
         let plan = Plan {
@@ -779,9 +834,12 @@ mod tests {
                     dev: 0,
                     ino: 0,
                     is_symlink: false,
+                    ctime: 0,
+                    ctime_nsec: 0,
                 },
                 scope: crate::safety::Scope::Home,
                 depends_on: None,
+                depends_on_plan: None,
                 reason: "test".into(),
             }],
             total_size: 0,
@@ -796,6 +854,119 @@ mod tests {
         assert!(!out[0].ok);
         assert_eq!(out[0].error.as_deref(), Some("commands cannot be undone"));
         // By batch: commands are skipped like other no-op entries.
+        let out = restore(&env, &Config::default(), &sel(&rep.batch), false).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].error.as_deref(), Some(NO_MATCH));
+    }
+
+    #[test]
+    fn restore_refuses_packages_with_reinstall_hint() {
+        let t = FixtureTree::new();
+        t.write_exec("usr/bin/pacman", b"#!/bin/sh\n");
+        t.write_exec("usr/bin/flatpak", b"#!/bin/sh\n");
+        let env = t.env();
+        let unfp = |action| PlannedAction {
+            action,
+            size: 0,
+            fingerprint: crate::safety::Fingerprint {
+                dev: 0,
+                ino: 0,
+                is_symlink: false,
+                ctime: 0,
+                ctime_nsec: 0,
+            },
+            scope: crate::safety::Scope::Home,
+            depends_on: None,
+            depends_on_plan: None,
+            reason: "test".into(),
+        };
+        let plan = Plan {
+            app_id: Some("pacman:foo".into()),
+            kind: None,
+            actions: vec![
+                unfp(Action::PackageRemove {
+                    source: crate::model::SourceKind::Pacman,
+                    names: vec!["foo".into(), "libfoo".into()],
+                    versions: vec!["1.0-1".into(), "2.0-1".into()],
+                    program: "pacman".into(),
+                    args: vec!["-Rns".into(), "--noconfirm".into(), "foo".into()],
+                }),
+                unfp(Action::PrivilegedCommand {
+                    program: "flatpak".into(),
+                    args: vec!["uninstall".into()],
+                }),
+            ],
+            total_size: 0,
+            notes: Vec::new(),
+        };
+        let esc = crate::privilege::Escalation {
+            kind: crate::privilege::EscalationKind::Pkexec,
+            program: "/usr/bin/pkexec".into(),
+            requires_tty: false,
+        };
+        let rep = crate::executor::execute_full(
+            &env,
+            &Config::default(),
+            &plan,
+            &crate::testing::FakeRunner::new(),
+            &crate::testing::FakePrivilegedRunner::default(),
+            Some(&esc),
+            &|_, _, _| Ok(Vec::new()),
+        );
+        assert!(rep.results.iter().all(|r| r.ok), "{rep:?}");
+        let by_id = |i: usize| {
+            let id = rep.results[i].history_id.clone();
+            let out = restore(&env, &Config::default(), &sel(&id), false).unwrap();
+            assert_eq!(out.len(), 1);
+            assert!(!out[0].ok);
+            out[0].error.clone().unwrap()
+        };
+        assert_eq!(
+            by_id(0),
+            "packages cannot be restored by crumbs; reinstall with: \
+             pacman -S foo && pacman -S --asdeps libfoo"
+        );
+        assert_eq!(by_id(1), "commands cannot be undone");
+        // An entry that names no packages gives no dangling command.
+        let mut e = read_history(&env).unwrap().0.remove(0);
+        for packages in [None, Some(Vec::new())] {
+            e.packages = packages;
+            assert_eq!(
+                restore_one(&env, &Config::default(), &e, true, "1"),
+                Err("packages cannot be restored by crumbs".to_string())
+            );
+        }
+        // A removal that failed part-way still says how to reinstall what
+        // it removed; without an app (orphans) everything is a dependency.
+        let mut e = read_history(&env).unwrap().0.remove(0);
+        e.ok = false;
+        e.packages = Some(vec![("libfoo".into(), "2.0-1".into())]);
+        assert_eq!(
+            restore_one(&env, &Config::default(), &e, true, "1"),
+            Err(
+                "the original removal only partly ran; packages cannot be restored by \
+                 crumbs; reinstall with: pacman -S --asdeps libfoo"
+                    .to_string()
+            )
+        );
+        e.packages = Some(Vec::new());
+        assert_eq!(
+            restore_one(&env, &Config::default(), &e, true, "1"),
+            Err("the original action failed; nothing to restore".to_string())
+        );
+        e.ok = true;
+        e.app_id = None;
+        e.packages = Some(vec![
+            ("foo".into(), "1.0-1".into()),
+            ("libfoo".into(), "2.0-1".into()),
+        ]);
+        assert_eq!(
+            restore_one(&env, &Config::default(), &e, true, "1"),
+            Err("packages cannot be restored by crumbs; reinstall with: \
+                 pacman -S --asdeps foo libfoo"
+                .to_string())
+        );
+        // A batch restore skips both.
         let out = restore(&env, &Config::default(), &sel(&rep.batch), false).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].error.as_deref(), Some(NO_MATCH));

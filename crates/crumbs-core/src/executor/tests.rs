@@ -14,7 +14,7 @@ use crate::testing::FixtureTree;
 
 /// Like `build_plan`: edits free nothing, removals free the disk usage.
 fn planned(env: &Env, action: Action) -> PlannedAction {
-    let p = action.path().to_path_buf();
+    let p = action.path().unwrap().to_path_buf();
     let size = match action {
         Action::EditFile { .. } => 0,
         _ => disk_usage(env, &p).bytes,
@@ -24,6 +24,7 @@ fn planned(env: &Env, action: Action) -> PlannedAction {
         fingerprint: fingerprint(env, &p).unwrap(),
         scope: Scope::Home,
         depends_on: None,
+        depends_on_plan: None,
         reason: "test".into(),
         action,
     }
@@ -77,7 +78,7 @@ fn execute_trashes_and_logs() {
         assert_eq!(h.id, report.results[i].history_id);
         assert_eq!(h.batch, report.batch);
         assert_eq!(h.action, HistoryAction::Trash);
-        assert_eq!(h.path, plan.actions[i].action.path());
+        assert_eq!(Some(h.path.as_path()), plan.actions[i].action.path());
         assert!(h.ok);
         assert_eq!(h.app_id.as_deref(), Some("pacman:foo"));
         assert_eq!(h.size, plan.actions[i].size);
@@ -348,6 +349,58 @@ fn running_process_detected_by_appimage_env() {
     );
     t.symlink("proc/43/exe", "/tmp/.mount_x/usr/bin/other");
     assert_eq!(running_processes(&env, &appimage_app()), [42]);
+}
+
+#[test]
+fn running_detects_deleted_exe_and_comm() {
+    let t = FixtureTree::new();
+    let env = t.env();
+    // The binary was replaced by an update: the kernel appends " (deleted)".
+    t.symlink("proc/10/exe", "/usr/bin/foo-bin (deleted)");
+    // Only the process name and argv0 say who it is.
+    t.write("proc/11/comm", b"foo-bin\n");
+    t.write("proc/12/cmdline", b"/opt/foo/foo-bin\0--flag\0");
+    // The kernel cuts comm at 15 bytes.
+    t.write("proc/13/comm", b"very-long-name-\n");
+    t.write("proc/14/comm", b"unrelated\n");
+    t.write("proc/14/cmdline", b"/usr/bin/unrelated\0");
+    let mut app = appimage_app();
+    app.exec_names.push("very-long-name-app".into());
+    assert_eq!(running_processes(&env, &app), [10, 11, 12, 13]);
+}
+
+#[test]
+fn generic_basenames_never_match() {
+    let t = FixtureTree::new();
+    let env = t.env();
+    let mut app = appimage_app();
+    app.exec_names = ["sh", "bash", "env", "python", "python3", "node"]
+        .into_iter()
+        .chain(["electron", "java", "flatpak", "bwrap", "/usr/bin/bash"])
+        .chain(["dash", "zsh", "fish", "perl", "ruby", "python3.12"])
+        .map(String::from)
+        .collect();
+    for (pid, name) in [(1, "sh"), (2, "bash"), (3, "python3"), (4, "flatpak")] {
+        t.symlink(&format!("proc/{pid}/exe"), &format!("/usr/bin/{name}"));
+    }
+    t.write("proc/5/comm", b"node\n");
+    t.write("proc/6/cmdline", b"/usr/bin/java\0-jar\0x.jar\0");
+    t.write("proc/7/cmdline", b"bwrap\0--x\0");
+    for (pid, name) in [
+        (20, "dash"),
+        (21, "zsh"),
+        (22, "fish"),
+        (23, "perl"),
+        (24, "ruby"),
+        (25, "python3.12"),
+    ] {
+        t.symlink(&format!("proc/{pid}/exe"), &format!("/usr/bin/{name}"));
+    }
+    assert!(running_processes(&env, &app).is_empty());
+    // The exact location still matches.
+    let loc = t.dir.path().join("home/user/Apps/Foo.AppImage");
+    t.symlink("proc/8/exe", loc.to_str().unwrap());
+    assert_eq!(running_processes(&env, &app), [8]);
 }
 
 #[test]
@@ -638,9 +691,12 @@ fn command_plan(program: &str, args: &[&str]) -> Plan {
             dev: 0,
             ino: 0,
             is_symlink: false,
+            ctime: 0,
+            ctime_nsec: 0,
         },
         scope: Scope::Home,
         depends_on: None,
+        depends_on_plan: None,
         reason: "test".into(),
     }])
 }
@@ -703,6 +759,7 @@ fn user_command_failure_reports_last_stderr_line() {
         status,
         stdout: String::new(),
         stderr: stderr.into(),
+        timed_out: false,
     };
     let runner = FakeRunner::new()
         .on("flatpak", &["a"], out(1, "first\nerror: boom\n\n"))
@@ -714,6 +771,34 @@ fn user_command_failure_reports_last_stderr_line() {
     assert_eq!(
         report.results[1].error.as_deref(),
         Some("exited with status 3")
+    );
+}
+
+#[test]
+fn user_command_timeout_is_a_failure() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/flatpak", b"#!/bin/sh\n");
+    let env = t.env();
+    let runner = FakeRunner::new().on(
+        "flatpak",
+        &["a"],
+        CmdOutput {
+            status: -1,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: true,
+        },
+    );
+    let report = execute_with(
+        &env,
+        &Config::default(),
+        &command_plan("flatpak", &["a"]),
+        &runner,
+    );
+    assert!(!report.results[0].ok);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("flatpak timed out after 30 min")
     );
 }
 
@@ -757,4 +842,1068 @@ fn temp_delete_verified_in_user_temp_scope() {
     let (entries, _) = read_history(&env).unwrap();
     assert_eq!(entries[0].action, HistoryAction::Delete);
     assert_eq!(entries[0].path, Path::new("/tmp/a"));
+}
+
+// ---- Privileged batch (M4 Task 4) ----
+
+use crate::privilege::batch::PrivilegedRunner;
+use crate::privilege::{Escalation, EscalationKind};
+use crate::testing::FakePrivilegedRunner;
+
+fn esc() -> Escalation {
+    Escalation {
+        kind: EscalationKind::Pkexec,
+        program: PathBuf::from("/usr/bin/pkexec"),
+        requires_tty: false,
+    }
+}
+
+fn no_post_check(_: &Env, _: SourceKind, _: &[String]) -> Result<Vec<String>, String> {
+    Ok(Vec::new())
+}
+
+/// Steps in a script: one `__c <i>` or `__t<n> <i>` line per step.
+fn step_count(script: &[u8]) -> usize {
+    String::from_utf8_lossy(script)
+        .lines()
+        .filter(|l| {
+            let word = l.split(' ').next().unwrap_or_default();
+            word == "__c"
+                || word
+                    .strip_prefix("__t")
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .count()
+}
+
+fn unfingerprinted(action: Action) -> PlannedAction {
+    PlannedAction {
+        action,
+        size: 0,
+        fingerprint: Fingerprint {
+            dev: 0,
+            ino: 0,
+            is_symlink: false,
+            ctime: 0,
+            ctime_nsec: 0,
+        },
+        scope: Scope::Home,
+        depends_on: None,
+        depends_on_plan: None,
+        reason: "test".into(),
+    }
+}
+
+fn priv_cmd(program: &str, args: &[&str]) -> PlannedAction {
+    unfingerprinted(Action::PrivilegedCommand {
+        program: program.into(),
+        args: args.iter().map(|a| (*a).to_string()).collect(),
+    })
+}
+
+fn pkg_remove(names: &[&str], versions: &[&str]) -> PlannedAction {
+    let mut args = vec!["-Rns".to_string(), "--noconfirm".into()];
+    args.extend(names.iter().map(|n| (*n).to_string()));
+    let mut pa = unfingerprinted(Action::PackageRemove {
+        source: SourceKind::Pacman,
+        names: names.iter().map(|n| (*n).to_string()).collect(),
+        versions: versions.iter().map(|v| (*v).to_string()).collect(),
+        program: "pacman".into(),
+        args,
+    });
+    pa.size = 100;
+    pa
+}
+
+/// A fixture `/var/lib/systemd/coredump` whose chain passes the System
+/// scope checks (see `Env::system_owner_uid`).
+fn coredump_dir(t: &FixtureTree) {
+    t.mkdir("var/lib/systemd/coredump");
+    let mut cur = t.dir.path().to_path_buf();
+    fs::set_permissions(&cur, fs::Permissions::from_mode(0o755)).unwrap();
+    for c in ["var", "lib", "systemd", "coredump"] {
+        cur.push(c);
+        fs::set_permissions(&cur, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+fn core_delete(env: &Env, name: &str) -> PlannedAction {
+    let p = PathBuf::from(format!("/var/lib/systemd/coredump/{name}"));
+    PlannedAction {
+        size: disk_usage(env, &p).bytes,
+        fingerprint: fingerprint(env, &p).unwrap(),
+        action: Action::Delete { path: p },
+        scope: Scope::System,
+        depends_on: None,
+        depends_on_plan: None,
+        reason: "test".into(),
+    }
+}
+
+/// A fixture `rm` that runs the real one (on the root-joined path the
+/// executor passes).
+fn fixture_rm(t: &FixtureTree) {
+    t.write_exec("usr/bin/rm", b"#!/bin/sh\nexec /usr/bin/rm \"$@\"\n");
+}
+
+/// A fixture program that appends its arguments to `log` and exits with
+/// `status`, printing `output` first.
+fn logging_program(t: &FixtureTree, name: &str, log: &Path, output: &str, status: i32) {
+    let script = format!(
+        "#!/bin/sh\necho \"$@\" >> '{}'\nprintf '%s' '{output}'\nexit {status}\n",
+        log.display()
+    );
+    t.write_exec(&format!("usr/bin/{name}"), script.as_bytes());
+}
+
+#[test]
+fn privileged_actions_run_in_one_batch() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "flatpak", &log, "", 0);
+    logging_program(&t, "pacman", &log, "removing foo...\n", 0);
+    fixture_rm(&t);
+    coredump_dir(&t);
+    t.write("var/lib/systemd/coredump/core.x.1", b"dump");
+    t.write("home/user/.config/foo/a", b"a");
+    let env = t.env();
+    let plan = plan_of(vec![
+        planned(&env, trash("/home/user/.config/foo")),
+        priv_cmd("flatpak", &["uninstall", "--system", "-y", "org.x.App"]),
+        pkg_remove(&["foo"], &["1.0-1"]),
+        core_delete(&env, "core.x.1"),
+    ]);
+    let pr = FakePrivilegedRunner::default();
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &pr,
+        Some(&esc()),
+        &no_post_check,
+    );
+    for r in &report.results {
+        assert!(r.ok, "{r:?}");
+    }
+    assert!(!report.escalation_failed);
+    let calls = pr.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "one escalation for the whole run");
+    assert_eq!(step_count(&calls[0]), 3);
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        "uninstall --system -y org.x.App\n-Rns --noconfirm foo\n"
+    );
+    assert!(!env.sys("/var/lib/systemd/coredump/core.x.1").exists());
+    assert!(!env.sys("/home/user/.config/foo").exists());
+    assert_eq!(report.freed, plan.total_size);
+    // Results stay in plan order; history ids name plan indices, the
+    // privileged entries written right after the batch.
+    for (i, r) in report.results.iter().enumerate() {
+        assert_eq!(r.action, plan.actions[i].action);
+        assert_eq!(r.history_id, format!("{}-{i}", report.batch));
+    }
+    let (hist, _) = read_history(&env).unwrap();
+    let ids: Vec<&str> = hist.iter().map(|h| h.id.as_str()).collect();
+    let b = &report.batch;
+    assert_eq!(
+        ids,
+        [
+            format!("{b}-1"),
+            format!("{b}-2"),
+            format!("{b}-3"),
+            format!("{b}-0")
+        ]
+    );
+    assert_eq!(hist[0].action, HistoryAction::PrivilegedCommand);
+    assert_eq!(hist[0].path, Path::new("/usr/bin/flatpak"));
+    assert_eq!(hist[1].action, HistoryAction::PackageRemove);
+    assert_eq!(hist[2].action, HistoryAction::Delete);
+    assert_eq!(
+        hist[2].path,
+        Path::new("/var/lib/systemd/coredump/core.x.1")
+    );
+    assert_eq!(hist[3].action, HistoryAction::Trash);
+}
+
+/// A runner whose escalation produced no output at all (cancelled or
+/// denied): it records the script but runs nothing.
+#[derive(Default)]
+struct DeniedRunner {
+    calls: std::sync::Mutex<usize>,
+}
+
+impl PrivilegedRunner for DeniedRunner {
+    fn run(&self, _: &Escalation, _: &[u8]) -> Result<Vec<u8>, crate::error::CoreError> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+fn escalation_denied_marks_all_failed_and_skips_dependents() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "", 0);
+    logging_program(&t, "flatpak", &log, "", 0);
+    t.write("home/user/.config/foo/a", b"a");
+    let env = t.env();
+    let mut leftover = planned(&env, trash("/home/user/.config/foo"));
+    leftover.depends_on = Some(0);
+    let plan = plan_of(vec![
+        pkg_remove(&["foo"], &["1.0-1"]),
+        leftover,
+        priv_cmd("flatpak", &["uninstall", "--system", "-y", "org.x.App"]),
+    ]);
+    let pr = DeniedRunner::default();
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &pr,
+        Some(&esc()),
+        // Nothing ran, so the package is still there.
+        &|_, _, names| Ok(names.to_vec()),
+    );
+    assert_eq!(*pr.calls.lock().unwrap(), 1);
+    assert!(report.escalation_failed);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("privilege escalation was cancelled or denied; still installed: foo")
+    );
+    assert_eq!(report.results[2].error.as_deref(), Some(ESCALATION_DENIED));
+    assert!(report.results.iter().all(|r| !r.ok));
+    let r = &report.results[1];
+    assert!(!r.ok);
+    assert!(
+        r.error.as_deref().unwrap().starts_with("skipped: "),
+        "{r:?}"
+    );
+    assert!(env.sys("/home/user/.config/foo/a").exists());
+    assert!(!log.exists());
+    assert_eq!(report.freed, 0);
+    let (hist, _) = read_history(&env).unwrap();
+    assert_eq!(hist.len(), 3);
+    assert!(hist.iter().all(|h| !h.ok));
+}
+
+#[test]
+fn no_escalation_tool_reports_and_flags() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "", 0);
+    t.write("home/user/.config/foo/a", b"a");
+    let env = t.env();
+    let plan = plan_of(vec![
+        pkg_remove(&["foo"], &["1.0-1"]),
+        planned(&env, trash("/home/user/.config/foo")),
+    ]);
+    let pr = FakePrivilegedRunner::default();
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &pr,
+        None,
+        &no_post_check,
+    );
+    assert!(report.escalation_failed);
+    assert!(pr.calls.lock().unwrap().is_empty());
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("no way to get administrator rights (install systemd ≥ 256, polkit or sudo)")
+    );
+    // An independent user action still runs.
+    assert!(report.results[1].ok, "{:?}", report.results[1]);
+    assert!(!log.exists());
+
+    // `execute_with` never escalates.
+    let t = FixtureTree::new();
+    logging_program(&t, "pacman", &log, "", 0);
+    let env = t.env();
+    let plan = plan_of(vec![pkg_remove(&["foo"], &["1.0-1"])]);
+    let report = execute_with(&env, &Config::default(), &plan, &FakeRunner::new());
+    assert!(report.escalation_failed);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("no way to get administrator rights (install systemd ≥ 256, polkit or sudo)")
+    );
+}
+
+#[test]
+fn system_delete_verified_before_batch() {
+    let t = FixtureTree::new();
+    fixture_rm(&t);
+    coredump_dir(&t);
+    t.write("var/lib/systemd/coredump/core.a.1", b"a");
+    t.write("var/lib/systemd/coredump/core.b.1", b"b");
+    t.write("etc/precious", b"keep me");
+    let env = t.env();
+    let plan = plan_of(vec![
+        core_delete(&env, "core.a.1"),
+        core_delete(&env, "core.b.1"),
+    ]);
+    // core.b.1 is swapped for a symlink to a precious file after the scan.
+    let b = env.sys("/var/lib/systemd/coredump/core.b.1");
+    fs::remove_file(&b).unwrap();
+    std::os::unix::fs::symlink(env.sys("/etc/precious"), &b).unwrap();
+    let pr = FakePrivilegedRunner::default();
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &pr,
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    assert!(!report.results[1].ok);
+    assert!(!report.escalation_failed);
+    let calls = pr.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(step_count(&calls[0]), 1, "the swapped file is left out");
+    let script = String::from_utf8_lossy(&calls[0]);
+    assert!(script.contains("core.a.1"));
+    assert!(!script.contains("core.b.1"));
+    assert!(script.contains("'-f' '--'"), "{script}");
+    assert!(!env.sys("/var/lib/systemd/coredump/core.a.1").exists());
+    assert!(fs::symlink_metadata(&b).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read(env.sys("/etc/precious")).unwrap(), b"keep me");
+}
+
+#[test]
+fn empty_batch_never_escalates() {
+    let t = FixtureTree::new();
+    fixture_rm(&t);
+    coredump_dir(&t);
+    t.write("var/lib/systemd/coredump/core.a.1", b"a");
+    let env = t.env();
+    let plan = plan_of(vec![
+        core_delete(&env, "core.a.1"),
+        // Not in a trusted directory: not installed.
+        priv_cmd("no-such-tool", &["x"]),
+    ]);
+    fs::remove_file(env.sys("/var/lib/systemd/coredump/core.a.1")).unwrap();
+    let pr = DeniedRunner::default();
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &pr,
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert_eq!(*pr.calls.lock().unwrap(), 0);
+    assert!(!report.escalation_failed);
+    assert!(!report.results[0].ok);
+    assert_eq!(
+        report.results[1].error.as_deref(),
+        Some("no-such-tool is not installed")
+    );
+    // No escalation tool and nothing to escalate for: not a failure.
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan_of(vec![priv_cmd("no-such-tool", &[])]),
+        &FakeRunner::new(),
+        &pr,
+        None,
+        &no_post_check,
+    );
+    assert!(!report.escalation_failed);
+}
+
+#[test]
+fn privileged_step_failure_reports_last_output_line() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(
+        &t,
+        "pacman",
+        &log,
+        "checking...\nerror: target not found: foo\n",
+        1,
+    );
+    logging_program(&t, "flatpak", &log, "", 3);
+    logging_program(&t, "true", &log, "", 0);
+    let env = t.env();
+    let plan = plan_of(vec![
+        pkg_remove(&["foo"], &["1.0-1"]),
+        priv_cmd("flatpak", &["x"]),
+        priv_cmd("true", &[]),
+    ]);
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &FakePrivilegedRunner::default(),
+        Some(&esc()),
+        &|_, _, names| Ok(names.to_vec()),
+    );
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("pacman exited with status 1: error: target not found: foo; still installed: foo")
+    );
+    assert_eq!(
+        report.results[1].error.as_deref(),
+        Some("exited with status 3")
+    );
+    assert!(report.results[2].ok);
+    assert!(!report.escalation_failed);
+    assert_eq!(report.freed, 0);
+}
+
+#[test]
+fn batch_error_fails_privileged_actions_without_escalation_failure() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "flatpak", &log, "", 0);
+    let env = t.env();
+    let plan = plan_of(vec![
+        priv_cmd("flatpak", &["bad\0arg"]),
+        priv_cmd("flatpak", &["fine"]),
+    ]);
+    let pr = DeniedRunner::default();
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &pr,
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert_eq!(*pr.calls.lock().unwrap(), 0);
+    assert!(!report.escalation_failed);
+    for r in &report.results {
+        assert!(!r.ok);
+        assert!(r.error.as_deref().unwrap().contains("NUL byte"), "{r:?}");
+    }
+}
+
+#[test]
+fn privileged_action_with_dependency_is_skipped() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "flatpak", &log, "", 0);
+    t.write("home/user/.config/foo/a", b"a");
+    let env = t.env();
+    let mut cmd = priv_cmd("flatpak", &["x"]);
+    cmd.depends_on = Some(0);
+    let plan = plan_of(vec![planned(&env, trash("/home/user/.config/foo")), cmd]);
+    let pr = DeniedRunner::default();
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &pr,
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert!(report.results[0].ok);
+    assert!(!report.results[1].ok);
+    assert!(
+        report.results[1]
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with("skipped: "),
+        "{:?}",
+        report.results[1]
+    );
+    assert_eq!(*pr.calls.lock().unwrap(), 0);
+}
+
+#[test]
+fn package_remove_post_check_still_installed() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "", 0);
+    let env = t.env();
+    let plan = plan_of(vec![
+        pkg_remove(&["foo", "bar"], &["1.0-1", "2.0-1"]),
+        pkg_remove(&["baz"], &["3.0-1"]),
+    ]);
+    let seen = std::sync::Mutex::new(Vec::new());
+    let post_check = |_: &Env, source: SourceKind, names: &[String]| {
+        seen.lock().unwrap().push((source, names.to_vec()));
+        Ok(names.iter().filter(|n| *n == "foo").cloned().collect())
+    };
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &FakePrivilegedRunner::default(),
+        Some(&esc()),
+        &post_check,
+    );
+    assert!(!report.results[0].ok);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("removed: bar; still installed: foo")
+    );
+    assert!(report.results[1].ok, "{:?}", report.results[1]);
+    assert_eq!(report.freed, 100);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            (SourceKind::Pacman, vec!["foo".to_string(), "bar".into()]),
+            (SourceKind::Pacman, vec!["baz".to_string()]),
+        ]
+    );
+    let (hist, _) = read_history(&env).unwrap();
+    assert!(!hist[0].ok);
+    assert_eq!(
+        hist[0].error.as_deref(),
+        Some("removed: bar; still installed: foo")
+    );
+    assert_eq!(
+        hist[0].packages.as_deref(),
+        Some(&[("bar".to_string(), "2.0-1".to_string())][..])
+    );
+}
+
+#[test]
+fn history_records_packages() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "", 0);
+    logging_program(&t, "flatpak", &log, "", 0);
+    let env = t.env();
+    let plan = plan_of(vec![
+        pkg_remove(&["foo", "libfoo"], &["1.0-1", "2.1-3"]),
+        priv_cmd("flatpak", &["uninstall", "--system", "-y", "org.x.App"]),
+    ]);
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &FakePrivilegedRunner::default(),
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert!(report.results.iter().all(|r| r.ok), "{report:?}");
+    let (hist, _) = read_history(&env).unwrap();
+    assert_eq!(hist[0].action, HistoryAction::PackageRemove);
+    assert_eq!(hist[0].path, Path::new("/usr/bin/pacman"));
+    assert_eq!(
+        hist[0].packages.as_deref(),
+        Some(
+            &[
+                ("foo".to_string(), "1.0-1".to_string()),
+                ("libfoo".into(), "2.1-3".into())
+            ][..]
+        )
+    );
+    assert_eq!(
+        hist[0].argv.as_deref(),
+        Some(
+            &[
+                "-Rns".to_string(),
+                "--noconfirm".into(),
+                "foo".into(),
+                "libfoo".into()
+            ][..]
+        )
+    );
+    assert_eq!(hist[0].size, 100);
+    assert_eq!(hist[1].action, HistoryAction::PrivilegedCommand);
+    assert_eq!(hist[1].path, Path::new("/usr/bin/flatpak"));
+    assert_eq!(hist[1].packages, None);
+    assert_eq!(
+        hist[1].argv.as_deref(),
+        Some(
+            &[
+                "uninstall".to_string(),
+                "--system".into(),
+                "-y".into(),
+                "org.x.App".into()
+            ][..]
+        )
+    );
+    let text = fs::read_to_string(env.state_home.join("crumbs/history.jsonl")).unwrap();
+    assert!(text.contains("\"action\":\"package-remove\""), "{text}");
+    assert!(text.contains("\"packages\":[[\"foo\",\"1.0-1\"]"), "{text}");
+    assert!(text.contains("\"action\":\"privileged-command\""), "{text}");
+}
+
+#[test]
+fn execute_with_on_fake_root_never_escalates() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "", 0);
+    // An escalation program detection would otherwise pick.
+    let esc_log = t.dir.path().join("pkexec.log");
+    logging_program(&t, "pkexec", &esc_log, "", 0);
+    let env = t.env();
+    let plan = plan_of(vec![pkg_remove(&["foo"], &["1.0-1"])]);
+    let runner = FakeRunner::new();
+    let report = execute_with(&env, &Config::default(), &plan, &runner);
+    assert_eq!(report.results[0].error.as_deref(), Some(NO_ESCALATION));
+    assert!(report.escalation_failed);
+    assert!(!esc_log.exists(), "the escalation program ran");
+    assert!(!log.exists());
+    assert!(runner.calls().is_empty(), "{:?}", runner.calls());
+}
+
+/// A runner that hands back canned stdout without running anything.
+struct CannedRunner(Vec<u8>);
+
+impl PrivilegedRunner for CannedRunner {
+    fn run(&self, _: &Escalation, _: &[u8]) -> Result<Vec<u8>, crate::error::CoreError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[test]
+fn partial_markers_give_mixed_results() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "flatpak", &log, "", 0);
+    let env = t.env();
+    let plan = plan_of(vec![
+        priv_cmd("flatpak", &["a"]),
+        priv_cmd("flatpak", &["b"]),
+        priv_cmd("flatpak", &["c"]),
+    ]);
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &CannedRunner(b"|done\n@@crumbs 0 0\n|half\n".to_vec()),
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    assert!(!report.results[1].ok);
+    assert_eq!(report.results[1].error.as_deref(), Some(STOPPED_DURING));
+    assert_eq!(report.results[2].error.as_deref(), Some(STOPPED_BEFORE));
+    // The shell ran as root and was stopped: rights were not missing.
+    assert!(!report.escalation_failed);
+    assert!(report.batch_stopped);
+    assert!(report.results.iter().all(|r| !r.rights_missing));
+    // The history records what ran, and what did not.
+    let (hist, _) = read_history(&env).unwrap();
+    assert_eq!(hist.len(), 3);
+    let oks: Vec<bool> = hist.iter().map(|h| h.ok).collect();
+    assert_eq!(oks, [true, false, false]);
+}
+
+#[test]
+fn no_markers_is_a_denial() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "flatpak", &log, "", 0);
+    let env = t.env();
+    let plan = plan_of(vec![
+        priv_cmd("flatpak", &["a"]),
+        priv_cmd("flatpak", &["b"]),
+    ]);
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &CannedRunner(b"noise\n|not a marker\n".to_vec()),
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert!(report.escalation_failed);
+    assert!(!report.batch_stopped);
+    for r in &report.results {
+        assert_eq!(r.error.as_deref(), Some(ESCALATION_DENIED));
+        assert!(r.rights_missing);
+    }
+}
+
+#[test]
+fn stopped_package_removal_still_records_what_went() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "flatpak", &log, "", 0);
+    logging_program(&t, "pacman", &log, "", 0);
+    let env = t.env();
+    let plan = plan_of(vec![
+        priv_cmd("flatpak", &["a"]),
+        pkg_remove(&["foo", "bar"], &["1.0-1", "2.0-1"]),
+    ]);
+    // `bar` is gone, `foo` is still there: the step stopped part-way.
+    let post = |_: &Env, _: SourceKind, _: &[String]| Ok(vec!["foo".to_string()]);
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &CannedRunner(b"@@crumbs 0 0\n".to_vec()),
+        Some(&esc()),
+        &post,
+    );
+    let err = report.results[1].error.as_deref().unwrap();
+    assert!(err.starts_with(STOPPED_DURING), "{err}");
+    assert!(err.contains("removed: bar"), "{err}");
+    assert!(err.contains("still installed: foo"), "{err}");
+    assert!(!report.escalation_failed);
+    let (hist, _) = read_history(&env).unwrap();
+    let text = serde_json::to_string(&hist[1]).unwrap();
+    assert!(
+        text.contains("\"packages\":[[\"bar\",\"2.0-1\"]]"),
+        "{text}"
+    );
+}
+
+#[test]
+fn too_large_batch_fails_without_escalation_failure() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "flatpak", &log, "", 0);
+    let env = t.env();
+    let big = "x".repeat(130 * 1024);
+    let plan = plan_of(vec![
+        priv_cmd("flatpak", &["a"]),
+        priv_cmd("flatpak", &[&big]),
+    ]);
+    let pr = DeniedRunner::default();
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &pr,
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert_eq!(*pr.calls.lock().unwrap(), 0);
+    assert!(!report.escalation_failed);
+    for r in &report.results {
+        assert!(!r.ok);
+        assert!(
+            r.error.as_deref().unwrap().starts_with("too many items"),
+            "{r:?}"
+        );
+    }
+}
+
+#[test]
+fn dependent_of_package_failing_post_check_is_skipped() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "", 0);
+    t.write("home/user/.config/foo/a", b"a");
+    let env = t.env();
+    let mut leftover = planned(&env, trash("/home/user/.config/foo"));
+    leftover.depends_on = Some(0);
+    let plan = plan_of(vec![pkg_remove(&["foo"], &["1.0-1"]), leftover]);
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &FakePrivilegedRunner::default(),
+        Some(&esc()),
+        &|_, _, names| Ok(names.to_vec()),
+    );
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("still installed: foo")
+    );
+    assert!(!report.results[1].ok);
+    assert!(
+        report.results[1]
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with("skipped: ")
+    );
+    assert!(env.sys("/home/user/.config/foo/a").exists());
+}
+
+#[test]
+fn failed_package_step_reports_what_was_removed() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(
+        &t,
+        "pacman",
+        &log,
+        "error: failed to commit transaction\n",
+        1,
+    );
+    let env = t.env();
+    let plan = plan_of(vec![pkg_remove(&["a", "b", "c"], &["1", "2", "3"])]);
+    let still = |_: &Env, _: SourceKind, _: &[String]| Ok(vec!["c".to_string()]);
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &FakePrivilegedRunner::default(),
+        Some(&esc()),
+        &still,
+    );
+    assert!(!report.results[0].ok);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some(
+            "pacman exited with status 1: error: failed to commit transaction; \
+             removed: a, b; still installed: c"
+        )
+    );
+    let (hist, _) = read_history(&env).unwrap();
+    assert_eq!(
+        hist[0].packages.as_deref(),
+        Some(&[("a".to_string(), "1".to_string()), ("b".into(), "2".into())][..])
+    );
+
+    // A missing marker: the post-check still says what is gone.
+    let t = FixtureTree::new();
+    logging_program(&t, "pacman", &log, "", 0);
+    let env = t.env();
+    let none_left = |_: &Env, _: SourceKind, _: &[String]| Ok(Vec::new());
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan_of(vec![pkg_remove(&["a"], &["1"])]),
+        &FakeRunner::new(),
+        &DeniedRunner::default(),
+        Some(&esc()),
+        &none_left,
+    );
+    assert!(!report.results[0].ok);
+    assert!(report.escalation_failed);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("privilege escalation was cancelled or denied; removed: a")
+    );
+}
+
+/// Without a real post-check (`execute`/`execute_with` until removal is
+/// wired) a failed package step claims nothing about what was removed.
+#[test]
+fn default_post_check_claims_nothing_on_failure() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "error: boom\n", 1);
+    let env = t.env();
+    let plan = plan_of(vec![pkg_remove(&["a", "b"], &["1", "2"])]);
+    let run = |pr: &dyn PrivilegedRunner| {
+        run_one(
+            &env,
+            &Config::default(),
+            &plan,
+            &FakeRunner::new(),
+            pr,
+            Some(&esc()),
+            None,
+        )
+    };
+    let report = run(&FakePrivilegedRunner::default());
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("pacman exited with status 1: error: boom")
+    );
+    let report = run(&DeniedRunner::default());
+    assert_eq!(report.results[0].error.as_deref(), Some(ESCALATION_DENIED));
+    let (hist, _) = read_history(&env).unwrap();
+    assert!(hist.iter().all(|h| h.packages.is_none()), "{hist:?}");
+
+    // A step that succeeded is trusted: every package is recorded.
+    logging_program(&t, "pacman", &log, "", 0);
+    let report = run(&FakePrivilegedRunner::default());
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    let (hist, _) = read_history(&env).unwrap();
+    assert_eq!(
+        hist.last().unwrap().packages.as_deref(),
+        Some(&[("a".to_string(), "1".to_string()), ("b".into(), "2".into())][..])
+    );
+}
+
+#[test]
+fn unverifiable_removal_is_not_ok_and_records_nothing() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "", 0);
+    t.write("home/user/.config/foo/a", b"a");
+    let env = t.env();
+    let mut leftover = planned(&env, trash("/home/user/.config/foo"));
+    leftover.depends_on = Some(0);
+    let plan = plan_of(vec![pkg_remove(&["foo"], &["1.0-1"]), leftover]);
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &FakePrivilegedRunner::default(),
+        Some(&esc()),
+        &|_, _, _| Err("cannot read the pacman database".into()),
+    );
+    assert!(!report.results[0].ok);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("could not verify removal: cannot read the pacman database")
+    );
+    assert!(
+        report.results[1]
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with("skipped: ")
+    );
+    assert!(env.sys("/home/user/.config/foo/a").exists());
+    let (hist, _) = read_history(&env).unwrap();
+    assert!(hist.iter().all(|h| h.packages.is_none()), "{hist:?}");
+}
+
+fn app_plan(app_id: &str, actions: Vec<PlannedAction>) -> Plan {
+    let mut p = plan_of(actions);
+    p.app_id = Some(app_id.into());
+    p
+}
+
+#[test]
+fn execute_many_uses_one_batch_for_every_plan() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "", 0);
+    t.write("home/user/.config/foo/a", b"a");
+    t.write("home/user/.config/bar/a", b"a");
+    let env = t.env();
+    let mut foo_left = planned(&env, trash("/home/user/.config/foo"));
+    foo_left.depends_on = Some(0);
+    let mut bar_left = planned(&env, trash("/home/user/.config/bar"));
+    bar_left.depends_on = Some(0);
+    let plans = [
+        app_plan("pacman:foo", vec![pkg_remove(&["foo"], &["1-1"]), foo_left]),
+        app_plan("pacman:bar", vec![pkg_remove(&["bar"], &["2-1"]), bar_left]),
+    ];
+    let pr = FakePrivilegedRunner::default();
+    let reports = execute_many(
+        &env,
+        &Config::default(),
+        &plans,
+        &FakeRunner::new(),
+        &pr,
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert_eq!(reports.len(), 2);
+    let calls = pr.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "one escalation for the whole run");
+    assert_eq!(step_count(&calls[0]), 2);
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        "-Rns --noconfirm foo\n-Rns --noconfirm bar\n"
+    );
+    for r in &reports {
+        assert!(r.results.iter().all(|x| x.ok), "{r:?}");
+        assert!(!r.escalation_failed);
+    }
+    assert_ne!(reports[0].batch, reports[1].batch);
+    assert!(!env.sys("/home/user/.config/bar").exists());
+    // History keeps each plan's batch id and app.
+    let (hist, _) = read_history(&env).unwrap();
+    assert_eq!(hist.len(), 4);
+    for h in &hist {
+        let (batch, app) = if h.batch == reports[0].batch {
+            (&reports[0].batch, "pacman:foo")
+        } else {
+            (&reports[1].batch, "pacman:bar")
+        };
+        assert_eq!(&h.batch, batch);
+        assert_eq!(h.app_id.as_deref(), Some(app), "{h:?}");
+    }
+    // A later run gets a later batch id than both.
+    let next: u128 = crate::history::next_batch_id(&env).parse().unwrap();
+    assert!(next > reports[1].batch.parse::<u128>().unwrap());
+}
+
+/// An action an earlier plan's action covered waits for it: it is skipped,
+/// naming the failed cover, and never run; one whose cover succeeded runs.
+#[test]
+fn cross_plan_gate_skips_when_cover_failed() {
+    let t = FixtureTree::new();
+    t.write("home/user/.config/shared/a", b"a");
+    t.write("home/user/.config/ok/a", b"a");
+    t.write("home/user/.config/dep/a", b"a");
+    t.write("home/user/.config/dep2/a", b"a");
+    let env = t.env();
+    let shared = planned(&env, trash("/home/user/.config/shared"));
+    let ok = planned(&env, trash("/home/user/.config/ok"));
+    let mut dep = planned(&env, trash("/home/user/.config/dep"));
+    dep.depends_on_plan = Some((0, 0));
+    let mut dep2 = planned(&env, trash("/home/user/.config/dep2"));
+    dep2.depends_on_plan = Some((0, 1));
+    // The cover vanishes after the scan, so its action fails.
+    fs::remove_dir_all(env.sys("/home/user/.config/shared")).unwrap();
+    let plans = [
+        app_plan("pacman:foo", vec![shared, ok]),
+        app_plan("pacman:bar", vec![dep, dep2]),
+    ];
+    let reports = execute_many(
+        &env,
+        &Config::default(),
+        &plans,
+        &FakeRunner::new(),
+        &FakePrivilegedRunner::default(),
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert!(!reports[0].results[0].ok);
+    assert!(reports[0].results[1].ok);
+    let skipped = &reports[1].results[0];
+    assert!(!skipped.ok);
+    assert!(
+        !skipped.rights_missing,
+        "a skipped dependent is never listed"
+    );
+    assert_eq!(
+        skipped.error.as_deref(),
+        Some("skipped: ~/.config/shared was not removed (it covered this action)")
+    );
+    assert!(env.sys("/home/user/.config/dep").exists(), "must not run");
+    assert!(reports[1].results[1].ok);
+    assert!(!env.sys("/home/user/.config/dep2").exists());
+}
+
+#[test]
+fn execute_many_denied_fails_every_plan() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "", 0);
+    let env = t.env();
+    let plans = [
+        app_plan("pacman:foo", vec![pkg_remove(&["foo"], &["1-1"])]),
+        // A plan with nothing privileged is not flagged.
+        app_plan("x", Vec::new()),
+        app_plan("pacman:bar", vec![priv_cmd("pacman", &["-Rn", "bar"])]),
+    ];
+    let pr = DeniedRunner::default();
+    let reports = execute_many(
+        &env,
+        &Config::default(),
+        &plans,
+        &FakeRunner::new(),
+        &pr,
+        Some(&esc()),
+        &|_, _, names| Ok(names.to_vec()),
+    );
+    assert_eq!(*pr.calls.lock().unwrap(), 1);
+    assert!(reports[0].escalation_failed && reports[2].escalation_failed);
+    assert!(!reports[1].escalation_failed);
+    assert_eq!(
+        reports[0].results[0].error.as_deref(),
+        Some("privilege escalation was cancelled or denied; still installed: foo")
+    );
+    assert_eq!(
+        reports[2].results[0].error.as_deref(),
+        Some(ESCALATION_DENIED)
+    );
 }

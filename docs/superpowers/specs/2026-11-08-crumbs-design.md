@@ -95,10 +95,10 @@ trait AppSource {
 
 | Source | Detection | Listing method | Removal |
 |---|---|---|---|
-| pacman | `/var/lib/pacman/local` exists | Parse `local/*/desc` + `files` directly | `pacman -Rns <pkg>` |
+| pacman | `/var/lib/pacman/local` exists | Parse `local/*/desc` + `files` directly | `pacman -Rn --noconfirm <simulated closure>` |
 | dpkg | `/var/lib/dpkg/status` exists | Parse `status`; file lists from `info/*.list` | `apt-get purge <pkg>` (`dpkg -P` if apt-get missing) |
 | rpm | `rpm` in trusted path | `rpm -qa --qf` with a fixed format; `rpm -ql` per app on demand | `dnf remove <pkg>` (`zypper remove` if dnf missing; `rpm -e` last) |
-| Flatpak | `flatpak` in trusted path | `flatpak list --app --columns=application,name,version,installation,size` | `flatpak uninstall [--user\|--system] --delete-data <id>` |
+| Flatpak | `flatpak` in trusted path | `flatpak list --app --columns=application,name,version,installation,size` | `flatpak uninstall [--user\|--system\|--installation=<name>] -y --noninteractive <id>` (never `--delete-data`) |
 | Snap | `snap` in trusted path | `snap list` | `snap remove --purge <name>` |
 | AppImage | always | Scan `~/Applications`, `~/.local/bin`, `~/Downloads`, `~/opt` and AppImageLauncher's configured dir for ELF files with the AppImage magic (`AI\x02` at offset 8) | Trash the file |
 | Unmanaged | always | `.desktop` entries whose `Exec` target is not owned by any package and is not an AppImage (e.g. `/opt/foo` tarballs) | Path-based removal of the install dir if it is unambiguous; otherwise leftovers only |
@@ -209,7 +209,7 @@ trait Scanner {
 | `pkg-cache` | Arch | `paccache -rk<keep>` (default keep 2); `pacman -Sc` if pacman-contrib missing |
 | | Debian | `apt-get clean` |
 | | Fedora | `dnf clean packages` |
-| `orphan-pkgs` | Arch | `pacman -Rns <explicit list from pacman -Qdtq>` |
+| `orphan-pkgs` | Arch | `pacman -Rn --noconfirm <closure simulated from pacman -Qdtq>` |
 | | Debian | `apt-get autoremove --purge` |
 | | Fedora | `dnf autoremove` |
 | `journal` | systemd | `journalctl --vacuum-size=<journal_max>` (default 500M) |
@@ -250,7 +250,7 @@ scan / match  →  Vec<Finding>  →  select  →  Plan  →  simulate  →  pre
 Before preview, the planner asks the package manager what will happen and puts
 the real result into the plan, so the user confirms what will actually be removed:
 
-- pacman: `pacman -Rns --print --print-format '%n %v' <pkgs>`
+- pacman: `pacman -Rs --print --print-format '%n %v' <pkgs>`
 - apt: `apt-get -s purge <pkgs>`
 - dnf: `dnf remove --assumeno <pkgs>` (parse the transaction summary)
 - flatpak unused: `flatpak uninstall --unused --noninteractive --dry-run` if
@@ -419,9 +419,17 @@ Each milestone gets its own implementation plan and ends in a working, tested CL
    `uninstall --leftovers-only`, AppImage uninstall, `orphans`, `history`,
    `restore`. — done
 3. **Bloat (user level)** — size module, user scanners, `scan`, `clean --user`. — done
-4. **Privilege & system** — privilege module, simulations, package-manager
-   uninstall, system scanners, `clean --system`.
+4. **Privilege & system** — privilege module, simulations, pacman and
+   Flatpak uninstall through one escalation prompt, system scanners
+   (`pkg-cache`, `orphan-pkgs`, `journal`, `coredumps`, `system-temp`,
+   `flatpak-unused-system`), `clean --system`. apt and dnf variants of the
+   package categories move to milestone 5 with their sources. — done
+   - **4b. System leftovers and unmanaged removal** — `/etc/<name>` and
+     `/opt/<name>` leftovers not owned by any package, path-based removal of
+     unmanaged apps, and the owned-directory database both need. They are the
+     riskiest deletions and get their own plan; scope in
+     `docs/superpowers/notes/m4b-scope.md`.
 5. **Cross-distro** — dpkg, rpm, Snap sources; distro CI matrix.
 6. **Packaging** — musl build, AppImage, AUR, deb, rpm, release workflow.
 
-The GUI follows as a separate spec once milestone 4 is complete.
+The GUI follows as a separate spec once milestones 4 and 4b are complete.

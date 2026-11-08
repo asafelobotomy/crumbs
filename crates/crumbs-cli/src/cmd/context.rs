@@ -64,7 +64,12 @@ pub struct ScanSetup {
 impl ScanSetup {
     pub fn load(env: &Env) -> anyhow::Result<ScanSetup> {
         let (cfg, notes) = load_cfg(env)?;
-        let inv = discover(env, &SystemRunner, &ListOptions { include_all: true }, &cfg);
+        let inv = discover(
+            env,
+            &SystemRunner::new(),
+            &ListOptions { include_all: true },
+            &cfg,
+        );
         Ok(ScanSetup { cfg, inv, notes })
     }
 }
@@ -80,7 +85,12 @@ impl Context {
                 .iter()
                 .map(|e| ErrorEntry::new("rules", e.to_string())),
         );
-        let inv = discover(env, &SystemRunner, &ListOptions { include_all: true }, &cfg);
+        let inv = discover(
+            env,
+            &SystemRunner::new(),
+            &ListOptions { include_all: true },
+            &cfg,
+        );
         let idx = LeftoverIndex::build(env, &cfg, &rules, &inv);
         Ok(Context {
             cfg,

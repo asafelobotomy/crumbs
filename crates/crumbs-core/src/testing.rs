@@ -2,14 +2,19 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 use crate::command::{CmdOutput, CommandRunner};
 use crate::env::Env;
 use crate::error::CoreError;
+use crate::privilege::Escalation;
+use crate::privilege::batch::PrivilegedRunner;
 
 pub struct FixtureTree {
     pub dir: tempfile::TempDir,
@@ -157,5 +162,29 @@ impl CommandRunner for FakeRunner {
                 program: base,
                 message: format!("no fake output registered for `{key}`"),
             })
+    }
+}
+
+/// A `PrivilegedRunner` that runs the script with `/bin/sh -c` as the test
+/// user (never escalating) and records every script it was given.
+#[derive(Default)]
+pub struct FakePrivilegedRunner {
+    pub calls: Mutex<Vec<Vec<u8>>>,
+}
+
+impl PrivilegedRunner for FakePrivilegedRunner {
+    fn run(&self, _esc: &Escalation, script: &[u8]) -> Result<Vec<u8>, CoreError> {
+        self.calls.lock().unwrap().push(script.to_vec());
+        let out = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(OsStr::from_bytes(script))
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|e| CoreError::Command {
+                program: "/bin/sh".into(),
+                message: e.to_string(),
+            })?;
+        Ok(out.stdout)
     }
 }

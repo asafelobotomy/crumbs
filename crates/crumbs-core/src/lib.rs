@@ -12,6 +12,7 @@ pub mod leftovers;
 pub mod model;
 pub mod plan;
 pub mod privilege;
+pub mod removal;
 pub mod restore;
 pub mod rules;
 pub mod safety;

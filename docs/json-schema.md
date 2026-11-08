@@ -50,7 +50,7 @@ When `uninstall`, `orphans --clean` or `clean` is run with `--json` and refuses 
   "errors": [
     {
       "source": "cli",
-      "message": "removing pacman apps needs privileged support (coming in a later version); use --leftovers-only"
+      "message": "removing unmanaged apps isn't supported yet; use --leftovers-only"
     }
   ]
 }
@@ -63,11 +63,11 @@ The exit code tells you which kind of failure it was (see below). `apps show` re
 | Code | Meaning |
 |---|---|
 | 0 | Success (including a dry run and "nothing to do"). |
-| 1 | Error, or `uninstall`/`orphans --clean`/`clean` refused because a source or scanner failed (override with `--force`) or an app is running, or `uninstall` refused an AppImage whose file fails the safety checks. |
-| 2 | Usage error: bad flags, an unknown category name, `--system` (not available yet), ambiguous or not-found app, `--json` without `--yes` or `--dry-run`, a destructive command run non-interactively without `--yes`, removing a non-AppImage app without `--leftovers-only`, or `restore` with no selector matching any history entry. |
-| 3 | Partial failure: some source failed while another worked, some actions/restores failed, or (`scan`) some category's scanner failed. |
+| 1 | Error, or `uninstall`/`orphans --clean`/`clean` refused because a source or scanner failed (override with `--force`) or an app is running, or `uninstall` refused an AppImage whose file fails the safety checks, or refused a package removal: pacman's simulation refused it (for example it would break a dependency), the pacman database is locked (`pacman is busy (database lock present)`), or the name is not a plain package name. |
+| 2 | Usage error: bad flags, a missing package tool (`pacman is not installed` when removing a pacman app), an unknown category name, `--user` together with `--system`, a named category of the other kind (`clean cache --system`, `scan --user --category journal`), ambiguous or not-found app, `--json` without `--yes` or `--dry-run`, a destructive command run non-interactively without `--yes`, removing an unmanaged app without `--leftovers-only`, or `restore` with no selector matching any history entry. |
+| 3 | Partial failure: some source failed while another worked, some actions/restores failed (privileged ones included, when administrator rights were granted but a step failed, or the privileged run stopped part-way), or (`scan`) some category's scanner failed. |
 | 4 | Aborted by the user at a prompt. |
-| 5 | Privilege escalation unavailable (reserved; not returned by M2 or M3 commands). |
+| 5 | Administrator rights were needed and not available: no escalation program (`run0` on systemd 256 or newer, `pkexec`, or `sudo` on a terminal) was found, or the prompt was cancelled or denied. Nothing that needs those rights was changed. The human output lists the commands to run by hand, and `--json` carries them in `data.manual_commands` (see `uninstall`). |
 
 ## App IDs
 
@@ -94,7 +94,7 @@ Commands that take an app accept an ID, a name, a desktop ID or a display name. 
 | `version` | string or null |
 | `description` | string or null |
 | `source` | `pacman`, `flatpak`, `appimage` or `unmanaged` |
-| `installation` | `user` or `system` |
+| `installation` | `user`, `system`, or `custom:<name>` for a named Flatpak installation (for example `custom:extra`) |
 | `install_size` | number (bytes) or null |
 | `location` | string (in-system path) or null |
 | `desktop_ids` | array of string |
@@ -129,15 +129,19 @@ Each action is `{ "action", "size", "reason" }`, plus two optional fields. `acti
 
 - `trash` and `delete` carry `path`;
 - `edit-file` carries `path` and `remove_lines` (array of string; the file is edited and a backup is kept next to it);
-- `user-command` (`clean` only) carries `program` and `args` (array of string). crumbs resolves `program` in the trusted system directories when it runs it, never through `$PATH`. It has no path and cannot be undone.
+- `user-command` carries `program` and `args` (array of string). crumbs resolves `program` in the trusted system directories when it runs it, never through `$PATH`. It has no path and cannot be undone. `uninstall` plans one to remove a per-user Flatpak app; `clean` plans one for `flatpak-unused`.
+- `privileged-command` carries `program` and `args`, like `user-command`, but runs as root in the run's single privileged batch (see below). It has no path and cannot be undone. `uninstall` plans one to remove a system or custom-installation Flatpak app; `clean --system` plans them for most system categories.
+- `package-remove` carries `source` (`pacman`), `names` and `versions` (arrays of string, aligned: the app's package first, then every package pacman will remove with it), `program` and `args`. It runs as root in the privileged batch, has no path and cannot be undone by crumbs.
 
-`size` is bytes (0 for `edit-file`, and 0 for `user-command`, whose size is unknown).
+`size` is bytes (0 for `edit-file`, and 0 for a command or `package-remove` whose size is unknown; a `privileged-command` from `clean --system` carries the size its scan estimated, such as the package cache).
+
+**Privileged batch.** All `privileged-command` and `package-remove` actions of one run, and each `delete` with `scope` `system`, are joined into one `/bin/sh` script and run once, so there is one authorisation prompt however many there are. The escalation program is `run0` (only on systemd 256 or newer), else `pkexec`, else `sudo` (only when stdin is a terminal). The script sets a fixed `PATH` and clears `LD_PRELOAD` and `LD_LIBRARY_PATH`; each program is resolved in the trusted system directories and every argument is single-quoted. It runs before the rest of the plan. The human preview says `these steps run with administrator rights; you will be asked once` (a `note:` line of the human output only; it is not in the plan's `notes`). A privileged action that `depends_on` another action is skipped. `--dry-run` never escalates.
 
 The optional fields are left out when they have no value:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `scope` | string | Where the path may lie: `user-temp` (a direct child of `/tmp`) or `home-trash` (an entry of the home trash). Absent means the home directory, as in M2. |
+| `scope` | string | Where the path may lie: `user-temp` (a direct child of `/tmp`), `home-trash` (an entry of the home trash) or `system` (a root-owned system file, deleted as root in the privileged batch; only `coredumps` uses it). Absent means the home directory, as in M2; always absent on an action without a path. |
 | `depends_on` | number | Index of an earlier action in the same plan. If that action did not succeed, this one is skipped. The `.trashinfo` file of a trashed entry depends on the entry itself. |
 
 ## `apps list`
@@ -262,7 +266,7 @@ The optional fields are left out when they have no value:
 
 ## `doctor`
 
-`data`: `crumbs_version` (string), `distro` (`{ id, id_like, name }`), `sources` (array of `{ source, available, app_count, skipped_reason }`), `escalation` (null, or `{ kind, program, requires_tty }` with `kind` one of `run0`, `pkexec`, `sudo`), `trash` (`{ path, exists, writable }`), `data_dirs` (array of string) and `errors` (array of `{ source, message }`, source failures; the envelope's `errors` also carries config notes). Apps found in the `appimage_dirs` of `config.toml` are counted. Exit 3 on partial failure.
+`data`: `crumbs_version` (string), `distro` (`{ id, id_like, name }`), `sources` (array of `{ source, available, app_count, skipped_reason }`), `escalation` (null, or `{ kind, program, requires_tty }` with `kind` one of `run0`, `pkexec`, `sudo`), `trash` (`{ path, exists, writable }`), `data_dirs` (array of string) and `errors` (array of `{ source, message }`, source failures; the envelope's `errors` also carries config notes). Apps found in the `appimage_dirs` of `config.toml` are counted. Exit 3 on partial failure. The human output ends with `privileged cleanup: available via <kind>`, or `unavailable` when there is no escalation program or only `sudo` without a terminal.
 
 ```json
 {
@@ -361,11 +365,13 @@ Orphans are never `high`:
 - `null` on `--dry-run`, and in every error envelope;
 - otherwise an array aligned with `plans`, one entry per plan: `null` for a plan with no actions, else an ExecReport. When nothing at all is to be done, every entry is `null`.
 
-**ExecReport**: `batch` (string, the history batch ID), `freed` (number, bytes) and `results` (array, one per planned action, same order): `{ action, ok, error, history_id }`. `action` is the planned action's `{ type, path, ... }`; `error` is string or null; `history_id` is the entry ID usable with `restore` (for a command it records the run, and there is nothing to restore).
+**ExecReport**: `batch` (string, the history batch ID), `freed` (number, bytes), `escalation_failed` (boolean) and `results` (array, one per planned action, same order): `{ action, ok, error, history_id }`. `action` is the planned action's `{ type, path, ... }`; `error` is string or null; `history_id` is the entry ID usable with `restore` (for a command it records the run, and there is nothing to restore).
 
 `freed` is the sum of the `size` of every action that succeeded. As in M2 it counts bytes moved to the trash as well as bytes deleted: a trashed item still takes disk space until the trash is emptied. Read it as "removed from where it was", not as "returned to the filesystem". An action skipped because the action it `depends_on` failed has `ok` false and the `error` text `skipped: <path> was not removed`.
 
-Exit 0 when every action succeeded, 3 when some failed.
+`escalation_failed` is `true` when a privileged step never got administrator rights: no escalation program was available, or the prompt was cancelled or denied. Those steps have `ok` false and the `error` `privilege escalation was cancelled or denied` or `no way to get administrator rights (install systemd ≥ 256, polkit or sudo)`. It is `false` for a step that ran and failed, for an action refused before the batch (for example a system file that changed since the scan), and when the privileged run stopped part-way: some steps came back with a result, then none did (the root shell was killed). Then the step it was in has the `error` `the privileged run stopped during this step; it may have partly run`, each later step `not run: the privileged run stopped`, the exit code is 3 (not 5), there are no `manual_commands`, and the `errors` array ends with a `cli` entry `the privileged run stopped before it finished; the step it was in may have partly run, and the steps after it did not run`. Every step is recorded in the history as it ended.
+
+Exit 0 when every action succeeded, 3 when some failed, and 5 when `escalation_failed` is true in any report (see below).
 
 Dry run:
 
@@ -431,7 +437,176 @@ With `--yes` (the plan is as above; its `actions` are omitted here):
 }
 ```
 
-Only AppImage apps can be fully uninstalled in this version. Other sources need `--leftovers-only`; otherwise exit 2 with the error envelope shown earlier. An AppImage whose file fails the safety checks (outside home, protected or excluded, or under a symlinked directory) is refused before anything is planned: exit 1 with `cannot remove <id>: <reason>; use --leftovers-only to remove only its leftovers`.
+### Removing the app itself
+
+How the app itself goes depends on its source:
+
+| Source | Action in the plan |
+|---|---|
+| appimage | `trash` of the AppImage file. |
+| pacman | one `package-remove`. crumbs first simulates `pacman -Rs --print` as the user and plans `pacman -Rn --noconfirm <names>` with the exact package list pacman printed (never `-s`, so nothing outside the preview can go). Dependencies that go with it are in `names` after the app's own package and appear in the human preview as `also removed: ...`. |
+| flatpak, user installation | `user-command`: `flatpak uninstall --user -y --noninteractive <id>`. No administrator rights. |
+| flatpak, system installation | `privileged-command`: `flatpak uninstall --system -y --noninteractive <id>`. |
+| flatpak, custom installation | `privileged-command`: `flatpak uninstall --installation=<name> -y --noninteractive <id>`. |
+| unmanaged | not supported yet: exit 2, `removing unmanaged apps isn't supported yet; use --leftovers-only`. |
+
+`--delete-data` is never passed to Flatpak; `~/.var/app/<id>` is a leftover and is trashed, so it can be restored. The leftovers of a removed pacman or Flatpak app are planned with `depends_on` set to the removal's index: if the removal fails or is denied, they are skipped and stay where they are. A package removal is confirmed afterwards by reading the pacman database again: a package still installed makes the action `ok` false with `still installed`.
+
+Refusals (exit 1): pacman's simulation fails (its message is shown, for example a dependency that would break), or the pacman database lock `db.lck` exists (`pacman is busy (database lock present)`). Names that are not plain package or application names are refused as well.
+
+One run with several apps (`uninstall a b`) still shows one prompt: all privileged actions of all plans share the batch, and each plan gets its own report.
+
+Dry run of `crumbs uninstall firefox` (pacman, trimmed; the fixture's only dependents are `gn` and `libjuice`):
+
+```json
+{
+  "schema_version": 1,
+  "command": "uninstall",
+  "data": {
+    "plans": [
+      {
+        "actions": [
+          {
+            "action": {
+              "args": ["-Rn", "--noconfirm", "firefox", "gn", "libjuice"],
+              "names": ["firefox", "gn", "libjuice"],
+              "program": "pacman",
+              "source": "pacman",
+              "type": "package-remove",
+              "versions": ["159.0.1-1", "0.2385.1-1", "1.7.3-1"]
+            },
+            "reason": "the app itself",
+            "size": 0
+          },
+          {
+            "action": {
+              "path": "/home/user/.cache/firefox",
+              "type": "trash"
+            },
+            "depends_on": 0,
+            "reason": "named after the app name",
+            "size": 4096
+          }
+        ],
+        "app_id": "pacman:firefox",
+        "notes": [
+          "this cannot be undone by crumbs"
+        ],
+        "total_size": 4096
+      }
+    ],
+    "report": null
+  },
+  "errors": []
+}
+```
+
+The human preview of the same plan:
+
+```
+Firefox  pacman:firefox
+ACTION  SIZE     PATH                       REASON
+remove  —        pacman: firefox 159.0.1-1  the app itself
+    - as root: '/usr/bin/pacman' '-Rn' '--noconfirm' 'firefox' 'gn' 'libjuice'
+trash   4.0 KiB  ~/.cache/firefox           named after the app name
+also removed: gn 0.2385.1-1, libjuice 1.7.3-1
+note: this cannot be undone by crumbs
+note: these steps run with administrator rights; you will be asked once
+
+will move 1 item (4.0 KiB) to the trash
+```
+
+A system Flatpak app plans (`flatpak uninstall --system ...`):
+
+```json
+{
+  "action": {
+    "args": ["uninstall", "--system", "-y", "--noninteractive", "com.dosbox_x.DOSBox-X"],
+    "program": "flatpak",
+    "type": "privileged-command"
+  },
+  "reason": "the app itself",
+  "size": 0
+}
+```
+
+### Exit 5 and manual commands
+
+Exit 5 has two paths. In both, nothing that needs administrator rights is changed and the commands to run by hand are listed.
+
+**(a) No escalation program.** None of `run0` (systemd 256 or newer), `pkexec` or a terminal `sudo` is usable. crumbs stops after the preview, before any prompt: nothing is run, no report is produced and no history is written. stderr:
+
+```
+error: no way to get administrator rights
+to do it yourself, run:
+  sudo '/usr/bin/pacman' '-Rn' '--noconfirm' 'firefox' 'gn' 'libjuice'
+```
+
+With `--json`, `data` is `{ "manual_commands": [...], "plans": [...], "report": null }` and the `errors` array ends with a `cli` entry whose `message` is `no way to get administrator rights`. Every privileged action of the plan is listed (a dependent leftover action is not).
+
+**(b) Prompt cancelled or denied.** An escalation program exists and ran, but no step came back with a result (when some did, the run stopped part-way: exit 3, see `escalation_failed` above). The actions that depend on the privileged ones are skipped and the reports have `escalation_failed` true; the attempt is recorded in the history. The human output prints, after the report, the commands to run by hand:
+
+```
+error: administrator rights were not granted; nothing that needs them was changed
+to do it yourself, run:
+  sudo '/usr/bin/pacman' '-Rn' '--noconfirm' 'firefox' 'gn' 'libjuice'
+```
+
+With `--json` the envelope has `data.manual_commands`: an array of those lines, one per privileged action that never got rights, in plan order, each exactly as the batch would run it (program path, every argument single-quoted). It is present only in an exit-5 envelope, for both paths. A dependent that was skipped, and an action crumbs refused before the batch (it changed since the scan, or failed a safety check), are never listed: running them by hand would skip crumbs' checks. In path (b) the `errors` array ends with a `cli` entry carrying the same text as the `error:` line, and `data.report` holds the reports, with `escalation_failed` true. The attempt is recorded in the history with `ok` false. The example below is path (b).
+
+```json
+{
+  "schema_version": 1,
+  "command": "uninstall",
+  "data": {
+    "manual_commands": [
+      "sudo '/usr/bin/pacman' '-Rn' '--noconfirm' 'firefox' 'gn' 'libjuice'"
+    ],
+    "plans": [
+      // ...
+    ],
+    "report": [
+      {
+        "batch": "1794164328456",
+        "escalation_failed": true,
+        "freed": 0,
+        "results": [
+          {
+            "action": {
+              "args": ["-Rn", "--noconfirm", "firefox", "gn", "libjuice"],
+              "names": ["firefox", "gn", "libjuice"],
+              "program": "pacman",
+              "source": "pacman",
+              "type": "package-remove",
+              "versions": ["159.0.1-1", "0.2385.1-1", "1.7.3-1"]
+            },
+            "error": "privilege escalation was cancelled or denied; still installed: firefox, gn, libjuice",
+            "history_id": "1794164328456-0",
+            "ok": false
+          },
+          {
+            "action": {
+              "path": "/home/user/.cache/firefox",
+              "type": "trash"
+            },
+            "error": "skipped: pacman was not removed",
+            "history_id": "1794164328456-1",
+            "ok": false
+          }
+        ]
+      }
+    ]
+  },
+  "errors": [
+    {
+      "source": "cli",
+      "message": "administrator rights were not granted; nothing that needs them was changed"
+    }
+  ]
+}
+```
+
+An AppImage whose file fails the safety checks (outside home, protected or excluded, or under a symlinked directory) is refused before anything is planned: exit 1 with `cannot remove <id>: <reason>; use --leftovers-only to remove only its leftovers`.
 
 With `--leftovers-only`, the plan leaves out what launches or opens the app: its launchers (named by its desktop IDs, or running its AppImage file), icons named after them, and `mimeapps.list` associations.
 
@@ -449,14 +624,18 @@ With `--leftovers-only`, the plan leaves out what launches or opens the app: its
 | `restored` | number | Entries of this batch that a later successful restore put back. |
 | `entries` | array | History entries (below). |
 
-**History entry**: `id` (`<batch>-<index>`), `batch`, `time`, `action` (`trash`, `delete`, `edit-file`, `restore` or `command`; lines written by earlier builds may say `edit_file`, which means the same), `path`, `trashed` (null, or `{ original, files_path, info_path }`), `backup` (string or null), `size` (number), `ok` (boolean), `error` (string or null), `app_id` (string or null), `restores` (string or null), `argv` (array of string; present on `command` entries only) and `kind` (string: `uninstall`, `orphans` or `clean`, the command that made the batch; absent on `restore` entries and on lines written by earlier builds).
+**History entry**: `id` (`<batch>-<index>`), `batch`, `time`, `action` (`trash`, `delete`, `edit-file`, `restore`, `command`, `privileged-command` or `package-remove`; lines written by earlier builds may say `edit_file`, which means the same), `path`, `trashed` (null, or `{ original, files_path, info_path }`), `backup` (string or null), `size` (number), `ok` (boolean), `error` (string or null), `app_id` (string or null), `restores` (string or null), `argv` (array of string; present on `command`, `privileged-command` and `package-remove` entries only), `packages` (array of `[name, version]` pairs; present on `package-remove` entries only) and `kind` (string: `uninstall`, `orphans` or `clean`, the command that made the batch; absent on `restore` entries and on lines written by earlier builds).
 
 - `trashed` is set for `trash` entries, and on `restore` entries it repeats the trash record that was restored.
 - On an `edit-file` entry, `backup` is the copy of the file as it was before the edit.
 - On a `restore` entry, `restores` is the ID of the entry it restored. For a restored `edit-file`, `backup` is the **pre-restore backup**: a copy of the file as it was just before the restore overwrote it. For other entries `backup` is null.
 - On a `command` entry (a `user-command` action that ran), `path` is the program's in-system path (or its bare name when it is not installed), `argv` its arguments, `size` 0, `trashed` and `backup` null. It cannot be restored.
-- Failed and skipped attempts are recorded too (`ok` false, `error` set).
+- A `privileged-command` entry is the same for a command that ran as root: `path` is the program's in-system path, `argv` its arguments, `size` the size the scan estimated (0 when unknown), `trashed` and `backup` null. It cannot be restored.
+- A `package-remove` entry records a package removal that ran as root: `path` is the package manager (`/usr/bin/pacman`), `argv` the exact arguments, `packages` the `[name, version]` of each package that is **gone** afterwards (empty when the removal failed or was denied; after a partial failure only what was removed). `crumbs restore` says `packages cannot be restored by crumbs`. A permanent `delete` of a system file (`coredumps`) is recorded as a `delete` entry.
+- Failed and skipped attempts are recorded too (`ok` false, `error` set). A denied escalation is recorded with `ok` false.
 - A batch made by `clean` has `app_id` null and `kind` `clean` on its entries, so `history` labels it `clean`.
+
+The history file is `history.jsonl` in the `crumbs` directory under the state directory (`~/.local/state/crumbs`). crumbs opens the directory and the file without following symlinks and refuses (an error, nothing written) when either is a symlink. An existing directory or file with looser permissions is tightened to `0700` and `0600` (owner bits are kept), and each tightening is reported as `warning: history: ...` on stderr; a symlinked directory is neither followed nor tightened.
 
 `errors` has a `history` entry when unreadable lines were skipped. Exit 0. Example (a trashed orphan, then a restore of it; one batch of each):
 
@@ -542,7 +721,7 @@ Selectors are batch IDs, entry IDs or absolute original paths. `data`: `outcomes
 | `ok` | boolean | |
 | `error` | string or null | For example `already restored`, `no matching history entry`. |
 
-A batch selector restores the batch's successful `trash` and `edit-file` entries; `delete` and `command` entries are skipped, since nothing of them can be put back (an entry ID names one anyway, and its outcome says `permanently deleted; cannot be restored` or `commands cannot be undone`). A path selector names the newest successful trash entry for that path that has not been restored yet. `--dry-run` checks and reports without changing anything. Exit 0 when every outcome is `ok`; 2 when no selector matched any history entry (every outcome has an empty `entry_id`); otherwise 3.
+A batch selector restores the batch's successful `trash` and `edit-file` entries; `delete`, `command`, `privileged-command` and `package-remove` entries are skipped, since nothing of them can be put back (an entry ID names one anyway, and its outcome says `permanently deleted; cannot be restored`, `commands cannot be undone` or `packages cannot be restored by crumbs; reinstall with: pacman -S <app> && pacman -S --asdeps <deps>`, where the app is the one `app_id` names and the rest were removed with it; a removal that failed part-way still gives the commands for what it removed, prefixed with `the original removal only partly ran; `). A path selector names the newest successful trash entry for that path that has not been restored yet. `--dry-run` checks and reports without changing anything. Exit 0 when every outcome is `ok`; 2 when no selector matched any history entry (every outcome has an empty `entry_id`); otherwise 3.
 
 ```json
 {
@@ -570,21 +749,22 @@ A batch selector restores the batch's successful `trash` and `edit-file` entries
 
 ## `scan`
 
-`crumbs scan [--category <name>]... [--details] [--user] [--json]` is strictly read-only: it never changes a file and never writes history. `--system` is not available yet: exit 2 with `system cleanup needs privileged support (coming in a later version)` (under `--json`, an envelope with `data: null` and a `cli` error).
+`crumbs scan [--category <name>]... [--details] [--user] [--json]` is strictly read-only: it never changes a file and never writes history. `--system` scans the system categories instead (also read-only, no administrator rights needed; naming a system category with `--category` implies it). `--user --system` exits 2 with `use either --user or --system`, and so does a named category of the other kind (`category 'cache' is a user category and cannot be used with --system`); under `--json` that is an envelope with `data: null` and a `cli` error. Under `--json` a category that cannot run here has an `unavailable` reason; the human table shows `unavailable (<reason>)` in its note column.
 
-`data`: `categories`, an array of **CategoryReport**, one per listed category in this fixed order: `cache`, `thumbnails`, `trash`, `temp`, `browser-cache`, `dev-cache`, `flatpak-unused`, `appimage-old`, `logs`.
+`data`: `categories`, an array of **CategoryReport**, one per listed category in this fixed order. The nine user categories: `cache`, `thumbnails`, `trash`, `temp`, `browser-cache`, `dev-cache`, `flatpak-unused`, `appimage-old`, `logs`. The six system categories, after them: `pkg-cache`, `orphan-pkgs`, `journal`, `coredumps`, `system-temp`, `flatpak-unused-system`.
 
-- With no `--category`, all nine are listed. Categories switched off in `categories_off` (default: `dev-cache`) are listed with `skipped: true`, an empty `items` and `total` 0, and are not scanned.
+- With no `--category`, the nine user categories are listed; with `--system`, the six system ones. Categories switched off in `categories_off` (default: `dev-cache`) are listed with `skipped: true`, an empty `items` and `total` 0, and are not scanned.
 - With `--category`, exactly the named categories are listed and scanned, even ones switched off in the config.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `category` | string | One of the nine names above. |
+| `category` | string | One of the fifteen names above. |
 | `items` | array | BloatItems, largest first. |
 | `total` | number | Sum of the known item sizes, in bytes. |
 | `unknown_sizes` | number | Items whose size is unknown (`size` null). The real total is larger. |
 | `error` | string or null | Set when this category's scanner failed. `items` is then empty. |
 | `skipped` | boolean | `true` for a category that is switched off and was not named: it was not scanned. |
+| `unavailable` | string | Present only when the category cannot run on this system (for example `pacman not installed`). `items` is then empty and `error` null; this is not a failure and does not change the exit code. |
 
 **BloatItem**
 
@@ -595,14 +775,25 @@ A batch selector restores the batch's successful `trash` and `edit-file` entries
 | `label` | string | What to show: a name, a display path, or for a command what it does. |
 | `size` | number or null | Bytes. `null` when unknown. |
 | `rebuildable` | boolean | The owner recreates it on demand (caches). |
-| `preselected` | boolean | Whether `clean` includes it by default. `false` for an item held back (its app is running, see `note`) and for `flatpak-unused` and `trash` items, which `clean` includes only when their category is named. |
+| `preselected` | boolean | Whether `clean` includes it by default. `false` for an item held back (its app is running, see `note`) and for `flatpak-unused`, `trash`, `orphan-pkgs` and `flatpak-unused-system` items, which `clean` includes only when their category is named. |
 | `note` | string or null | Why it is held back (`Firefox is running`), or what to know (`deleted permanently (temporary file)`, `decided by flatpak`). |
-| `action` | string or object | `"trash"`, `"delete"`, or `{ "command": { "program", "args" } }`. |
-| `scope` | string | `home`, `user-temp` or `home-trash` (see the plan action's `scope`). Always present here. |
+| `action` | string or object | `"trash"`, `"delete"`, `{ "command": { "program", "args" } }` (runs as the user) or `{ "privileged": { "program", "args" } }` (runs as root; `program` is a bare name that crumbs resolves in the trusted directories). |
+| `scope` | string | `home`, `user-temp`, `home-trash` or `system` (see the plan action's `scope`). Always present here. |
 | `extra_paths` | array of string | Further paths removed together with the item, for example the `.trashinfo` file of a trashed entry. Paths only: the safety fingerprints are internal and not shown. |
 | `app_id` | string or null | The app the item belongs to, when exactly one installed app matches. |
 
 The internal fingerprint of an item is never serialized.
+
+**System categories.** `scan --system` reads only: the scanners run as the user and nothing is escalated.
+
+| Category | Item | Action | Notes |
+|---|---|---|---|
+| `pkg-cache` | one item, `package cache (keep N versions)` | `privileged`: `paccache -rkN` | `N` is `pkg_cache_keep` (default 2); the size is `paccache -dkN`'s. Without `paccache` (pacman-contrib), `pacman -Sc --noconfirm` with an unknown size and a note. `unavailable` without pacman. |
+| `orphan-pkgs` | one item, `N orphaned packages`, the names in `note` | `privileged`: `pacman -Rn --noconfirm <names>` | Opt-in. The names are the closure of `pacman -Rs --print` over `pacman -Qdtq`, so exactly what was simulated goes. |
+| `journal` | one item, `systemd journal` | `privileged`: `journalctl --vacuum-size=<journal_max>` | Listed only when the journal is larger than `journal_max` (default `500M`); the size is the excess. |
+| `coredumps` | one item per `core.*` file in `/var/lib/systemd/coredump` | `delete` with `scope` `system` (run as `rm -f -- <path>` in the batch) | Regular files only, with every directory from `/` root-owned and not writable by others. `unavailable` without the directory. |
+| `system-temp` | one item, `stale system temporary files` | `privileged`: `systemd-tmpfiles --clean --prefix=/tmp --prefix=/var/tmp` | Size unknown: systemd decides by its age rules. |
+| `flatpak-unused-system` | one item, `unused Flatpak runtimes (system)` | `privileged`: `flatpak uninstall --system --unused -y --noninteractive` | Opt-in. Size unknown. |
 
 `errors` has one entry per failed scanner (`source` is the category name), then one per failed app source, then config notes. Exit 0, or 3 when a scanner failed (a failed app source alone does not change the exit code). Example (the fixture has a user Flatpak runtime, an old log, an old file in `/tmp` and two AppImage versions):
 
@@ -752,6 +943,114 @@ The internal fingerprint of an item is never serialized.
 }
 ```
 
+`scan --system --json` (a fixture where `paccache`, `pacman`, `journalctl`, `systemd-tmpfiles` and `flatpak` are stubs; the first four categories are trimmed to their first items):
+
+```json
+{
+  "schema_version": 1,
+  "command": "scan",
+  "data": {
+    "categories": [
+      {
+        "category": "pkg-cache",
+        "items": [
+          {
+            "category": "pkg-cache",
+            "path": null,
+            "label": "package cache (keep 2 versions)",
+            "size": 90355794,
+            "rebuildable": true,
+            "preselected": true,
+            "note": null,
+            "action": {
+              "privileged": {
+                "program": "paccache",
+                "args": ["-rk2"]
+              }
+            },
+            "scope": "system",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 90355794,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "orphan-pkgs",
+        "items": [
+          {
+            "category": "orphan-pkgs",
+            "path": null,
+            "label": "2 orphaned packages",
+            "size": 8000000,
+            "rebuildable": false,
+            "preselected": false,
+            "note": "orph1, orph2",
+            "action": {
+              "privileged": {
+                "program": "pacman",
+                "args": ["-Rn", "--noconfirm", "orph1", "orph2"]
+              }
+            },
+            "scope": "system",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 8000000,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      // journal ...
+      {
+        "category": "coredumps",
+        "items": [
+          {
+            "category": "coredumps",
+            "path": "/var/lib/systemd/coredump/core.foo.1000.abc.1.zst",
+            "label": "core.foo.1000.abc.1.zst",
+            "size": 12288,
+            "rebuildable": false,
+            "preselected": true,
+            "note": null,
+            "action": "delete",
+            "scope": "system",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 12288,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      // system-temp, flatpak-unused-system ...
+    ]
+  },
+  "errors": []
+}
+```
+
+On a system without pacman, `crumbs scan --category pkg-cache --json` lists the category as unavailable (not an error, exit 0):
+
+```json
+{
+  "category": "pkg-cache",
+  "items": [],
+  "total": 0,
+  "unknown_sizes": 0,
+  "error": null,
+  "skipped": false,
+  "unavailable": "pacman not installed"
+}
+```
+
+and the table says `unavailable (pacman not installed)` in the note column.
+
 When a scanner fails, its category has `error` set and the exit code is 3. Here `flatpak` itself failed, so the Flatpak app source is reported as well:
 
 ```json
@@ -776,13 +1075,19 @@ with these envelope `errors`:
 
 ## `clean`
 
-`crumbs clean [<category>...] [-i] [--dry-run] [--yes] [--permanent] [--force] [--json] [--user]` prints the same `{ plans, report }` shape as `uninstall`, with `command` `clean`; it always has exactly one plan, with `app_id` null, or none at all when there is nothing to do. `--json` needs `--yes` or `--dry-run`, as for `uninstall`. `--system` exits 2 with the same message and error envelope as `scan`, except that `data` is `{ "plans": [], "report": null }`.
+`crumbs clean [<category>...] [-i] [--dry-run] [--yes] [--permanent] [--force] [--json] [--user | --system]` prints the same `{ plans, report }` shape as `uninstall`, with `command` `clean`; it always has exactly one plan, with `app_id` null, or none at all when there is nothing to do. `--json` needs `--yes` or `--dry-run`, as for `uninstall`.
+
+- Without `--system`, `clean` cleans the user categories. With `--system` it cleans the system categories instead; naming a system category implies it, so `crumbs clean journal` works.
+- `--user --system`, or a named category of the other kind, exits 2 with the same message as `scan` (`use either --user or --system`, `category 'cache' is a user category and cannot be used with --system`) and an error envelope whose `data` is `{ "plans": [], "report": null }`.
+- System items become `privileged-command` actions, or (`coredumps`) `delete` actions with `scope` `system`; `package-remove` is planned only by `uninstall`. They run in the one privileged batch described under Plan, so a run asks once. A system `clean` also records `kind` `clean` in the history.
+- The system items preselected are those of `pkg-cache`, `journal`, `coredumps` and `system-temp`. `orphan-pkgs` and `flatpak-unused-system` are opt-in and are planned only when named (or ticked with `-i`).
+- If the escalation fails, the run exits 5 with `data.manual_commands`, as for `uninstall`.
 
 Which items are planned:
 
 - With no category, every enabled category is scanned (all but those in `categories_off`). Naming categories scans exactly those, even ones switched off in the config.
 - The items cleaned are the ones with `preselected` true. An item held back (its app is running) is left out and listed nowhere in the JSON. With `-i` you pick from all items instead.
-- `flatpak-unused` and `trash` are opt-in: their items are never preselected, so they are planned only when the category is named (or ticked with `-i`). A plain `crumbs clean` never empties the trash.
+- `flatpak-unused` and `trash` are opt-in: their items are never preselected, so they are planned only when the category is named (or ticked with `-i`). A plain `crumbs clean` never empties the trash. The same holds for `orphan-pkgs` and `flatpak-unused-system`.
 - `trash` and `temp` items are always permanent deletes (`delete` actions with `scope` `home-trash` and `user-temp`, and the plan's `notes` say so). With `--permanent`, trash items of the other categories become `delete` too.
 - When any action is a `trash`, the plan's `notes` include `space is freed when the trash is emptied (or use --permanent)`.
 
@@ -792,7 +1097,85 @@ Refusals:
 - Nothing chosen (nothing found, or everything held back): exit 0 and `data` is `{ "plans": [], "report": [] }`, or `{ "plans": [], "report": null }` with `--dry-run`.
 - Any other refusal or failure uses the error envelope described at the top, with `report` null.
 
-Exit 0 when every action succeeded, 3 when some failed.
+Exit 0 when every action succeeded, 3 when some failed, 5 when administrator rights were needed and not available.
+
+Dry run of `crumbs clean --system` (the fixture of the `scan --system` example without `pacman` and `paccache`; the `notes` are empty because the administrator-rights notice is a line of the human preview only):
+
+```json
+{
+  "schema_version": 1,
+  "command": "clean",
+  "data": {
+    "plans": [
+      {
+        "actions": [
+          {
+            "action": {
+              "args": ["--vacuum-size=500M"],
+              "program": "journalctl",
+              "type": "privileged-command"
+            },
+            "reason": "vacuums to 500M",
+            "size": 229743002
+          },
+          {
+            "action": {
+              "path": "/var/lib/systemd/coredump/core.foo.1000.abc.1.zst",
+              "type": "delete"
+            },
+            "reason": "core.foo.1000.abc.1.zst",
+            "scope": "system",
+            "size": 12288
+          },
+          {
+            "action": {
+              "args": ["--clean", "--prefix=/tmp", "--prefix=/var/tmp"],
+              "program": "systemd-tmpfiles",
+              "type": "privileged-command"
+            },
+            "reason": "removes files past the tmpfiles.d age limits under /tmp and /var/tmp",
+            "size": 0
+          }
+        ],
+        "app_id": null,
+        "notes": [],
+        "total_size": 229755290
+      }
+    ],
+    "report": null
+  },
+  "errors": []
+}
+```
+
+The human preview of that plan shows each privileged command exactly as the batch will run it, then the consent note:
+
+```
+Clean
+ACTION  SIZE      PATH                                                      REASON
+run     —         journalctl --vacuum-size=500M                             vacuums to 500M
+    - as root: '/usr/bin/journalctl' '--vacuum-size=500M'
+delete  12.0 KiB  /var/lib/systemd/coredump/core.foo.1000.abc.1.zst         core.foo.1000.abc.1.zst
+    - as root: '/usr/bin/rm' '-f' '--' '/var/lib/systemd/coredump/core.foo.1000.abc.1.zst'
+run     —         systemd-tmpfiles --clean --prefix=/tmp --prefix=/var/tmp  removes files past the tmpfiles.d age limits under /tmp and /var/tmp
+    - as root: '/usr/bin/systemd-tmpfiles' '--clean' '--prefix=/tmp' '--prefix=/var/tmp'
+note: these steps run with administrator rights; you will be asked once
+
+will permanently delete 1 item (12.0 KiB)
+will run 2 commands
+```
+
+Denied escalation, `crumbs clean --system --yes --json`, exit 5: `data.manual_commands` is
+
+```json
+[
+  "sudo '/usr/bin/journalctl' '--vacuum-size=500M'",
+  "sudo '/usr/bin/rm' '-f' '--' '/var/lib/systemd/coredump/core.foo.1000.abc.1.zst'",
+  "sudo '/usr/bin/systemd-tmpfiles' '--clean' '--prefix=/tmp' '--prefix=/var/tmp'"
+]
+```
+
+and the report has `escalation_failed` true.
 
 Dry run of `crumbs clean trash temp flatpak-unused`:
 

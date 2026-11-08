@@ -1,5 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+// A release binary refuses CRUMBS_ROOT, so these tests would fail; before
+// that refusal they ran against the real root and home.
+#[cfg(not(debug_assertions))]
+compile_error!("crumbs CLI tests must run in a debug build; they rely on CRUMBS_ROOT");
+
 use assert_cmd::Command;
 use crumbs_core::testing::FixtureTree;
 use predicates::prelude::*;
@@ -41,6 +46,9 @@ fn crumbs(t: &FixtureTree) -> Command {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("crumbs");
     cmd.env("CRUMBS_ROOT", t.dir.path());
     cmd.env_remove("NO_COLOR");
+    // Only a test that asks for the fake privileged runner gets one.
+    cmd.env_remove("CRUMBS_TEST_PRIV_RUNNER");
+    cmd.env_remove("CRUMBS_ALLOW_REAL_ESCALATION");
     cmd
 }
 
@@ -175,9 +183,8 @@ fn doctor_human() {
         .assert()
         .code(0)
         .stdout(predicate::str::contains("✓ pacman"))
-        .stdout(predicate::str::contains(
-            "none (privileged cleanup unavailable)",
-        ));
+        .stdout(predicate::str::contains("Escalation: none\n"))
+        .stdout(predicate::str::contains("privileged cleanup: unavailable"));
 }
 
 #[test]
@@ -456,17 +463,17 @@ fn uninstall_dry_run_changes_nothing() {
 }
 
 #[test]
-fn uninstall_pacman_requires_leftovers_only_exit_2() {
+fn uninstall_unmanaged_requires_leftovers_only_exit_2() {
     let t = fixture(FLATPAK_OK);
-    t.write("/home/user/.cache/firefox/blob", b"x");
+    t.write("/home/user/.cache/foo/blob", b"x");
     crumbs(&t)
-        .args(["uninstall", "firefox", "--yes"])
+        .args(["uninstall", "Zed Foo", "--yes"])
         .assert()
         .code(2)
         .stderr(predicate::str::contains(
-            "removing pacman apps needs privileged support (coming in a later version); use --leftovers-only",
+            "removing unmanaged apps isn't supported yet; use --leftovers-only",
         ));
-    assert!(real(&t, "/home/user/.cache/firefox/blob").exists());
+    assert!(real(&t, "/home/user/.cache/foo/blob").exists());
 }
 
 #[test]
@@ -1441,20 +1448,6 @@ fn scan_scanner_error_exit_3() {
 }
 
 #[test]
-fn scan_system_exit_2() {
-    let t = scan_fixture(FLATPAK_OK);
-    crumbs(&t)
-        .args(["scan", "--system"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains(
-            "system cleanup needs privileged support (coming in a later version)",
-        ));
-    let v = json_error(&t, &["scan", "--system", "--json"], 2);
-    assert_eq!(v["command"], "scan");
-}
-
-#[test]
 fn scan_writes_nothing() {
     let t = scan_fixture(FLATPAK_OK);
     let before = tree_state(&t);
@@ -1484,8 +1477,8 @@ fn scan_sanitises_labels() {
 // ---- clean (only ever inside the fixture) ----
 
 /// Lists apps and runtimes; `uninstall` appends its args to
-/// `$CRUMBS_ROOT/flatpak-args` instead of removing anything.
-const FLATPAK_RECORD: &str = "#!/bin/sh\nif [ \"$1\" = uninstall ]; then echo \"$@\" >> \"$CRUMBS_ROOT/flatpak-args\"; exit 0; fi\nprintf 'app.xemu.xemu\\txemu\\t0.8.136\\tuser\\t34.4 MB\\n'\n";
+/// `<root>/flatpak-args` (the child gets no `CRUMBS_ROOT`) instead of removing anything.
+const FLATPAK_RECORD: &str = "#!/bin/sh\nif [ \"$1\" = uninstall ]; then echo \"$@\" >> \"$(dirname \"$0\")/../../flatpak-args\"; exit 0; fi\nprintf 'app.xemu.xemu\\txemu\\t0.8.136\\tuser\\t34.4 MB\\n'\n";
 /// The app listing works; only the runtime listing (the `flatpak-unused`
 /// scanner) fails.
 const FLATPAK_RUNTIME_FAIL: &str = "#!/bin/sh\ncase \"$*\" in *--runtime*) echo boom >&2; exit 1;; esac\nprintf 'app.xemu.xemu\\txemu\\t0.8.136\\tuser\\t34.4 MB\\n'\n";
@@ -1783,21 +1776,6 @@ fn clean_restore_round_trip() {
 }
 
 #[test]
-fn clean_system_exit_2() {
-    let t = scan_fixture(FLATPAK_OK);
-    crumbs(&t)
-        .args(["clean", "--system", "--yes"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains(
-            "system cleanup needs privileged support (coming in a later version)",
-        ));
-    let v = json_error(&t, &["clean", "--system", "--json", "--yes"], 2);
-    assert_eq!(v["command"], "clean");
-    assert!(real(&t, "/home/user/.cache/foo/blob").exists());
-}
-
-#[test]
 fn clean_off_category_needs_naming() {
     let t = scan_fixture(FLATPAK_OK);
     let (code, stdout, stderr) = run_clean(&t, &["--yes"]);
@@ -2087,4 +2065,897 @@ fn history_sanitises_label() {
     assert_eq!(out.status.code(), Some(0));
     assert_clean(&out);
     assert_shows_replacement(&out);
+}
+
+// ---- full uninstall with one privileged batch (only ever inside the fixture) ----
+
+/// A fake `pacman`: the simulation (`-Rs --print ...`) prints firefox and
+/// two dependencies; the removal (`-Rn --noconfirm <names>`) logs its
+/// arguments to `<root>/pacman-args` and deletes those packages' database
+/// entries. It runs as the test user, inside the fixture.
+const PACMAN_OK: &str = "#!/bin/sh\nroot=\"$(dirname \"$0\")/../..\"\ncase \"$1\" in\n-Rs) printf 'firefox 159.0.1-1\\ngn 0.2385.1-1\\nlibjuice 1.7.3-1\\n' ;;\n-Rn) echo \"$@\" >> \"$root/pacman-args\"; shift 2; for p in \"$@\"; do rm -rf \"$root\"/var/lib/pacman/local/\"$p\"-*; done ;;\n*) exit 9 ;;\nesac\n";
+/// The simulation refuses, with an escape byte in its message.
+const PACMAN_REFUSE: &str = "#!/bin/sh\nprintf ':: removing firefox breaks dependency \\033[1mfirefox\\033[0m required by foo\\n'\necho 'error: failed to prepare transaction (could not satisfy dependencies)' >&2\nexit 1\n";
+/// Lists the fixture's Flatpak apps; `uninstall` logs its arguments to
+/// `<root>/flatpak-args` instead of removing anything.
+const FLATPAK_APPS_RECORD: &str = "#!/bin/sh\nif [ \"$1\" = uninstall ]; then echo \"$@\" >> \"$(dirname \"$0\")/../../flatpak-args\"; exit 0; fi\nprintf 'app.xemu.xemu\\txemu\\t0.8.136\\tuser\\t34.4 MB\\ncom.dosbox_x.DOSBox-X\\tDOSBox-X\\t2026.10.01\\tsystem\\t51.4 MB\\n'\n";
+
+fn pacman_fixture(pacman: &str) -> FixtureTree {
+    let t = fixture(FLATPAK_OK);
+    t.pacman_pkg("gn", "0.2385.1-1", Some(1_000), &["usr/bin/gn"]);
+    t.pacman_pkg("libjuice", "1.7.3-1", Some(1_000), &["usr/lib/libjuice.so"]);
+    t.write_exec("/usr/bin/pacman", pacman.as_bytes());
+    t.write("/home/user/.cache/firefox/blob", &[b'x'; 4000]);
+    t
+}
+
+fn run_out(cmd: &mut Command) -> (i32, String, String) {
+    let out = cmd.output().unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+fn pkg_present(t: &FixtureTree, dir: &str) -> bool {
+    real(t, &format!("/var/lib/pacman/local/{dir}/desc")).exists()
+}
+
+const MANUAL_PACMAN: &str = "sudo '/usr/bin/pacman' '-Rn' '--noconfirm' 'firefox' 'gn' 'libjuice'";
+
+#[test]
+fn uninstall_pacman_dry_run_shows_also_removed() {
+    let t = pacman_fixture(PACMAN_OK);
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["uninstall", "firefox", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("remove"))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert!(
+        row.contains("—") && row.contains("pacman: firefox 159.0.1-1"),
+        "{row}"
+    );
+    assert!(
+        stdout.contains("also removed: gn 0.2385.1-1, libjuice 1.7.3-1"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("~/.cache/firefox"), "{stdout}");
+    assert!(
+        stdout.contains("note: these steps run with administrator rights; you will be asked once"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("note: this cannot be undone by crumbs"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("leftovers only"), "{stdout}");
+    assert!(pkg_present(&t, "firefox-159.0.1-1"));
+    assert!(real(&t, "/home/user/.cache/firefox/blob").exists());
+    assert!(!real(&t, "/pacman-args").exists());
+    // JSON: the package action leads the plan; leftovers depend on it.
+    let v = stdout_json(crumbs(&t).args(["uninstall", "firefox", "--dry-run", "--json"]));
+    let actions = v["data"]["plans"][0]["actions"].as_array().unwrap();
+    assert_eq!(actions[0]["action"]["type"], "package-remove", "{v}");
+    assert_eq!(
+        actions[0]["action"]["args"],
+        serde_json::json!(["-Rn", "--noconfirm", "firefox", "gn", "libjuice"])
+    );
+    assert!(actions.len() > 1, "{v}");
+    assert!(actions[1..].iter().all(|a| a["depends_on"] == 0), "{v}");
+}
+
+#[test]
+fn uninstall_pacman_executes_batch_and_trashes_leftovers() {
+    let t = pacman_fixture(PACMAN_OK);
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "sh").args([
+        "uninstall",
+        "firefox",
+        "--yes",
+    ]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(real(&t, "/pacman-args")).unwrap(),
+        "-Rn --noconfirm firefox gn libjuice\n"
+    );
+    assert!(!pkg_present(&t, "firefox-159.0.1-1"));
+    assert!(!pkg_present(&t, "gn-0.2385.1-1"));
+    assert!(pkg_present(&t, "coreutils-9.5-1"));
+    assert!(stdout.contains("✓ removed pacman: firefox"), "{stdout}");
+    assert!(stdout.contains("✓ trashed ~/.cache/firefox"), "{stdout}");
+    assert!(trash_files(&t).contains(&"firefox".to_string()));
+    let h = history_json(&t);
+    let text = h.to_string();
+    assert!(text.contains("package-remove"), "{h}");
+}
+
+#[test]
+fn uninstall_pacman_refused_by_simulation_exit_1() {
+    let t = pacman_fixture(PACMAN_REFUSE);
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "sh").args([
+        "uninstall",
+        "firefox",
+        "--yes",
+    ]));
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(stderr.contains("breaks dependency"), "{stderr}");
+    assert!(stderr.contains("failed to prepare transaction"), "{stderr}");
+    assert!(!stderr.contains('\u{1b}'), "{stderr:?}");
+    assert!(pkg_present(&t, "firefox-159.0.1-1"));
+    assert!(real(&t, "/home/user/.cache/firefox/blob").exists());
+    let v = json_error(&t, &["uninstall", "firefox", "--json", "--yes"], 1);
+    let msg = v["errors"].as_array().unwrap().last().unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(msg.contains("breaks dependency"), "{msg}");
+}
+
+#[test]
+fn uninstall_pacman_busy_exit_1() {
+    let t = pacman_fixture(PACMAN_OK);
+    t.write("/var/lib/pacman/db.lck", b"");
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "sh").args([
+        "uninstall",
+        "firefox",
+        "--yes",
+    ]));
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("pacman is busy (database lock present)"),
+        "{stderr}"
+    );
+    assert!(!real(&t, "/pacman-args").exists());
+    assert!(real(&t, "/home/user/.cache/firefox/blob").exists());
+    json_error(&t, &["uninstall", "firefox", "--json", "--yes"], 1);
+}
+
+#[test]
+fn uninstall_without_escalation_exit_5_prints_manual_commands() {
+    let t = pacman_fixture(PACMAN_OK);
+    // No fake runner: a debug build never escalates for real.
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["uninstall", "firefox", "--yes"]));
+    assert_eq!(code, 5, "{stdout}{stderr}");
+    assert!(stdout.contains("pacman: firefox 159.0.1-1"), "{stdout}");
+    assert!(
+        stderr.contains("no way to get administrator rights"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(MANUAL_PACMAN), "{stderr}");
+    assert!(!real(&t, "/pacman-args").exists());
+    assert!(pkg_present(&t, "firefox-159.0.1-1"));
+    assert!(real(&t, "/home/user/.cache/firefox/blob").exists());
+    assert!(!real(&t, "/home/user/.local/state/crumbs/history.jsonl").exists());
+    // A preview needs no escalation.
+    crumbs(&t)
+        .args(["uninstall", "firefox", "--dry-run"])
+        .assert()
+        .code(0);
+    let v = json_error(&t, &["uninstall", "firefox", "--json", "--yes"], 5);
+    assert_eq!(
+        v["data"]["manual_commands"],
+        serde_json::json!([MANUAL_PACMAN]),
+        "{v}"
+    );
+}
+
+#[test]
+fn uninstall_escalation_denied_exit_5_leftovers_untouched() {
+    let t = pacman_fixture(PACMAN_OK);
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "deny").args([
+        "uninstall",
+        "firefox",
+        "--yes",
+    ]));
+    assert_eq!(code, 5, "{stdout}{stderr}");
+    assert!(
+        stderr
+            .contains("administrator rights were not granted; nothing that needs them was changed"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(MANUAL_PACMAN), "{stderr}");
+    assert!(stdout.contains("✗ pacman: firefox"), "{stdout}");
+    assert!(pkg_present(&t, "firefox-159.0.1-1"));
+    assert!(real(&t, "/home/user/.cache/firefox/blob").exists());
+    assert!(trash_files(&t).is_empty());
+    // The attempt is recorded.
+    let h = history_json(&t);
+    assert!(h.to_string().contains("package-remove"), "{h}");
+    let out = crumbs(&t)
+        .env("CRUMBS_TEST_PRIV_RUNNER", "deny")
+        .args(["uninstall", "firefox", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(5));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["data"]["manual_commands"],
+        serde_json::json!([MANUAL_PACMAN]),
+        "{v}"
+    );
+    assert_eq!(v["data"]["report"][0]["escalation_failed"], true, "{v}");
+    assert!(
+        v["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["source"] == "cli"),
+        "{v}"
+    );
+}
+
+#[test]
+fn uninstall_flatpak_user_runs_command() {
+    let t = fixture(FLATPAK_APPS_RECORD);
+    t.write("/home/user/.var/app/app.xemu.xemu/config/x", b"x");
+    let (code, stdout, stderr) =
+        run_out(crumbs(&t).args(["uninstall", "app.xemu.xemu", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("flatpak uninstall --user -y --noninteractive app.xemu.xemu"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("administrator rights"), "{stdout}");
+    // No privileged action: no escalation is needed.
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["uninstall", "app.xemu.xemu", "--yes"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(real(&t, "/flatpak-args")).unwrap(),
+        "uninstall --user -y --noninteractive app.xemu.xemu\n"
+    );
+    assert!(!real(&t, "/home/user/.var/app/app.xemu.xemu").exists());
+    assert!(trash_files(&t).contains(&"app.xemu.xemu".to_string()));
+}
+
+#[test]
+fn uninstall_flatpak_system_uses_batch() {
+    let t = fixture(FLATPAK_APPS_RECORD);
+    t.write("/home/user/.var/app/com.dosbox_x.DOSBox-X/config/x", b"x");
+    let manual = "sudo '/usr/bin/flatpak' 'uninstall' '--system' '-y' '--noninteractive' 'com.dosbox_x.DOSBox-X'";
+    let (code, _, stderr) = run_out(crumbs(&t).args(["uninstall", "DOSBox-X", "--yes"]));
+    assert_eq!(code, 5, "{stderr}");
+    assert!(stderr.contains(manual), "{stderr}");
+    assert!(!real(&t, "/flatpak-args").exists());
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "sh").args([
+        "uninstall",
+        "DOSBox-X",
+        "--yes",
+    ]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("note: these steps run with administrator rights; you will be asked once"),
+        "{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(real(&t, "/flatpak-args")).unwrap(),
+        "uninstall --system -y --noninteractive com.dosbox_x.DOSBox-X\n"
+    );
+    assert!(!real(&t, "/home/user/.var/app/com.dosbox_x.DOSBox-X").exists());
+}
+
+#[test]
+fn doctor_shows_privileged_availability() {
+    let t = fixture(FLATPAK_OK);
+    crumbs(&t)
+        .arg("doctor")
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("privileged cleanup: unavailable"));
+    // Only detected: doctor never runs the escalation program.
+    t.write_exec("/usr/bin/run0", b"#!/bin/sh\nexit 99\n");
+    t.write_exec(
+        "/usr/bin/systemctl",
+        b"#!/bin/sh\necho 'systemd 261 (261.3-1-manjaro)'\n",
+    );
+    crumbs(&t)
+        .arg("doctor")
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains(
+            "privileged cleanup: available via run0",
+        ));
+}
+
+/// Like [`PACMAN_OK`], but any other package simulates as just itself.
+const PACMAN_MULTI: &str = "#!/bin/sh\nroot=\"$(dirname \"$0\")/../..\"\ncase \"$1\" in\n-Rs) if [ \"$5\" = firefox ]; then printf 'firefox 159.0.1-1\\ngn 0.2385.1-1\\nlibjuice 1.7.3-1\\n'; else printf '%s 1.0-1\\n' \"$5\"; fi ;;\n-Rn) echo \"$@\" >> \"$root/pacman-args\"; shift 2; for p in \"$@\"; do rm -rf \"$root\"/var/lib/pacman/local/\"$p\"-*; done ;;\n*) exit 9 ;;\nesac\n";
+
+fn two_pacman_apps() -> FixtureTree {
+    let t = pacman_fixture(PACMAN_MULTI);
+    t.pacman_pkg(
+        "kate",
+        "1.0-1",
+        Some(1_000),
+        &["usr/bin/kate", "usr/share/applications/kate.desktop"],
+    );
+    t.write_exec("/usr/bin/kate", b"");
+    t.desktop(
+        "/usr/share/applications/kate.desktop",
+        "[Desktop Entry]\nType=Application\nName=Kate\nExec=/usr/bin/kate\n",
+    );
+    t.write("/home/user/.cache/kate/blob", b"k");
+    t
+}
+
+#[test]
+fn uninstall_two_apps_asks_once() {
+    let t = two_pacman_apps();
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "sh").args([
+        "uninstall",
+        "firefox",
+        "kate",
+        "--yes",
+    ]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        stderr.matches("crumbs-test: privileged batch").count(),
+        1,
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(real(&t, "/pacman-args")).unwrap(),
+        "-Rn --noconfirm firefox gn libjuice\n-Rn --noconfirm kate\n"
+    );
+    assert!(stdout.contains("✓ removed pacman: kate"), "{stdout}");
+    assert!(!real(&t, "/home/user/.cache/kate").exists());
+    // Each app keeps its own batch.
+    let h = history_json(&t);
+    assert_eq!(h["data"]["batches"].as_array().unwrap().len(), 2, "{h}");
+}
+
+#[test]
+fn uninstall_two_apps_denied_fails_both() {
+    let t = two_pacman_apps();
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "deny").args([
+        "uninstall",
+        "firefox",
+        "kate",
+        "--yes",
+    ]));
+    assert_eq!(code, 5, "{stdout}{stderr}");
+    for app in ["firefox", "kate"] {
+        assert!(
+            stdout.contains(&format!(
+                "✗ pacman: {app}: privilege escalation was cancelled or denied"
+            )),
+            "{stdout}"
+        );
+    }
+    assert!(!stdout.contains("no way to get"), "{stdout}");
+    assert!(
+        stderr.contains("sudo '/usr/bin/pacman' '-Rn' '--noconfirm' 'kate'"),
+        "{stderr}"
+    );
+    assert!(real(&t, "/home/user/.cache/kate/blob").exists());
+}
+
+#[test]
+fn preview_shows_root_command_lines() {
+    let t = fixture(FLATPAK_APPS_RECORD);
+    let (code, stdout, _) = run_out(crumbs(&t).args(["uninstall", "DOSBox-X", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains(
+            "    - as root: '/usr/bin/flatpak' 'uninstall' '--system' '-y' '--noninteractive' 'com.dosbox_x.DOSBox-X'"
+        ),
+        "{stdout}"
+    );
+    let t = pacman_fixture(PACMAN_OK);
+    let (code, stdout, _) = run_out(crumbs(&t).args(["uninstall", "firefox", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains(
+            "    - as root: '/usr/bin/pacman' '-Rn' '--noconfirm' 'firefox' 'gn' 'libjuice'"
+        ),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn doctor_sudo_without_terminal_is_unavailable() {
+    let t = fixture(FLATPAK_OK);
+    t.write_exec("/usr/bin/sudo", b"#!/bin/sh\nexit 99\n");
+    crumbs(&t)
+        .arg("doctor")
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("needs a terminal"))
+        .stdout(predicate::str::contains("privileged cleanup: unavailable"));
+}
+
+// ---- system categories (`--system`) ----
+
+const SYS_ORPHANS: [&str; 7] = [
+    "orph1", "orph2", "orph3", "orph4", "orph5", "orph6", "orph7",
+];
+
+/// A fixture with every system tool as a recording script. Each one logs
+/// its arguments to `<root>/<tool>-args` when it changes something. The
+/// journal query first runs `JOURNAL_HOOK` (empty unless a test sets it).
+fn system_fixture(journal_hook: &str) -> FixtureTree {
+    let t = FixtureTree::new();
+    t.write_exec(
+        "/usr/bin/paccache",
+        b"#!/bin/sh\nroot=\"$(dirname \"$0\")/../..\"\ncase \"$1\" in\n-dk2) printf '==> finished dry run: 1 candidates (disk space saved: 86.17 MiB)\\n' ;;\n-rk2) echo \"$@\" >> \"$root/paccache-args\" ;;\n*) exit 9 ;;\nesac\n",
+    );
+    t.write_exec(
+        "/usr/bin/pacman",
+        b"#!/bin/sh\nroot=\"$(dirname \"$0\")/../..\"\ncase \"$1\" in\n-Qdtq) printf 'orph1\\norph2\\norph3\\norph4\\norph5\\norph6\\norph7\\n' ;;\n-Rs) shift 4; for p in \"$@\"; do printf '%s 1.0-1\\n' \"$p\"; done ;;\n-Rn) echo \"$@\" >> \"$root/pacman-args\" ;;\n*) exit 9 ;;\nesac\n",
+    );
+    let journalctl = format!(
+        "#!/bin/sh\nroot=\"$(dirname \"$0\")/../..\"\ncase \"$1\" in\n--disk-usage) {journal_hook}\nprintf 'Archived and active journals take up 719.1M in the file system.\\n' ;;\n--vacuum-size=500M) echo \"$@\" >> \"$root/journal-args\" ;;\n*) exit 9 ;;\nesac\n"
+    );
+    t.write_exec("/usr/bin/journalctl", journalctl.as_bytes());
+    t.write_exec(
+        "/usr/bin/systemd-tmpfiles",
+        b"#!/bin/sh\necho \"$@\" >> \"$(dirname \"$0\")/../../tmpfiles-args\"\n",
+    );
+    t.write_exec(
+        "/usr/bin/flatpak",
+        b"#!/bin/sh\nroot=\"$(dirname \"$0\")/../..\"\nif [ \"$1\" = list ]; then case \"$*\" in *--runtime*) echo org.x.Platform/x86_64/23.08;; esac; exit 0; fi\necho \"$@\" >> \"$root/flatpak-args\"\n",
+    );
+    // `rm` logs, then removes the root-joined path the batch passes.
+    t.write_exec(
+        "/usr/bin/rm",
+        b"#!/bin/sh\necho \"$@\" >> \"$(dirname \"$0\")/../../rm-args\"\nexec /usr/bin/rm \"$@\"\n",
+    );
+    t.mkdir("var/lib/systemd/coredump");
+    let mut cur = t.dir.path().to_path_buf();
+    for c in ["", "var", "lib", "systemd", "coredump"] {
+        cur.push(c);
+        std::fs::set_permissions(&cur, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+    }
+    t.write(
+        "/var/lib/systemd/coredump/core.foo.1000.abc.1.zst",
+        &[7u8; 9000],
+    );
+    t
+}
+
+const CORE: &str = "/var/lib/systemd/coredump/core.foo.1000.abc.1.zst";
+
+fn sh_runner(t: &FixtureTree) -> Command {
+    let mut cmd = crumbs(t);
+    cmd.env("CRUMBS_TEST_PRIV_RUNNER", "sh");
+    cmd
+}
+
+fn recorded(t: &FixtureTree, file: &str) -> Option<String> {
+    std::fs::read_to_string(real(t, file)).ok()
+}
+
+#[test]
+fn scan_system_table() {
+    let t = system_fixture("");
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["scan", "--system"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    for c in [
+        "pkg-cache",
+        "orphan-pkgs",
+        "journal",
+        "coredumps",
+        "system-temp",
+        "flatpak-unused-system",
+    ] {
+        assert!(stdout.lines().any(|l| l.starts_with(c)), "{c}: {stdout}");
+    }
+    assert!(
+        !stdout.lines().any(|l| l.starts_with("thumbnails")),
+        "{stdout}"
+    );
+    assert!(!stdout.lines().any(|l| l.starts_with("trash")), "{stdout}");
+    let v = stdout_json(crumbs(&t).args(["scan", "--system", "--json"]));
+    assert_eq!(v["data"]["categories"].as_array().unwrap().len(), 6, "{v}");
+    // A scan changes nothing and needs no privileges.
+    for f in [
+        "paccache-args",
+        "pacman-args",
+        "journal-args",
+        "tmpfiles-args",
+        "rm-args",
+    ] {
+        assert!(recorded(&t, f).is_none(), "{f}");
+    }
+    assert!(real(&t, CORE).exists());
+}
+
+#[test]
+fn scan_system_unavailable_shows_reason() {
+    let t = FixtureTree::new();
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["scan", "--system"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let line = stdout.lines().find(|l| l.starts_with("pkg-cache")).unwrap();
+    assert!(
+        line.contains("unavailable (pacman not installed)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.lines().any(
+            |l| l.starts_with("coredumps") && l.contains("unavailable (no coredump directory)")
+        ),
+        "{stdout}"
+    );
+    // JSON keeps its own field and has no human text.
+    let v = stdout_json(crumbs(&t).args(["scan", "--system", "--json"]));
+    let first = &v["data"]["categories"][0];
+    assert_eq!(first["unavailable"], "pacman not installed", "{v}");
+}
+
+#[test]
+fn scan_user_and_system_conflict_exit_2() {
+    let t = system_fixture("");
+    crumbs(&t)
+        .args(["scan", "--user", "--system"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("use either --user or --system"));
+    let v = json_error(&t, &["scan", "--user", "--system", "--json"], 2);
+    assert_eq!(v["command"], "scan");
+    crumbs(&t)
+        .args(["clean", "--user", "--system", "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("use either --user or --system"));
+    let v = json_error(&t, &["clean", "--user", "--system", "--json", "--yes"], 2);
+    assert_eq!(v["command"], "clean");
+}
+
+#[test]
+fn clean_system_dry_run_preview() {
+    let t = system_fixture("");
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["clean", "--system", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("as root: '/usr/bin/paccache' '-rk2'"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("as root: '/usr/bin/journalctl' '--vacuum-size=500M'"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("as root: '/usr/bin/systemd-tmpfiles' '--clean'"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("as root: '/usr/bin/rm' '-f' '--' '{CORE}'")),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("note: these steps run with administrator rights; you will be asked once"),
+        "{stdout}"
+    );
+    // Opt-in categories stay out unless named.
+    assert!(!stdout.contains("orph"), "{stdout}");
+    assert!(!stdout.contains("flatpak"), "{stdout}");
+    for f in ["paccache-args", "journal-args", "tmpfiles-args", "rm-args"] {
+        assert!(recorded(&t, f).is_none(), "{f}");
+    }
+    assert!(real(&t, CORE).exists());
+    let v = stdout_json(crumbs(&t).args(["clean", "--system", "--dry-run", "--json"]));
+    assert!(v["data"]["report"].is_null(), "{v}");
+}
+
+#[test]
+fn clean_system_runs_one_batch() {
+    let t = system_fixture("");
+    let (code, stdout, stderr) = run_out(sh_runner(&t).args(["clean", "--system", "--yes"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        stderr.matches("crumbs-test: privileged batch").count(),
+        1,
+        "{stderr}"
+    );
+    assert_eq!(recorded(&t, "/paccache-args").as_deref(), Some("-rk2\n"));
+    assert_eq!(
+        recorded(&t, "/journal-args").as_deref(),
+        Some("--vacuum-size=500M\n")
+    );
+    assert_eq!(
+        recorded(&t, "/tmpfiles-args").as_deref(),
+        Some("--clean --prefix=/tmp --prefix=/var/tmp\n")
+    );
+    assert!(!real(&t, CORE).exists());
+    assert!(recorded(&t, "/rm-args").unwrap().contains("core.foo"));
+    // Opt-in categories did not run.
+    assert!(recorded(&t, "/pacman-args").is_none());
+    assert!(recorded(&t, "/flatpak-args").is_none());
+    let h = history_json(&t).to_string();
+    assert!(h.contains("privileged-command"), "{h}");
+}
+
+#[test]
+fn clean_system_orphan_pkgs_opt_in() {
+    let t = system_fixture("");
+    // Naming the category implies --system, and opts in.
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["clean", "orphan-pkgs", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    // The preview shows the whole closure, not the scanner's short note.
+    let all = SYS_ORPHANS.map(|n| format!("'{n}'")).join(" ");
+    assert!(
+        stdout.contains(&format!(
+            "as root: '/usr/bin/pacman' '-Rn' '--noconfirm' {all}"
+        )),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("paccache"), "{stdout}");
+    let (code, stdout, stderr) = run_out(sh_runner(&t).args(["clean", "orphan-pkgs", "--yes"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        recorded(&t, "/pacman-args").unwrap(),
+        format!("-Rn --noconfirm {}\n", SYS_ORPHANS.join(" "))
+    );
+    assert!(recorded(&t, "/paccache-args").is_none());
+    assert!(real(&t, CORE).exists());
+    // Without naming it, `--system` leaves it out (the first test above
+    // already shows the preview); the flatpak one is opt-in too.
+    let (code, stdout, stderr) =
+        run_out(sh_runner(&t).args(["clean", "flatpak-unused-system", "--yes"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        recorded(&t, "/flatpak-args").unwrap(),
+        "uninstall --system --unused -y --noninteractive\n"
+    );
+}
+
+#[test]
+fn clean_system_escalation_denied_exit_5() {
+    let t = system_fixture("");
+    let manual = format!("sudo '/usr/bin/rm' '-f' '--' '{CORE}'");
+    let (code, stdout, stderr) = run_out(
+        crumbs(&t)
+            .env("CRUMBS_TEST_PRIV_RUNNER", "deny")
+            .args(["clean", "--system", "--yes"]),
+    );
+    assert_eq!(code, 5, "{stdout}{stderr}");
+    assert!(
+        stderr
+            .contains("administrator rights were not granted; nothing that needs them was changed"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&manual), "{stderr}");
+    assert!(
+        stderr.contains("sudo '/usr/bin/paccache' '-rk2'"),
+        "{stderr}"
+    );
+    assert!(real(&t, CORE).exists());
+    assert!(recorded(&t, "/paccache-args").is_none());
+    // No fake runner at all: nothing to escalate with.
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["clean", "--system", "--yes"]));
+    assert_eq!(code, 5, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("no way to get administrator rights"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&manual), "{stderr}");
+    let v = json_error(&t, &["clean", "--system", "--json", "--yes"], 5);
+    assert_eq!(
+        v["data"]["manual_commands"],
+        serde_json::json!([
+            "sudo '/usr/bin/paccache' '-rk2'",
+            "sudo '/usr/bin/journalctl' '--vacuum-size=500M'",
+            manual,
+            "sudo '/usr/bin/systemd-tmpfiles' '--clean' '--prefix=/tmp' '--prefix=/var/tmp'",
+        ]),
+        "{v}"
+    );
+    assert!(real(&t, CORE).exists());
+}
+
+/// Swaps the coredump for a symlink to `<root>/precious` after the scan
+/// and confirmation, before anything executes (a debug-only test hook).
+fn swap_hook() -> String {
+    format!("rm -f \"$CRUMBS_ROOT{CORE}\"; ln -s \"$CRUMBS_ROOT/precious\" \"$CRUMBS_ROOT{CORE}\"")
+}
+
+#[test]
+fn clean_system_coredump_swapped_refused() {
+    let t = system_fixture("");
+    t.write("/precious", b"keep me");
+    let (code, stdout, stderr) = run_out(
+        sh_runner(&t)
+            .env("CRUMBS_TEST_BEFORE_EXECUTE", swap_hook())
+            .args(["clean", "--system", "--yes"]),
+    );
+    assert_eq!(code, 3, "{stdout}{stderr}");
+    let line = stdout
+        .lines()
+        .find(|l| l.starts_with('✗') && l.contains("core.foo"))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert!(
+        line.contains("symlink") || line.contains("changed"),
+        "{line}"
+    );
+    // No rm step ran, and nothing was deleted through the link.
+    assert!(
+        recorded(&t, "/rm-args").is_none(),
+        "{:?}",
+        recorded(&t, "/rm-args")
+    );
+    assert!(
+        std::fs::symlink_metadata(real(&t, CORE))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read(real(&t, "/precious")).unwrap(), b"keep me");
+    // The other items in the batch still ran.
+    assert_eq!(recorded(&t, "/paccache-args").as_deref(), Some("-rk2\n"));
+}
+
+#[test]
+fn clean_system_manual_commands_exclude_refused_actions() {
+    let t = system_fixture("");
+    t.write("/precious", b"keep me");
+    let out = crumbs(&t)
+        .env("CRUMBS_TEST_PRIV_RUNNER", "deny")
+        .env("CRUMBS_TEST_BEFORE_EXECUTE", swap_hook())
+        .args(["clean", "--system", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(5));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Only what failed for lack of rights; the swapped coredump was refused
+    // by the check and is not offered as a command to run by hand.
+    assert_eq!(
+        v["data"]["manual_commands"],
+        serde_json::json!([
+            "sudo '/usr/bin/paccache' '-rk2'",
+            "sudo '/usr/bin/journalctl' '--vacuum-size=500M'",
+            "sudo '/usr/bin/systemd-tmpfiles' '--clean' '--prefix=/tmp' '--prefix=/var/tmp'",
+        ]),
+        "{v}"
+    );
+    assert_eq!(std::fs::read(real(&t, "/precious")).unwrap(), b"keep me");
+}
+
+#[test]
+fn named_category_of_the_other_kind_is_usage_error() {
+    let t = system_fixture("");
+    let cases: [(&[&str], &str); 4] = [
+        (&["clean", "--user", "journal", "--dry-run"], "--user"),
+        (&["clean", "--system", "cache", "--dry-run"], "--system"),
+        (&["scan", "--user", "--category", "journal"], "--user"),
+        (&["scan", "--system", "--category", "cache"], "--system"),
+    ];
+    for (args, flag) in cases {
+        let (code, _, stderr) = run_out(crumbs(&t).args(args));
+        assert_eq!(code, 2, "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("category") && stderr.contains(&format!("cannot be used with {flag}")),
+            "{args:?}: {stderr}"
+        );
+    }
+    // The same kind is fine.
+    crumbs(&t)
+        .args(["clean", "--system", "journal", "--dry-run"])
+        .assert()
+        .code(0);
+}
+
+#[test]
+fn clean_default_still_user_only() {
+    let t = system_fixture("");
+    t.write("/home/user/.cache/foo/blob", &[1u8; 3000]);
+    // No flag: user categories only, and nothing needs privileges.
+    let (code, stdout, stderr) = run_clean(&t, &["--yes"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!real(&t, "/home/user/.cache/foo").exists());
+    assert!(real(&t, CORE).exists());
+    for f in ["paccache-args", "journal-args", "tmpfiles-args", "rm-args"] {
+        assert!(recorded(&t, f).is_none(), "{f}");
+    }
+    let (_, stdout, _) = run_out(crumbs(&t).args(["scan"]));
+    for c in [
+        "pkg-cache",
+        "orphan-pkgs",
+        "journal",
+        "coredumps",
+        "system-temp",
+    ] {
+        assert!(!stdout.lines().any(|l| l.starts_with(c)), "{c}: {stdout}");
+    }
+    assert!(stdout.lines().any(|l| l.starts_with("cache")), "{stdout}");
+}
+
+#[test]
+fn clean_system_batch_stopped_part_way_exit_3() {
+    let t = system_fixture("");
+    // The batch's steps: paccache, journalctl, rm (the core dump), tmpfiles;
+    // the root shell ends during the third.
+    let (code, stdout, stderr) = run_out(
+        crumbs(&t)
+            .env("CRUMBS_TEST_PRIV_RUNNER", "partial:2")
+            .args(["clean", "--system", "--yes"]),
+    );
+    assert_eq!(code, 3, "{stdout}{stderr}");
+    assert!(
+        !stderr.contains("nothing that needs them was changed"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("error: the privileged run stopped before it finished"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("to do it yourself"), "{stderr}");
+    assert!(
+        stdout.contains("the privileged run stopped during this step; it may have partly run"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("not run: the privileged run stopped"),
+        "{stdout}"
+    );
+    assert_eq!(recorded(&t, "/paccache-args").as_deref(), Some("-rk2\n"));
+    assert!(recorded(&t, "/journal-args").is_some());
+    assert!(recorded(&t, "/tmpfiles-args").is_none());
+    assert!(real(&t, CORE).exists());
+    // The history records what ran and what did not.
+    let h = history_json(&t).to_string();
+    assert!(h.contains("paccache"), "{h}");
+    assert!(h.contains("it may have partly run"), "{h}");
+    assert!(h.contains("not run: the privileged run stopped"), "{h}");
+    // JSON: the same exit, a cli error, and no manual commands.
+    let t = system_fixture("");
+    let out = crumbs(&t)
+        .env("CRUMBS_TEST_PRIV_RUNNER", "partial:1")
+        .args(["clean", "--system", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["data"].get("manual_commands").is_none(), "{v}");
+    let results = &v["data"]["report"][0]["results"];
+    assert_eq!(results[0]["ok"], true, "{v}");
+    assert_eq!(results[1]["ok"], false, "{v}");
+    let errors = v["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|e| e["source"] == "cli"
+            && e["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("the privileged run stopped")),
+        "{v}"
+    );
+}
+
+#[test]
+fn clean_user_and_system_categories_in_one_run() {
+    let t = system_fixture("");
+    t.write("/home/user/.cache/foo/blob", &[b'y'; 9000]);
+    let (code, stdout, stderr) =
+        run_out(sh_runner(&t).args(["clean", "cache", "pkg-cache", "--yes"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        stderr.matches("crumbs-test: privileged batch").count(),
+        1,
+        "{stderr}"
+    );
+    assert_eq!(recorded(&t, "/paccache-args").as_deref(), Some("-rk2\n"));
+    assert!(!real(&t, "/home/user/.cache/foo").exists());
+    assert!(!trash_files(&t).is_empty(), "the cache went to the trash");
+    // Unnamed system categories did not run.
+    assert!(recorded(&t, "/journal-args").is_none());
+    assert!(real(&t, CORE).exists());
+}
+
+#[test]
+fn clean_user_and_system_without_rights_changes_nothing_exit_5() {
+    let t = system_fixture("");
+    t.write("/home/user/.cache/foo/blob", &[b'y'; 9000]);
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["clean", "cache", "pkg-cache", "--yes"]));
+    assert_eq!(code, 5, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("no way to get administrator rights"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("sudo '/usr/bin/paccache' '-rk2'"),
+        "{stderr}"
+    );
+    // The whole run stops before anything executes: user items too.
+    assert!(real(&t, "/home/user/.cache/foo/blob").exists());
+    assert!(trash_files(&t).is_empty());
+    assert!(recorded(&t, "/paccache-args").is_none());
 }

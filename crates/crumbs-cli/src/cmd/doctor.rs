@@ -12,12 +12,8 @@ use crate::output::{ErrorEntry, print_json_entries};
 
 pub fn run(env: &Env, json: bool) -> anyhow::Result<ExitCode> {
     let (cfg, notes) = load_cfg(env)?;
-    let report = doctor(env, &SystemRunner, &cfg);
-    let code = if crate::output::partial_failure_parts(&report.sources, &report.errors) {
-        3
-    } else {
-        0
-    };
+    let report = doctor(env, &SystemRunner::new(), &cfg);
+    let code = crate::output::source_exit_code(&report.sources, &report.errors);
     if json {
         let mut errors: Vec<ErrorEntry> = report.errors.iter().map(ErrorEntry::from).collect();
         errors.extend(notes);
@@ -61,13 +57,24 @@ fn print_human(r: &DoctorReport) -> anyhow::Result<()> {
                 EscalationKind::Pkexec => "pkexec",
                 EscalationKind::Sudo => "sudo",
             };
+            // The same rule `uninstall` uses: sudo needs a terminal.
+            let usable = super::act::usable(e);
             writeln!(
                 out,
-                "\nEscalation: {kind} ({})",
-                sanitise(&e.program.display().to_string())
+                "\nEscalation: {kind} ({}{})",
+                sanitise(&e.program.display().to_string()),
+                if usable { "" } else { ", needs a terminal" }
             )?;
+            if usable {
+                writeln!(out, "privileged cleanup: available via {kind}")?;
+            } else {
+                writeln!(out, "privileged cleanup: unavailable")?;
+            }
         }
-        None => writeln!(out, "\nEscalation: none (privileged cleanup unavailable)")?,
+        None => {
+            writeln!(out, "\nEscalation: none")?;
+            writeln!(out, "privileged cleanup: unavailable")?;
+        }
     }
     let trash = &r.trash;
     let state = match (trash.exists, trash.writable) {

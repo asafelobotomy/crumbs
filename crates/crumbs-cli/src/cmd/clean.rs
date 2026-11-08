@@ -14,7 +14,7 @@ use serde_json::json;
 use super::act::{ActFlags, Out, Target, apply, precheck, refuse_failed};
 use super::context::{ScanSetup, print_notes};
 use super::render::sanitise;
-use super::scan::SYSTEM_UNAVAILABLE;
+use super::scan::{USER_AND_SYSTEM, cross_kind};
 use crate::output::{ErrorEntry, fmt_size, print_json_entries};
 use crate::prompt;
 
@@ -25,9 +25,10 @@ pub struct CleanArgs {
     #[arg(value_name = "CATEGORY")]
     pub categories: Vec<Category>,
     /// Clean your own files (the default)
-    #[arg(long, conflicts_with = "system")]
+    #[arg(long)]
     pub user: bool,
-    /// Clean system-wide locations (not available yet)
+    /// Clean the system categories (asks for administrator rights once);
+    /// naming a system category implies it
     #[arg(long)]
     pub system: bool,
     #[command(flatten)]
@@ -40,8 +41,11 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
         command: "clean",
         json: act.json,
     };
-    if args.system {
-        return out.fail(2, SYSTEM_UNAVAILABLE);
+    if args.user && args.system {
+        return out.fail(2, USER_AND_SYSTEM);
+    }
+    if let Some(msg) = cross_kind(&args.categories, args.user, args.system) {
+        return out.fail(2, &msg);
     }
     if let Some(code) = precheck(out, act)? {
         return Ok(code);
@@ -49,13 +53,15 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
     let setup = ScanSetup::load(env)?;
     let named = !args.categories.is_empty();
     // Naming categories cleans exactly those, whatever the config says.
+    // Without names, `--system` selects the system categories and no flag
+    // the user ones; a named system category needs no flag.
     let which: Vec<Category> = Category::ALL
         .into_iter()
         .filter(|c| {
             if named {
                 args.categories.contains(c)
             } else {
-                !setup.cfg.categories_off.contains(c)
+                c.system() == args.system && !setup.cfg.categories_off.contains(c)
             }
         })
         .collect();
@@ -63,7 +69,7 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
         env,
         cfg: &setup.cfg,
         inv: &setup.inv,
-        runner: &SystemRunner,
+        runner: &SystemRunner::new(),
         now: env.now(),
     };
     let report = scan_all(&cx, &which);
@@ -134,9 +140,16 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
 }
 
 /// Categories whose items are never ticked unless the category is named:
-/// the Flatpak command, and emptying the trash (it cannot be undone).
+/// the Flatpak commands, emptying the trash (it cannot be undone) and
+/// removing orphaned packages (often optional dependencies people want).
 fn opt_in(category: Category) -> bool {
-    matches!(category, Category::FlatpakUnused | Category::Trash)
+    matches!(
+        category,
+        Category::FlatpakUnused
+            | Category::Trash
+            | Category::OrphanPkgs
+            | Category::FlatpakUnusedSystem
+    )
 }
 
 /// Whether an item starts ticked: the scanner's own default, except that
@@ -210,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn naming_a_category_only_opts_in_to_flatpak_and_trash() {
+    fn naming_a_category_only_opts_in_to_the_opt_in_categories() {
         let mut flatpak = item(false, Some("decided by flatpak"));
         flatpak.category = Category::FlatpakUnused;
         let mut trash = item(false, None);
@@ -221,6 +234,11 @@ mod tests {
         let held = item(false, Some("anything"));
         let unnoted = item(false, None);
         let plain = item(true, None);
+        for category in [Category::OrphanPkgs, Category::FlatpakUnusedSystem] {
+            let mut i = item(false, None);
+            i.category = category;
+            assert!(preselect(&i, true) && !preselect(&i, false));
+        }
         assert!(preselect(&flatpak, true));
         assert!(!preselect(&flatpak, false));
         assert!(!preselect(&held, true) && !preselect(&held, false));

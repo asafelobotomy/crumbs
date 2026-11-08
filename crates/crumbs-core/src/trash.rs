@@ -82,13 +82,25 @@ fn dev_of_real(p: &Path) -> Option<u64> {
 
 /// Highest ancestor of `path` that is still on `path`'s device. `None` when
 /// the device of `path` is unknown or no ancestor shares it.
-pub(crate) fn topdir_for(path: &Path, dev_of: impl Fn(&Path) -> Option<u64>) -> Option<PathBuf> {
+pub(crate) fn topdir_for(
+    path: &Path,
+    root: &Path,
+    dev_of: impl Fn(&Path) -> Option<u64>,
+) -> Option<PathBuf> {
+    // The walk never leaves the root: a fake root must not see the host's
+    // directories above it.
+    if !path.starts_with(root) {
+        return None;
+    }
     let dev = dev_of(path)?;
     let mut top: Option<&Path> = None;
     for a in path.ancestors().skip(1) {
         if dev_of(a) == Some(dev) {
             top = Some(a);
         } else {
+            break;
+        }
+        if a == root {
             break;
         }
     }
@@ -116,7 +128,8 @@ pub fn trash_dir_for(env: &Env, in_system: &Path) -> Result<PathBuf, CoreError> 
         return Ok(home_trash);
     }
     let fail = |msg: &str| io_err(in_system, io::Error::other(msg.to_string()));
-    let top = topdir_for(&item, dev_of_real).ok_or_else(|| fail("no usable trash topdir"))?;
+    let top =
+        topdir_for(&item, &env.root, dev_of_real).ok_or_else(|| fail("no usable trash topdir"))?;
     if env.unsys(&top) == Path::new("/") {
         return Err(fail("refusing to use / as a trash topdir"));
     }
@@ -425,14 +438,32 @@ mod tests {
         .into();
         let dev_of = |p: &Path| devs.get(p.to_str().unwrap()).copied();
         assert_eq!(
-            topdir_for(Path::new("/mnt/usb/data/app"), dev_of),
+            topdir_for(Path::new("/mnt/usb/data/app"), Path::new("/"), dev_of),
             Some(PathBuf::from("/mnt/usb"))
         );
         // Everything on one device walks up to `/`.
         let one = |_: &Path| Some(7);
-        assert_eq!(topdir_for(Path::new("/a/b"), one), Some(PathBuf::from("/")));
+        assert_eq!(
+            topdir_for(Path::new("/a/b"), Path::new("/"), one),
+            Some(PathBuf::from("/"))
+        );
         // Unknown device for the item itself.
-        assert_eq!(topdir_for(Path::new("/x"), |_| None), None);
+        assert_eq!(topdir_for(Path::new("/x"), Path::new("/"), |_| None), None);
+    }
+
+    #[test]
+    fn topdir_clamped_at_root() {
+        let one = |_: &Path| Some(7);
+        // On one device the walk stops at the (fake) root, not at `/`.
+        assert_eq!(
+            topdir_for(Path::new("/tmp/fx/mnt/a/b"), Path::new("/tmp/fx"), one),
+            Some(PathBuf::from("/tmp/fx"))
+        );
+        // A path outside the root has no topdir.
+        assert_eq!(
+            topdir_for(Path::new("/etc/x"), Path::new("/tmp/fx"), one),
+            None
+        );
     }
 
     #[test]

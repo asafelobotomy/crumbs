@@ -4,6 +4,7 @@ pub mod clean;
 pub mod context;
 pub mod doctor;
 pub mod history;
+pub mod manual;
 pub mod orphans;
 pub mod render;
 pub mod restore;

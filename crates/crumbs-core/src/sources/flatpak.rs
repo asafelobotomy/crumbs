@@ -64,21 +64,21 @@ impl AppSource for FlatpakSource {
                 app.display_name = cols[1].to_string();
             }
             app.version = Some(cols[2]).filter(|v| !v.is_empty()).map(String::from);
-            let (installation, location) = if cols[3] == "user" {
-                app.id = format!("flatpak:user/{id}");
-                (
+            let (installation, location) = match cols[3] {
+                "user" => (
                     Installation::User,
-                    cx.env.unsys(&cx.env.data_home.join("flatpak/app").join(id)),
-                )
-            } else {
-                app.id = format!("flatpak:system/{id}");
-                (
+                    Some(cx.env.unsys(&cx.env.data_home.join("flatpak/app").join(id))),
+                ),
+                "system" => (
                     Installation::System,
-                    std::path::Path::new(SYSTEM_APP_DIR).join(id),
-                )
+                    Some(std::path::Path::new(SYSTEM_APP_DIR).join(id)),
+                ),
+                // Where a custom installation keeps its apps is unknown.
+                other => (Installation::Custom(other.to_string()), None),
             };
+            app.id = format!("flatpak:{}/{id}", installation.label());
             app.installation = installation;
-            app.location = Some(location);
+            app.location = location;
             app.install_size = cols.get(4).and_then(|s| parse_si_size(s));
             app.has_gui = true;
             let desktop_id = format!("{id}.desktop");
@@ -132,6 +132,7 @@ com.obsproject.Studio\tOBS Studio\t33.0.0\tsystem\t593.5 MB\n";
             status,
             stdout: stdout.into(),
             stderr: stderr.into(),
+            timed_out: false,
         }
     }
 
@@ -193,14 +194,42 @@ com.obsproject.Studio\tOBS Studio\t33.0.0\tsystem\t593.5 MB\n";
     }
 
     #[test]
-    fn empty_version_is_none_and_unknown_installation_is_system() {
+    fn empty_version_is_none_and_unknown_installation_is_custom() {
         let t = installed();
         let runner = FakeRunner::new().on("flatpak", &ARGS, out(0, "a.b.C\tC\t\tcustom\t?\n", ""));
         let l = list_with(&t, &runner);
         assert_eq!(l.apps.len(), 1);
         assert_eq!(l.apps[0].version, None);
-        assert_eq!(l.apps[0].installation, Installation::System);
+        assert_eq!(
+            l.apps[0].installation,
+            Installation::Custom("custom".into())
+        );
+        assert_eq!(l.apps[0].location, None);
         assert_eq!(l.apps[0].install_size, None);
+    }
+
+    #[test]
+    fn custom_installation_parsed() {
+        let t = installed();
+        let rows = "org.x.Y\tY\t1\tmy-ssd\t1 MB\n";
+        let runner = FakeRunner::new().on("flatpak", &ARGS, out(0, rows, ""));
+        let l = list_with(&t, &runner);
+        assert_eq!(l.apps.len(), 1);
+        let app = &l.apps[0];
+        assert_eq!(app.installation, Installation::Custom("my-ssd".into()));
+        assert_eq!(app.id, "flatpak:custom:my-ssd/org.x.Y");
+        assert_eq!(
+            serde_json::to_string(&app.installation).unwrap(),
+            "\"custom:my-ssd\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Installation::User).unwrap(),
+            "\"user\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Installation::System).unwrap(),
+            "\"system\""
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@ use super::context::{Context, load_cfg, print_notes};
 use super::render::{sanitise, shown_path};
 use crate::output::{
     ErrorEntry, confidence, finding_kind, fmt_size, partial_failure, print_json_entries,
-    print_table,
+    print_table, source_exit_code,
 };
 
 #[derive(Subcommand)]
@@ -77,7 +77,12 @@ fn list(
     json: bool,
 ) -> anyhow::Result<ExitCode> {
     let (cfg, notes) = load_cfg(env)?;
-    let mut inv = discover(env, &SystemRunner, &ListOptions { include_all: all }, &cfg);
+    let mut inv = discover(
+        env,
+        &SystemRunner::new(),
+        &ListOptions { include_all: all },
+        &cfg,
+    );
     if !sources.is_empty() {
         inv.apps.retain(|a| sources.contains(&a.source));
         // A source that was not asked for is none of the caller's business.
@@ -88,7 +93,7 @@ fn list(
         inv.apps
             .sort_by_key(|a| (a.install_size.is_none(), Reverse(a.install_size)));
     }
-    let code = if partial_failure(&inv) { 3 } else { 0 };
+    let code = source_exit_code(&inv.statuses, &inv.errors);
 
     if json {
         let mut errors: Vec<ErrorEntry> = inv.errors.iter().map(ErrorEntry::from).collect();
@@ -212,13 +217,7 @@ fn print_app(env: &Env, a: &App) -> anyhow::Result<()> {
         ("ID", sanitise(&a.id)),
         ("Source", a.source.as_str().to_string()),
         ("Version", a.version.clone().unwrap_or_else(|| "-".into())),
-        (
-            "Installation",
-            serde_json::to_value(a.installation)?
-                .as_str()
-                .unwrap_or("-")
-                .to_string(),
-        ),
+        ("Installation", sanitise(&a.installation.label())),
         ("Size", a.install_size.map_or_else(|| "-".into(), fmt_size)),
         (
             "Location",
