@@ -1816,3 +1816,27 @@ fn clean_keeps_running_apps_items() {
         "nothing to clean (1 item held back: Firefox is running)"
     );
 }
+
+#[test]
+fn clean_preview_sanitises_paths() {
+    let t = scan_fixture(FLATPAK_OK);
+    t.write("/home/user/.cache/ev\ril\x1b[2Jdir/blob", &[1u8; 100]);
+    t.write("/home/user/.local/share/Trash/files/tr\rash\x1b[0m", b"x");
+    let (code, stdout, _) = run_clean(&t, &["cache", "trash", "--dry-run"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        !stdout.contains('\r') && !stdout.contains('\u{1b}'),
+        "{stdout:?}"
+    );
+    assert!(
+        stdout.contains("~/.cache/ev\u{FFFD}il\u{FFFD}[2Jdir"),
+        "{stdout:?}"
+    );
+    assert!(
+        stdout.contains("Trash/files/tr\u{FFFD}ash\u{FFFD}[0m"),
+        "{stdout:?}"
+    );
+    // JSON keeps the raw path.
+    let v = stdout_json(crumbs(&t).args(["clean", "cache", "--dry-run", "--json"]));
+    assert!(v.to_string().contains("\\r"), "{v}");
+}

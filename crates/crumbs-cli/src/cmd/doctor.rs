@@ -7,6 +7,7 @@ use crumbs_core::privilege::EscalationKind;
 use crumbs_core::{Env, SourceError, SourceKind};
 
 use super::context::{load_cfg, print_notes};
+use super::render::sanitise;
 use crate::output::{ErrorEntry, print_json_entries};
 
 pub fn run(env: &Env, json: bool) -> anyhow::Result<ExitCode> {
@@ -60,7 +61,11 @@ fn print_human(r: &DoctorReport) -> anyhow::Result<()> {
                 EscalationKind::Pkexec => "pkexec",
                 EscalationKind::Sudo => "sudo",
             };
-            writeln!(out, "\nEscalation: {kind} ({})", e.program.display())?;
+            writeln!(
+                out,
+                "\nEscalation: {kind} ({})",
+                sanitise(&e.program.display().to_string())
+            )?;
         }
         None => writeln!(out, "\nEscalation: none (privileged cleanup unavailable)")?,
     }
@@ -70,6 +75,10 @@ fn print_human(r: &DoctorReport) -> anyhow::Result<()> {
         (true, false) => "not writable",
         (false, _) => "missing",
     };
-    writeln!(out, "Trash: {} ({state})", trash.path.display())?;
+    writeln!(
+        out,
+        "Trash: {} ({state})",
+        sanitise(&trash.path.display().to_string())
+    )?;
     Ok(())
 }

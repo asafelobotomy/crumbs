@@ -7,7 +7,6 @@ use std::process::ExitCode;
 
 use clap::Args;
 use crumbs_core::config::Config;
-use crumbs_core::env::display_path;
 use crumbs_core::executor::{ExecReport, execute, running_processes};
 use crumbs_core::inventory::Inventory;
 use crumbs_core::leftovers::{Finding, FindingKind};
@@ -188,7 +187,7 @@ pub fn choose(
                 "{:<12} {:>10}  {}{shared}",
                 finding_kind(f.kind),
                 fmt_size(f.size.bytes),
-                display_path(env, &f.path)
+                render::shown_path(env, &f.path)
             )
         })
         .collect();

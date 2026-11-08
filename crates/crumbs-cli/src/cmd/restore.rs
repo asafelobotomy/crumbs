@@ -4,11 +4,11 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use crumbs_core::Env;
-use crumbs_core::env::display_path;
 use crumbs_core::restore::restore;
 use serde_json::json;
 
 use super::context::{load_cfg, print_notes};
+use super::render::{sanitise, shown_path};
 use crate::output::print_json_entries;
 
 pub fn run(env: &Env, selectors: &[String], dry_run: bool, json: bool) -> anyhow::Result<ExitCode> {
@@ -26,15 +26,15 @@ pub fn run(env: &Env, selectors: &[String], dry_run: bool, json: bool) -> anyhow
             // A selector that matched nothing has no entry; its path is the
             // selector text.
             let path = if o.entry_id.is_empty() {
-                o.path.display().to_string()
+                sanitise(&o.path.display().to_string())
             } else {
-                display_path(env, &o.path)
+                shown_path(env, &o.path)
             };
             if o.ok {
                 let verb = if dry_run { "would restore" } else { "restored" };
                 writeln!(out, "✓ {verb} {path}")?;
             } else {
-                let err = o.error.as_deref().unwrap_or("failed");
+                let err = sanitise(o.error.as_deref().unwrap_or("failed"));
                 writeln!(out, "✗ {path}: {err}")?;
             }
         }

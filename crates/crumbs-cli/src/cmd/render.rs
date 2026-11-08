@@ -32,6 +32,12 @@ pub fn sanitise(line: &str) -> String {
         .collect()
 }
 
+/// A path as shown to people: home as `~`, control characters replaced.
+/// JSON output keeps the raw path.
+pub fn shown_path(env: &Env, in_system: &std::path::Path) -> String {
+    sanitise(&display_path(env, in_system))
+}
+
 /// What a row shows for the action's target: the path, or for a command
 /// its whole command line.
 fn target(env: &Env, a: &Action) -> String {
@@ -44,7 +50,7 @@ fn target(env: &Env, a: &Action) -> String {
             }
             sanitise(&line)
         }
-        _ => display_path(env, a.path()),
+        _ => shown_path(env, a.path()),
     }
 }
 
@@ -98,7 +104,7 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
         }
         let mut out = anstream::stdout().lock();
         for n in &plan.notes {
-            writeln!(out, "note: {n}")?;
+            writeln!(out, "note: {}", sanitise(n))?;
         }
     }
     let all = || plans.iter().flat_map(|(_, p)| &p.actions);

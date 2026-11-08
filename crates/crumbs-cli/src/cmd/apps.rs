@@ -4,7 +4,6 @@ use std::process::ExitCode;
 
 use clap::{Subcommand, ValueEnum};
 use crumbs_core::command::SystemRunner;
-use crumbs_core::env::display_path;
 use crumbs_core::inventory::{Resolved, discover, find_app};
 use crumbs_core::leftovers::{Finding, find_leftovers};
 use crumbs_core::sources::ListOptions;
@@ -12,6 +11,7 @@ use crumbs_core::{App, Env, SourceKind};
 use serde_json::json;
 
 use super::context::{Context, load_cfg, print_notes};
+use super::render::shown_path;
 use crate::output::{
     ErrorEntry, confidence, finding_kind, fmt_size, partial_failure, print_json_entries,
     print_table,
@@ -176,7 +176,7 @@ fn print_leftovers(env: &Env, leftovers: &[Finding]) -> anyhow::Result<()> {
                 confidence(f.confidence),
                 fmt_size(f.size.bytes),
                 finding_kind(f.kind),
-                display_path(env, &f.path),
+                shown_path(env, &f.path),
                 if f.shared { "shared" } else { "" }.to_string(),
             ]
         })
@@ -218,7 +218,7 @@ fn print_app(env: &Env, a: &App) -> anyhow::Result<()> {
             "Location",
             a.location
                 .as_ref()
-                .map_or_else(|| "-".into(), |p| display_path(env, p)),
+                .map_or_else(|| "-".into(), |p| shown_path(env, p)),
         ),
         ("Desktop IDs", list(&a.desktop_ids)),
         ("Executables", list(&a.exec_names)),

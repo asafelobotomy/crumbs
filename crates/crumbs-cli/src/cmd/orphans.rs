@@ -4,13 +4,13 @@ use std::process::ExitCode;
 
 use clap::Args;
 use crumbs_core::Env;
-use crumbs_core::env::display_path;
 use crumbs_core::leftovers::find_orphans;
 use crumbs_core::plan::{PlanOptions, build_plan};
 use serde_json::json;
 
 use super::act::{ActFlags, Out, Target, apply, choose, plannable, precheck, refuse_source_errors};
 use super::context::{Context, print_notes};
+use super::render::{sanitise, shown_path};
 use crate::output::{
     ErrorEntry, confidence, finding_kind, fmt_size, partial_failure, print_json_entries,
     print_table,
@@ -105,7 +105,7 @@ fn clean(env: &Env, out: Out, args: &OrphansArgs) -> anyhow::Result<ExitCode> {
                     } else {
                         ""
                     };
-                return out.fail(2, &format!("not an orphan: {}{hint}", display_path(env, p)));
+                return out.fail(2, &format!("not an orphan: {}{hint}", shown_path(env, p)));
             }
         }
         orphans
@@ -142,8 +142,8 @@ fn list(env: &Env, show_low: bool, json: bool) -> anyhow::Result<ExitCode> {
                     confidence(f.confidence),
                     fmt_size(f.size.bytes),
                     finding_kind(f.kind),
-                    display_path(env, &f.path),
-                    f.reason.clone(),
+                    shown_path(env, &f.path),
+                    sanitise(&f.reason),
                 ]
             })
             .collect();
