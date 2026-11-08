@@ -116,14 +116,16 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
     if trashed > 0 {
         writeln!(
             out,
-            "will move {trashed} items ({}) to the trash",
+            "will move {} ({}) to the trash",
+            plural(trashed, "item", "items"),
             fmt_size(trash_size)
         )?;
     }
     if deleted > 0 {
         writeln!(
             out,
-            "will permanently delete {deleted} items ({})",
+            "will permanently delete {} ({})",
+            plural(deleted, "item", "items"),
             fmt_size(delete_size)
         )?;
     }
@@ -142,9 +144,9 @@ fn can_undo(a: &Action) -> bool {
 }
 
 /// Prints one `✓`/`✗` line per action and the closing line: `moved <size>
-/// to the trash` for what was trashed, `freed <size>` for what was deleted
-/// (always shown when nothing was trashed), and the undo hint when anything
-/// can be restored. Each report goes with the plan it ran. Returns whether
+/// to the trash` for what was trashed, `freed <size>` for what was deleted,
+/// a mention of a command that ran (its size is unknown), and the undo hint
+/// when anything can be restored. With none of these it says `freed 0 B`. Each report goes with the plan it ran. Returns whether
 /// every action succeeded.
 pub fn report(env: &Env, runs: &[(&Plan, &ExecReport)]) -> anyhow::Result<bool> {
     let mut out = anstream::stdout().lock();
@@ -152,6 +154,8 @@ pub fn report(env: &Env, runs: &[(&Plan, &ExecReport)]) -> anyhow::Result<bool> 
     let mut undo: Vec<&str> = Vec::new();
     let (mut moved, mut freed) = (0u64, 0u64);
     let (mut any_moved, mut any_freed) = (false, false);
+    // A command frees space it decides itself; its size is unknown.
+    let mut ran: Option<&str> = None;
     for (plan, r) in runs {
         let mut restorable = false;
         for (res, planned) in r.results.iter().zip(&plan.actions) {
@@ -169,7 +173,10 @@ pub fn report(env: &Env, runs: &[(&Plan, &ExecReport)]) -> anyhow::Result<bool> 
                         "deleted"
                     }
                     Action::EditFile { .. } => "edited",
-                    Action::UserCommand { .. } => "ran",
+                    Action::UserCommand { ref program, .. } => {
+                        ran.get_or_insert(program);
+                        "ran"
+                    }
                 };
                 writeln!(out, "✓ {done} {shown}")?;
                 restorable |= can_undo(&res.action);
@@ -187,8 +194,16 @@ pub fn report(env: &Env, runs: &[(&Plan, &ExecReport)]) -> anyhow::Result<bool> 
     if any_moved {
         parts.push(format!("moved {} to the trash", fmt_size(moved)));
     }
-    if any_freed || !any_moved {
+    if any_freed {
         parts.push(format!("freed {}", fmt_size(freed)));
+    }
+    match ran.map(sanitise) {
+        Some(program) if parts.is_empty() => {
+            parts.push(format!("freed space decided by {program}"));
+        }
+        Some(program) => parts.push(format!("plus space freed by {program}")),
+        None if parts.is_empty() => parts.push(format!("freed {}", fmt_size(freed))),
+        None => {}
     }
     if !undo.is_empty() {
         parts.push(format!("undo with: crumbs restore {}", undo.join(" ")));

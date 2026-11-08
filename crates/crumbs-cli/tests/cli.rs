@@ -1499,7 +1499,10 @@ fn clean_cache_trashes_and_logs() {
     // Only the named category.
     assert!(real(&t, "/home/user/.cache/thumbnails/a.png").exists());
     assert!(real(&t, "/home/user/.local/share/Trash/files/old.txt").exists());
-    assert!(stdout.contains("will move 1 items"), "{stdout}");
+    assert!(
+        stdout.contains("will move 1 item (4.0 KiB) to the trash"),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("note: space is freed when the trash is emptied (or use --permanent)"),
         "{stdout}"
@@ -1533,7 +1536,7 @@ fn clean_temp_deletes_permanently_with_wording() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("will permanently delete 1 items"),
+        stdout.contains("will permanently delete 1 item ("),
         "{stdout}"
     );
     assert!(!stdout.contains("to the trash"), "{stdout}");
@@ -1564,7 +1567,10 @@ fn clean_trash_empties_pairs() {
         stdout.contains("note: permanently delete (emptying the trash)"),
         "{stdout}"
     );
-    assert!(stdout.contains("will permanently delete"), "{stdout}");
+    assert!(
+        stdout.contains("will permanently delete 2 items ("),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("✓ deleted ~/.local/share/Trash/info/old.txt.trashinfo"),
         "{stdout}"
@@ -1609,7 +1615,20 @@ fn clean_flatpak_runs_command() {
         stdout.contains("✓ ran flatpak uninstall --user --unused --noninteractive -y"),
         "{stdout}"
     );
-    assert!(!stdout.contains("undo with"), "{stdout}");
+    assert_eq!(
+        stdout.lines().last(),
+        Some("freed space decided by flatpak"),
+        "{stdout}"
+    );
+    // With something trashed too, the command's share is mentioned.
+    let (code, stdout, _) = run_clean(&t, &["flatpak-unused", "cache", "--yes"]);
+    assert_eq!(code, 0, "{stdout}");
+    let last = stdout.lines().last().unwrap();
+    assert!(
+        last.starts_with("moved ")
+            && last.contains(" to the trash · plus space freed by flatpak · undo with: "),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -1672,6 +1691,18 @@ fn clean_scanner_error_refuses_without_force() {
     let t = scan_fixture(FLATPAK_RUNTIME_FAIL);
     let (code, _, stderr) = run_clean(&t, &["--yes"]);
     assert_eq!(code, 1, "{stderr}");
+    // Why it failed comes first.
+    assert!(stderr.contains("warning: flatpak-unused: "), "{stderr}");
+    assert!(stderr.contains("boom"), "{stderr}");
+    let v = json_error(&t, &["clean", "--yes", "--json"], 1);
+    let errors = v["errors"].as_array().unwrap();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e["source"] == "flatpak-unused"
+                && e["message"].as_str().unwrap().contains("boom")),
+        "{v}"
+    );
     assert!(
         stderr.contains(
             "refusing: some sources failed (flatpak-unused); re-run with --force to continue"
@@ -1749,5 +1780,39 @@ fn clean_off_category_needs_naming() {
     t3.write_exec("/usr/bin/flatpak", FLATPAK_OK.as_bytes());
     let (code, stdout, _) = run_clean(&t3, &["--yes"]);
     assert_eq!(code, 0, "{stdout}");
+    // The opt-in flatpak item is not "held back".
     assert_eq!(stdout.trim(), "nothing to clean");
+    // Same JSON shape as an empty plan: `report` is an array.
+    let v = stdout_json(crumbs(&t3).args(["clean", "--yes", "--json"]));
+    assert_eq!(v["data"]["plans"], serde_json::json!([]));
+    assert_eq!(v["data"]["report"], serde_json::json!([]));
+}
+
+/// A Firefox process in the fixture's `/proc`.
+fn firefox_running(t: &FixtureTree) {
+    t.symlink("/proc/79/exe", "/usr/bin/firefox");
+}
+
+#[test]
+fn clean_keeps_running_apps_items() {
+    let t = scan_fixture(FLATPAK_OK);
+    t.write("/home/user/.cache/firefox/startupCache/x", &[1u8; 2000]);
+    t.write(
+        "/home/user/.cache/mozilla/firefox/p.default/cache2/x",
+        &[1u8; 2000],
+    );
+    firefox_running(&t);
+    let (code, stdout, stderr) = run_clean(&t, &["browser-cache", "cache", "--yes"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(real(&t, "/home/user/.cache/firefox/startupCache/x").exists());
+    assert!(real(&t, "/home/user/.cache/mozilla/firefox/p.default/cache2/x").exists());
+    assert!(!real(&t, "/home/user/.cache/foo").exists(), "{stdout}");
+    assert!(!stdout.contains("~/.cache/firefox"), "{stdout}");
+    // Only held-back items left: say why nothing happens.
+    let (code, stdout, _) = run_clean(&t, &["browser-cache", "--yes"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(
+        stdout.trim(),
+        "nothing to clean (1 item held back: Firefox is running)"
+    );
 }

@@ -76,8 +76,7 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
             .as_ref()
             .map(|m| ErrorEntry::new(r.category.as_str(), m.clone()))
     }));
-    let failed = errors.iter().map(|e| e.source.as_str());
-    if let Some(code) = refuse_failed(out, failed, act)? {
+    if let Some(code) = refuse_failed(out, &errors, act)? {
         return Ok(code);
     }
     errors.extend(setup.notes.iter().cloned());
@@ -88,6 +87,18 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
         .flat_map(|r| r.items)
         .collect();
     let defaults: Vec<bool> = items.iter().map(|i| preselect(i, named)).collect();
+    // Items a scanner held back (a running app); the opt-in Flatpak
+    // command is not one of them.
+    let held: Vec<&str> = if act.interactive {
+        Vec::new()
+    } else {
+        items
+            .iter()
+            .filter(|i| !i.preselected && i.category != Category::FlatpakUnused)
+            .map(|i| i.note.as_deref().unwrap_or(&i.label))
+            .collect()
+    };
+    let held: Vec<String> = held.into_iter().map(String::from).collect();
     let chosen: Vec<BloatItem> = if act.interactive && !items.is_empty() {
         let lines: Vec<String> = items.iter().map(checklist_line).collect();
         let Some(picked) = prompt::multi_select("Items to clean", &lines, &defaults)? else {
@@ -107,7 +118,7 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
             .collect()
     };
     if chosen.is_empty() {
-        return nothing_to_clean(out, &errors);
+        return nothing_to_clean(out, act, &held, &errors);
     }
 
     // Planned only after choosing: `depends_on` indexes the plan's actions.
@@ -123,17 +134,11 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
     apply(env, &setup.cfg, &errors, out, &targets, act)
 }
 
-/// Whether an item starts ticked. In a category named on the command line
-/// every item does, except one held back because its app is running (or
-/// might be); otherwise the scanner's own default holds.
+/// Whether an item starts ticked: the scanner's own default, except that
+/// naming `flatpak-unused` opts in to its command. Items a scanner held
+/// back (their app is running) stay unticked even in a named category.
 fn preselect(item: &BloatItem, named: bool) -> bool {
-    if !named {
-        return item.preselected;
-    }
-    !item
-        .note
-        .as_deref()
-        .is_some_and(|n| n.ends_with(" is running"))
+    item.preselected || (named && item.category == Category::FlatpakUnused)
 }
 
 /// `CATEGORY  SIZE  LABEL  NOTE`, sanitised.
@@ -151,12 +156,26 @@ fn checklist_line(i: &BloatItem) -> String {
     s
 }
 
-fn nothing_to_clean(out: Out, errors: &[ErrorEntry]) -> anyhow::Result<ExitCode> {
+/// No items chosen. The JSON matches an empty plan from `apply`: `report`
+/// is an array aligned with `plans` (here empty), or `null` on a dry run.
+fn nothing_to_clean(
+    out: Out,
+    act: &ActFlags,
+    held: &[String],
+    errors: &[ErrorEntry],
+) -> anyhow::Result<ExitCode> {
     if out.json {
-        let data = json!({ "plans": [], "report": null });
+        let report = if act.dry_run { json!(null) } else { json!([]) };
+        let data = json!({ "plans": [], "report": report });
         print_json_entries(out.command, &data, errors)?;
     } else {
-        writeln!(anstream::stdout().lock(), "nothing to clean")?;
+        let mut line = "nothing to clean".to_string();
+        if let Some(first) = held.first() {
+            let n = held.len();
+            let items = if n == 1 { "item" } else { "items" };
+            line.push_str(&format!(" ({n} {items} held back: {})", sanitise(first)));
+        }
+        writeln!(anstream::stdout().lock(), "{line}")?;
         print_notes(errors)?;
     }
     Ok(ExitCode::SUCCESS)
@@ -186,15 +205,17 @@ mod tests {
     }
 
     #[test]
-    fn naming_a_category_preselects_all_but_running() {
-        let flatpak = item(false, Some("decided by flatpak"));
-        let running = item(false, Some("Firefox is running"));
-        let unsure = item(false, Some("could not check whether Firefox is running"));
+    fn naming_a_category_only_opts_in_to_flatpak() {
+        let mut flatpak = item(false, Some("decided by flatpak"));
+        flatpak.category = Category::FlatpakUnused;
+        // Held back for any reason, whatever the note says.
+        let held = item(false, Some("anything"));
+        let unnoted = item(false, None);
         let plain = item(true, None);
         assert!(preselect(&flatpak, true));
         assert!(!preselect(&flatpak, false));
-        assert!(!preselect(&running, true));
-        assert!(!preselect(&unsure, true));
+        assert!(!preselect(&held, true) && !preselect(&held, false));
+        assert!(!preselect(&unnoted, true));
         assert!(preselect(&plain, true) && preselect(&plain, false));
     }
 }

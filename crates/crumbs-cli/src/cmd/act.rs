@@ -56,13 +56,26 @@ pub struct Out<'a> {
 impl Out<'_> {
     /// Prints `error: <msg>` and the indented `details`, and returns `code`.
     pub fn fail_with(&self, code: u8, msg: &str, details: &[String]) -> anyhow::Result<ExitCode> {
+        self.fail_after(code, msg, details, &[])
+    }
+
+    /// [`Self::fail_with`] after the entries that caused it: they are
+    /// printed as warnings first and lead the envelope's `errors`.
+    fn fail_after(
+        &self,
+        code: u8,
+        msg: &str,
+        details: &[String],
+        causes: &[ErrorEntry],
+    ) -> anyhow::Result<ExitCode> {
+        print_notes(causes)?;
         let mut err = anstream::stderr().lock();
         writeln!(err, "error: {msg}")?;
         for d in details {
             writeln!(err, "  {d}")?;
         }
         drop(err);
-        self.envelope(msg, details)?;
+        self.envelope(msg, details, causes)?;
         Ok(ExitCode::from(code))
     }
 
@@ -73,11 +86,11 @@ impl Out<'_> {
     /// The user said no (exit 4).
     pub fn aborted(&self) -> anyhow::Result<ExitCode> {
         writeln!(anstream::stderr().lock(), "aborted")?;
-        self.envelope("aborted", &[])?;
+        self.envelope("aborted", &[], &[])?;
         Ok(ExitCode::from(4))
     }
 
-    fn envelope(&self, msg: &str, details: &[String]) -> anyhow::Result<()> {
+    fn envelope(&self, msg: &str, details: &[String], causes: &[ErrorEntry]) -> anyhow::Result<()> {
         if !self.json {
             return Ok(());
         }
@@ -86,10 +99,12 @@ impl Out<'_> {
         } else {
             format!("{msg} {}", details.join("; "))
         };
+        let mut errors = causes.to_vec();
+        errors.push(ErrorEntry::new("cli", message));
         print_json_entries(
             self.command,
             &json!({ "plans": [], "report": null }),
-            &[ErrorEntry::new("cli", message)],
+            &errors,
         )
     }
 }
@@ -116,26 +131,29 @@ pub fn refuse_source_errors(
     inv: &Inventory,
     act: &ActFlags,
 ) -> anyhow::Result<Option<ExitCode>> {
-    refuse_failed(out, inv.errors.iter().map(|e| e.source.as_str()), act)
+    let failures: Vec<ErrorEntry> = inv.errors.iter().map(ErrorEntry::from).collect();
+    refuse_failed(out, &failures, act)
 }
 
-/// [`refuse_source_errors`] for any failed sources, named by `failed`.
-pub fn refuse_failed<'a>(
+/// [`refuse_source_errors`] for any failures, one entry per failed source:
+/// their messages are shown (and under `--json` included) before the
+/// refusal.
+pub fn refuse_failed(
     out: Out,
-    failed: impl IntoIterator<Item = &'a str>,
+    failures: &[ErrorEntry],
     act: &ActFlags,
 ) -> anyhow::Result<Option<ExitCode>> {
-    let mut failed: Vec<&str> = failed.into_iter().collect();
-    if failed.is_empty() || act.force || act.dry_run {
+    if failures.is_empty() || act.force || act.dry_run {
         return Ok(None);
     }
+    let mut failed: Vec<&str> = failures.iter().map(|e| e.source.as_str()).collect();
     failed.sort_unstable();
     failed.dedup();
     let msg = format!(
         "refusing: some sources failed ({}); re-run with --force to continue",
         failed.join(", ")
     );
-    out.fail(1, &msg).map(Some)
+    out.fail_after(1, &msg, &[], failures).map(Some)
 }
 
 /// Findings a plan may ever contain: a shared `mimeapps.list` edit is
