@@ -51,8 +51,9 @@ pub struct Step {
 }
 
 /// Builds the batch: the header, then one line per step that runs it with
-/// stdin from `/dev/null`, stderr folded into stdout, and prints
-/// `@@crumbs <i> <status>` after it. There is no `set -e`; a failing step
+/// stdin from `/dev/null`, stderr folded into stdout, and prints a newline
+/// then `@@crumbs <i> <status>` after it. The leading newline puts the marker
+/// on its own line even when the step's output does not end in one. There is no `set -e`; a failing step
 /// does not stop the next.
 pub fn build_script(steps: &[Step]) -> Vec<u8> {
     let mut script = HEADER.to_vec();
@@ -62,7 +63,7 @@ pub fn build_script(steps: &[Step]) -> Vec<u8> {
             script.push(b' ');
             script.extend(sh_quote(arg));
         }
-        script.extend_from_slice(b" </dev/null 2>&1; printf '@@crumbs %d %d\\n' ");
+        script.extend_from_slice(b" </dev/null 2>&1; printf '\\n@@crumbs %d %d\\n' ");
         script.extend_from_slice(i.to_string().as_bytes());
         script.extend_from_slice(b" \"$?\"\n");
     }
@@ -84,6 +85,9 @@ pub struct StepOutcome {
 /// spaces), and its index is the next one expected; anything else, forged or
 /// out-of-order markers included, is output of the step that is running.
 /// Once a marker is missing, that step and every later one get `None`.
+///
+/// Each step's output loses exactly one trailing newline: the separator the
+/// script prints before the marker.
 pub fn parse_markers(stdout: &[u8], steps: usize) -> Vec<StepOutcome> {
     let mut outcomes = Vec::with_capacity(steps);
     let mut output = Vec::new();
@@ -91,6 +95,9 @@ pub fn parse_markers(stdout: &[u8], steps: usize) -> Vec<StepOutcome> {
         let next = outcomes.len();
         match marker(line) {
             Some((index, status)) if index == next && next < steps => {
+                if output.last() == Some(&b'\n') {
+                    output.pop();
+                }
                 outcomes.push(StepOutcome {
                     status: Some(status),
                     output: String::from_utf8_lossy(&output).into_owned(),
@@ -347,7 +354,7 @@ mod tests {
 
     #[test]
     fn markers_must_be_in_order() {
-        let outcomes = parse_markers(b"@@crumbs 1 0\n@@crumbs 0 2\n@@crumbs 0 0\n", 2);
+        let outcomes = parse_markers(b"@@crumbs 1 0\n\n@@crumbs 0 2\n@@crumbs 0 0\n", 2);
         assert_eq!(outcomes[0].status, Some(2));
         assert_eq!(outcomes[0].output, "@@crumbs 1 0\n");
         // The duplicate marker for step 0 is output of step 1, which never
@@ -358,6 +365,34 @@ mod tests {
         let outcomes = parse_markers(b"@@crumbs +0 0\n@@crumbs 0  0\n@@crumbs 0 99999999999\n", 1);
         assert_eq!(outcomes[0].status, None);
         assert_eq!(parse_markers(b"", 0), []);
+    }
+
+    #[test]
+    fn marker_found_after_output_without_newline() {
+        let t = FixtureTree::new();
+        let bare = t.write_exec("/usr/bin/bare", b"#!/bin/sh\nprintf foo\nexit 5\n");
+        let line = t.write_exec("/usr/bin/line", b"#!/bin/sh\nprintf 'foo\\n'\n");
+        let quiet = t.write_exec("/usr/bin/quiet", b"#!/bin/sh\n");
+        let outcomes = run(&[step(&bare, &[]), step(&line, &[]), step(&quiet, &[])]);
+        assert_eq!(
+            outcomes,
+            [
+                StepOutcome {
+                    status: Some(5),
+                    output: "foo".into()
+                },
+                // Only the separator newline is dropped; the program's own
+                // line ending stays, so there is no extra blank line.
+                StepOutcome {
+                    status: Some(0),
+                    output: "foo\n".into()
+                },
+                StepOutcome {
+                    status: Some(0),
+                    output: String::new()
+                },
+            ]
+        );
     }
 
     #[test]
@@ -398,8 +433,8 @@ mod tests {
         let body = &script[script.iter().position(|&b| b == b'\n').unwrap() + 1..];
         assert_eq!(
             body,
-            b"'/usr/bin/rm' '-f' '--' '/var/x y' </dev/null 2>&1; printf '@@crumbs %d %d\\n' 0 \"$?\"\n\
-              '/usr/bin/true' </dev/null 2>&1; printf '@@crumbs %d %d\\n' 1 \"$?\"\n"
+            b"'/usr/bin/rm' '-f' '--' '/var/x y' </dev/null 2>&1; printf '\\n@@crumbs %d %d\\n' 0 \"$?\"\n\
+              '/usr/bin/true' </dev/null 2>&1; printf '\\n@@crumbs %d %d\\n' 1 \"$?\"\n"
         );
     }
 
