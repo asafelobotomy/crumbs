@@ -82,6 +82,13 @@ pub struct App {
     pub exec_names: Vec<String>,
     pub wm_classes: Vec<String>,
     pub has_gui: bool,
+    /// An unmanaged app's canonical program (symlinks followed), in-system.
+    #[serde(skip)]
+    pub program: Option<PathBuf>,
+    /// The path the program was reached through, when it differs from
+    /// `program` (a symlink such as `/usr/bin/foo`).
+    #[serde(skip)]
+    pub program_link: Option<PathBuf>,
 }
 
 impl App {
@@ -102,6 +109,8 @@ impl App {
             exec_names: Vec::new(),
             wm_classes: Vec::new(),
             has_gui: false,
+            program: None,
+            program_link: None,
         }
     }
 }

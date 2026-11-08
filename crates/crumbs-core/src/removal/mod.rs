@@ -3,6 +3,7 @@
 
 mod flatpak;
 mod pacman;
+mod unmanaged;
 
 use crate::command::CommandRunner;
 use crate::env::Env;
@@ -11,6 +12,7 @@ use crate::plan::Action;
 
 pub use flatpak::flatpak_still_installed;
 pub use pacman::pacman_still_installed;
+pub use unmanaged::{UnmanagedTarget, plan_unmanaged};
 
 /// The actions that remove the app, plus what the user should be told.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

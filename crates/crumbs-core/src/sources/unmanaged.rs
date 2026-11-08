@@ -101,6 +101,11 @@ fn unmanaged_app(
         Installation::System
     };
     app.location = Some(location_of(&in_system));
+    let canon_in_system = env.unsys(&canon);
+    if canon_in_system != in_system {
+        app.program_link = Some(in_system.clone());
+    }
+    app.program = Some(canon_in_system);
     app.desktop_ids.push(entry.id.clone());
     app.exec_names.extend(exec_basename(entry));
     app.wm_classes.extend(entry.wm_class.clone());

@@ -9,6 +9,7 @@ use crate::env::Env;
 use crate::error::CoreError;
 use crate::leftovers::{Finding, FindingKind};
 use crate::model::{App, SourceKind};
+use crate::removal::UnmanagedTarget;
 use crate::safety::{self, Fingerprint, Scope};
 use crate::size::disk_usage;
 
@@ -130,6 +131,7 @@ pub struct PlanOptions {
 
 pub const NOTE_APP_STAYS: &str = "the app itself stays installed (leftovers only)";
 pub const REASON_APPIMAGE: &str = "AppImage file";
+pub const REASON_UNMANAGED: &str = "the app's own files";
 
 fn remove(path: PathBuf, opts: &PlanOptions) -> Action {
     if opts.permanent {
@@ -148,11 +150,50 @@ pub fn build_plan(
     findings: &[Finding],
     opts: &PlanOptions,
 ) -> Result<Plan, CoreError> {
+    build_plan_unmanaged(env, app, None, findings, opts)
+}
+
+/// Like [`build_plan`], and for an unmanaged app with a `target` (from
+/// `plan_unmanaged`) the target's removal comes first, every leftover
+/// depending on it. A system target is a root delete whatever `--permanent`
+/// says. With `leftovers_only`, or no target, the app stays.
+pub fn build_plan_unmanaged(
+    env: &Env,
+    app: Option<&App>,
+    target: Option<&UnmanagedTarget>,
+    findings: &[Finding],
+    opts: &PlanOptions,
+) -> Result<Plan, CoreError> {
     let mut actions = Vec::new();
     let mut notes = Vec::new();
     let mut skip_path: Option<PathBuf> = None;
     if let Some(app) = app {
-        if app.source == SourceKind::AppImage && !opts.leftovers_only {
+        if let (SourceKind::Unmanaged, Some(t), false) = (app.source, target, opts.leftovers_only) {
+            let action = if t.scope == Scope::SystemTree {
+                notes.push(NOTE_SYSTEM_DELETE.into());
+                Action::Delete {
+                    path: t.path.clone(),
+                }
+            } else {
+                remove(t.path.clone(), opts)
+            };
+            actions.push(PlannedAction {
+                action,
+                size: t.size.bytes,
+                fingerprint: t.fingerprint,
+                scope: t.scope,
+                depends_on: None,
+                depends_on_plan: None,
+                reason: REASON_UNMANAGED.into(),
+            });
+            if let Some(link) = &t.left_link {
+                notes.push(format!(
+                    "{} is left in place (protected path)",
+                    crate::env::display_path(env, link)
+                ));
+            }
+            skip_path = Some(t.path.clone());
+        } else if app.source == SourceKind::AppImage && !opts.leftovers_only {
             let location = app.location.clone().ok_or_else(|| CoreError::Parse {
                 what: format!("app {}", app.id),
                 message: "AppImage has no location".into(),
@@ -383,6 +424,60 @@ mod tests {
                 Action::PackageRemove { .. } => "package-remove",
             })
             .collect()
+    }
+
+    #[test]
+    fn unmanaged_target_first_and_leftovers_depend_on_it() {
+        use crate::removal::UnmanagedTarget;
+        let t = FixtureTree::new();
+        t.write("opt/inky/a", b"aaaa");
+        t.write("home/user/.config/inky/b", b"bbbb");
+        let env = t.env();
+        let tg = |scope| UnmanagedTarget {
+            path: "/opt/inky".into(),
+            scope,
+            fingerprint: safety::fingerprint(&env, Path::new("/opt/inky")).unwrap(),
+            size: disk_usage(&env, Path::new("/opt/inky")),
+            left_link: Some("/usr/bin/inky".into()),
+        };
+        let home = finding(&env, "/home/user/.config/inky", FindingKind::Config);
+        let app = App::new(SourceKind::Unmanaged, "inky.desktop");
+        let o = PlanOptions::default();
+        let plan = build_plan_unmanaged(
+            &env,
+            Some(&app),
+            Some(&tg(Scope::SystemTree)),
+            std::slice::from_ref(&home),
+            &o,
+        )
+        .unwrap();
+        assert_eq!(kinds(&plan), ["delete", "trash"]);
+        assert_eq!(plan.actions[0].scope, Scope::SystemTree);
+        assert_eq!(plan.actions[1].depends_on, Some(0));
+        assert!(plan.notes.iter().any(|n| n == NOTE_SYSTEM_DELETE));
+        assert!(
+            plan.notes
+                .iter()
+                .any(|n| n == "/usr/bin/inky is left in place (protected path)")
+        );
+        // A home target is trashed, or deleted with --permanent.
+        let p = build_plan_unmanaged(&env, Some(&app), Some(&tg(Scope::Home)), &[], &o).unwrap();
+        assert_eq!(kinds(&p), ["trash"]);
+        let perm = PlanOptions {
+            permanent: true,
+            ..o
+        };
+        let p = build_plan_unmanaged(&env, Some(&app), Some(&tg(Scope::Home)), &[], &perm).unwrap();
+        assert_eq!(kinds(&p), ["delete"]);
+        // Leftovers only: the target is ignored.
+        let lo = PlanOptions {
+            leftovers_only: true,
+            ..o
+        };
+        let p = build_plan_unmanaged(&env, Some(&app), Some(&tg(Scope::SystemTree)), &[home], &lo)
+            .unwrap();
+        assert_eq!(kinds(&p), ["trash"]);
+        assert!(p.notes.iter().any(|n| n == NOTE_APP_STAYS));
     }
 
     #[test]
