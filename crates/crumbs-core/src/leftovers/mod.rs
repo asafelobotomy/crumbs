@@ -1,9 +1,9 @@
 //! Leftovers: per-user files an app leaves behind, and how sure we are.
 
-mod candidates;
+pub(crate) mod candidates;
 pub mod matcher;
 mod orphans;
-mod score;
+pub(crate) mod score;
 #[cfg(test)]
 mod tests;
 

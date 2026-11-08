@@ -1,6 +1,13 @@
 //! The bloat model: categories of reclaimable space, the scanner registry
 //! and the parallel scan driver.
 
+mod cache;
+mod dev;
+mod logs;
+#[cfg(test)]
+#[path = "tests.rs"]
+mod scanner_tests;
+
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::SystemTime;
@@ -144,7 +151,12 @@ pub struct ScanReport {
 
 /// The implemented scanners, in [`Category::ALL`] order.
 pub fn scanners() -> Vec<Box<dyn Scanner>> {
-    Vec::new()
+    vec![
+        Box::new(cache::CacheScanner),
+        Box::new(cache::ThumbnailsScanner),
+        Box::new(dev::DevCacheScanner),
+        Box::new(logs::LogsScanner),
+    ]
 }
 
 /// Scans the selected categories with the registered scanners.
