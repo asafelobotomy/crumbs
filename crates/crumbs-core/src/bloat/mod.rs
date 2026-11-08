@@ -1,9 +1,11 @@
 //! The bloat model: categories of reclaimable space, the scanner registry
 //! and the parallel scan driver.
 
+mod appimage;
 mod browser;
 mod cache;
 mod dev;
+mod flatpak;
 mod logs;
 #[cfg(test)]
 #[path = "tests.rs"]
@@ -161,6 +163,8 @@ pub fn scanners() -> Vec<Box<dyn Scanner>> {
         Box::new(temp::TempScanner),
         Box::new(browser::BrowserCacheScanner),
         Box::new(dev::DevCacheScanner),
+        Box::new(flatpak::FlatpakUnusedScanner),
+        Box::new(appimage::AppimageOldScanner),
         Box::new(logs::LogsScanner),
     ]
 }
