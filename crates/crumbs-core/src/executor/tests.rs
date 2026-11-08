@@ -3,11 +3,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use super::*;
+use crate::command::CmdOutput;
 use crate::history::{HistoryAction, read_history};
 use crate::model::SourceKind;
 use crate::plan::PlannedAction;
-use crate::safety::{Scope, fingerprint};
+use crate::safety::{Fingerprint, Scope, fingerprint};
 use crate::size::disk_usage;
+use crate::testing::FakeRunner;
 use crate::testing::FixtureTree;
 
 /// Like `build_plan`: edits free nothing, removals free the disk usage.
@@ -609,4 +611,136 @@ fn execute_rechecks_temp_staleness() {
 
 fn env_dir(t: &FixtureTree, rel: &str) -> PathBuf {
     t.dir.path().join(rel)
+}
+
+fn command_plan(program: &str, args: &[&str]) -> Plan {
+    plan_of(vec![PlannedAction {
+        action: Action::UserCommand {
+            program: program.into(),
+            args: args.iter().map(|a| (*a).to_string()).collect(),
+        },
+        size: 0,
+        fingerprint: Fingerprint {
+            dev: 0,
+            ino: 0,
+            is_symlink: false,
+        },
+        scope: Scope::Home,
+        depends_on: None,
+        reason: "test".into(),
+    }])
+}
+
+#[test]
+fn user_command_runs_trusted_program() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("args.log");
+    let script = format!("#!/bin/sh\necho \"$@\" > {}\n", log.display());
+    t.write_exec("usr/bin/flatpak", script.as_bytes());
+    let env = t.env();
+    let plan = command_plan("flatpak", &["uninstall", "--user", "--unused"]);
+    let report = execute(&env, &Config::default(), &plan);
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        "uninstall --user --unused\n"
+    );
+    assert_eq!(report.freed, 0);
+    let (entries, _) = read_history(&env).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].action, HistoryAction::Command);
+    assert_eq!(entries[0].path, Path::new("/usr/bin/flatpak"));
+    assert_eq!(
+        entries[0].argv.as_deref(),
+        Some(&["uninstall".to_string(), "--user".into(), "--unused".into()][..])
+    );
+    assert!(entries[0].ok);
+    assert_eq!(entries[0].size, 0);
+    let line = fs::read_to_string(env.state_home.join("crumbs/history.jsonl")).unwrap();
+    assert!(line.contains("\"action\":\"command\""), "{line}");
+}
+
+#[test]
+fn user_command_missing_program() {
+    let t = FixtureTree::new();
+    // Only $HOME/.local/bin has it: not a trusted directory.
+    t.write_exec("home/user/.local/bin/flatpak", b"#!/bin/sh\n");
+    let env = t.env();
+    let runner = FakeRunner::new();
+    let plan = command_plan("flatpak", &["uninstall"]);
+    let report = execute_with(&env, &Config::default(), &plan, &runner);
+    assert!(!report.results[0].ok);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("flatpak is not installed")
+    );
+    assert!(runner.calls().is_empty());
+    let (entries, _) = read_history(&env).unwrap();
+    assert_eq!(entries[0].action, HistoryAction::Command);
+    assert!(!entries[0].ok);
+}
+
+#[test]
+fn user_command_failure_reports_last_stderr_line() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/flatpak", b"#!/bin/sh\n");
+    let env = t.env();
+    let out = |status, stderr: &str| CmdOutput {
+        status,
+        stdout: String::new(),
+        stderr: stderr.into(),
+    };
+    let runner = FakeRunner::new()
+        .on("flatpak", &["a"], out(1, "first\nerror: boom\n\n"))
+        .on("flatpak", &["b"], out(3, ""));
+    let mut plan = command_plan("flatpak", &["a"]);
+    plan.actions.extend(command_plan("flatpak", &["b"]).actions);
+    let report = execute_with(&env, &Config::default(), &plan, &runner);
+    assert_eq!(report.results[0].error.as_deref(), Some("error: boom"));
+    assert_eq!(
+        report.results[1].error.as_deref(),
+        Some("exited with status 3")
+    );
+}
+
+#[test]
+fn temp_delete_verified_in_user_temp_scope() {
+    use crate::bloat::{BloatItem, Category, ItemAction};
+    let t = FixtureTree::new();
+    let a = t.write("tmp/a", b"a");
+    let b = t.write("tmp/b", b"b");
+    age_days(&a, 30);
+    age_days(&b, 30);
+    let env = t.env();
+    let item = |path: &str| {
+        let p = PathBuf::from(path);
+        BloatItem {
+            category: Category::Temp,
+            size: Some(1),
+            fingerprint: Some(fingerprint(&env, &p).unwrap()),
+            path: Some(p),
+            label: path.into(),
+            rebuildable: false,
+            preselected: true,
+            note: None,
+            action: ItemAction::Delete,
+            scope: Scope::UserTemp,
+            extra_paths: Vec::new(),
+            app_id: None,
+        }
+    };
+    let items = [item("/tmp/a"), item("/tmp/b")];
+    let plan = crate::plan::build_clean_plan(&env, &items, &Default::default()).unwrap();
+    // /tmp/b is swapped for a different inode after the scan.
+    fs::remove_file(env.sys("/tmp/b")).unwrap();
+    let nb = t.write("tmp/b", b"other");
+    age_days(&nb, 30);
+    let report = execute(&env, &Config::default(), &plan);
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    assert!(!env.sys("/tmp/a").exists());
+    assert!(!report.results[1].ok);
+    assert!(env.sys("/tmp/b").exists());
+    let (entries, _) = read_history(&env).unwrap();
+    assert_eq!(entries[0].action, HistoryAction::Delete);
+    assert_eq!(entries[0].path, Path::new("/tmp/a"));
 }

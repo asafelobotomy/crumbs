@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::bloat::{BloatItem, ItemAction};
 use crate::env::Env;
 use crate::error::CoreError;
 use crate::leftovers::{Finding, FindingKind};
@@ -25,15 +26,23 @@ pub enum Action {
         path: PathBuf,
         remove_lines: Vec<String>,
     },
+    /// Runs a trusted program (resolved at execution time, never via
+    /// `$PATH`) to remove something it manages itself.
+    UserCommand {
+        program: String,
+        args: Vec<String>,
+    },
 }
 
 impl Action {
-    /// The in-system path the action works on.
+    /// The in-system path the action works on. A command has none; its
+    /// program name stands in so it can be shown.
     pub fn path(&self) -> &Path {
         match self {
             Action::Trash { path } | Action::Delete { path } | Action::EditFile { path, .. } => {
                 path
             }
+            Action::UserCommand { program, .. } => Path::new(program),
         }
     }
 }
@@ -159,6 +168,101 @@ pub fn build_plan(
     })
 }
 
+pub const NOTE_TRASH_FREES_LATER: &str =
+    "space is freed when the trash is emptied (or use --permanent)";
+pub const NOTE_PERMANENT_TEMP: &str = "permanently delete (temporary files)";
+pub const NOTE_PERMANENT_TRASH: &str = "permanently delete (emptying the trash)";
+
+/// Builds a plan for `clean` from scanned items. Trash items are trashed
+/// (deleted with `--permanent`), delete items are always deleted, command
+/// items become `UserCommand`. A `UserTemp` or `HomeTrash` item may only be
+/// deleted, never trashed. Extra paths (a trashed entry's `.trashinfo`) are
+/// deleted right after their item and depend on it.
+pub fn build_clean_plan(
+    _env: &Env,
+    items: &[BloatItem],
+    opts: &PlanOptions,
+) -> Result<Plan, CoreError> {
+    let mut actions: Vec<PlannedAction> = Vec::new();
+    for item in items {
+        let reason = item.note.clone().unwrap_or_else(|| item.label.clone());
+        let bad = |message: &str| CoreError::Parse {
+            what: format!("clean item {}", item.label),
+            message: message.into(),
+        };
+        if let ItemAction::Command { program, args } = &item.action {
+            actions.push(PlannedAction {
+                action: Action::UserCommand {
+                    program: program.clone(),
+                    args: args.clone(),
+                },
+                size: item.size.unwrap_or(0),
+                fingerprint: Fingerprint {
+                    dev: 0,
+                    ino: 0,
+                    is_symlink: false,
+                },
+                scope: item.scope,
+                depends_on: None,
+                reason,
+            });
+            continue;
+        }
+        let path = item.path.clone().ok_or_else(|| bad("item has no path"))?;
+        let fingerprint = item
+            .fingerprint
+            .ok_or_else(|| bad("item has no fingerprint"))?;
+        let action = match item.action {
+            ItemAction::Trash if item.scope != Scope::Home => {
+                return Err(bad("items outside the home can only be deleted"));
+            }
+            ItemAction::Trash if !opts.permanent => Action::Trash { path },
+            _ => Action::Delete { path },
+        };
+        let main = actions.len();
+        actions.push(PlannedAction {
+            action,
+            size: item.size.unwrap_or(0),
+            fingerprint,
+            scope: item.scope,
+            depends_on: None,
+            reason: reason.clone(),
+        });
+        for (extra, fp) in &item.extra_paths {
+            actions.push(PlannedAction {
+                action: Action::Delete {
+                    path: extra.clone(),
+                },
+                size: 0,
+                fingerprint: *fp,
+                scope: item.scope,
+                depends_on: Some(main),
+                reason: reason.clone(),
+            });
+        }
+    }
+    let mut notes = Vec::new();
+    if actions
+        .iter()
+        .any(|a| matches!(a.action, Action::Trash { .. }))
+    {
+        notes.push(NOTE_TRASH_FREES_LATER.into());
+    }
+    if actions.iter().any(|a| a.scope == Scope::UserTemp) {
+        notes.push(NOTE_PERMANENT_TEMP.into());
+    }
+    if actions.iter().any(|a| a.scope == Scope::HomeTrash) {
+        notes.push(NOTE_PERMANENT_TRASH.into());
+    }
+    let total_size = actions.iter().map(|a| a.size).sum();
+    Ok(Plan {
+        app_id: None,
+        actions,
+        total_size,
+        notes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +292,7 @@ mod tests {
                 Action::Trash { .. } => "trash",
                 Action::Delete { .. } => "delete",
                 Action::EditFile { .. } => "edit",
+                Action::UserCommand { .. } => "command",
             })
             .collect()
     }
@@ -391,5 +496,149 @@ mod tests {
         };
         let plan = build_plan(&env, Some(&app), &fs, &opts).unwrap();
         assert!(plan.actions.iter().all(|a| a.depends_on.is_none()));
+    }
+
+    fn bitem(
+        env: &Env,
+        path: &str,
+        action: crate::bloat::ItemAction,
+        scope: Scope,
+    ) -> crate::bloat::BloatItem {
+        let p = PathBuf::from(path);
+        crate::bloat::BloatItem {
+            category: crate::bloat::Category::Cache,
+            size: Some(disk_usage(env, &p).bytes),
+            fingerprint: Some(safety::fingerprint(env, &p).unwrap()),
+            path: Some(p),
+            label: format!("label {path}"),
+            rebuildable: true,
+            preselected: true,
+            note: None,
+            action,
+            scope,
+            extra_paths: Vec::new(),
+            app_id: None,
+        }
+    }
+
+    fn command_item() -> crate::bloat::BloatItem {
+        crate::bloat::BloatItem {
+            category: crate::bloat::Category::FlatpakUnused,
+            path: None,
+            label: "remove unused runtimes".into(),
+            size: None,
+            rebuildable: false,
+            preselected: true,
+            note: Some("decided by flatpak".into()),
+            action: crate::bloat::ItemAction::Command {
+                program: "flatpak".into(),
+                args: vec!["uninstall".into(), "--unused".into()],
+            },
+            scope: Scope::Home,
+            fingerprint: None,
+            extra_paths: Vec::new(),
+            app_id: None,
+        }
+    }
+
+    #[test]
+    fn clean_plan_maps_actions() {
+        use crate::bloat::ItemAction;
+        let t = FixtureTree::new();
+        t.write("home/user/.cache/foo/a", b"aaaa");
+        t.write("home/user/.cache/bar/b", b"bbbb");
+        t.write("tmp/old", b"tttt");
+        let env = t.env();
+        let items = [
+            bitem(
+                &env,
+                "/home/user/.cache/foo",
+                ItemAction::Trash,
+                Scope::Home,
+            ),
+            bitem(
+                &env,
+                "/home/user/.cache/bar",
+                ItemAction::Delete,
+                Scope::Home,
+            ),
+            bitem(&env, "/tmp/old", ItemAction::Delete, Scope::UserTemp),
+            command_item(),
+        ];
+        let plan = build_clean_plan(&env, &items, &PlanOptions::default()).unwrap();
+        assert_eq!(kinds(&plan), ["trash", "delete", "delete", "command"]);
+        assert_eq!(plan.app_id, None);
+        assert_eq!(plan.actions[2].scope, Scope::UserTemp);
+        assert_eq!(plan.actions[0].fingerprint, items[0].fingerprint.unwrap());
+        assert_eq!(plan.actions[0].reason, "label /home/user/.cache/foo");
+        assert_eq!(plan.actions[3].reason, "decided by flatpak");
+        assert_eq!(
+            plan.actions[3].action,
+            Action::UserCommand {
+                program: "flatpak".into(),
+                args: vec!["uninstall".into(), "--unused".into()],
+            }
+        );
+        assert_eq!(plan.actions[3].size, 0);
+        assert_eq!(plan.notes, [NOTE_TRASH_FREES_LATER, NOTE_PERMANENT_TEMP]);
+        let json = serde_json::to_value(&plan.actions[3].action).unwrap();
+        assert_eq!(json["type"], "user-command");
+        assert_eq!(json["program"], "flatpak");
+    }
+
+    #[test]
+    fn clean_plan_trash_pairs() {
+        use crate::bloat::ItemAction;
+        let t = FixtureTree::new();
+        t.write("home/user/.local/share/Trash/files/x", b"xxxx");
+        t.write("home/user/.local/share/Trash/info/x.trashinfo", b"i");
+        let env = t.env();
+        let info = PathBuf::from("/home/user/.local/share/Trash/info/x.trashinfo");
+        let mut item = bitem(
+            &env,
+            "/home/user/.local/share/Trash/files/x",
+            ItemAction::Delete,
+            Scope::HomeTrash,
+        );
+        item.extra_paths = vec![(info.clone(), safety::fingerprint(&env, &info).unwrap())];
+        let plan = build_clean_plan(&env, &[item], &PlanOptions::default()).unwrap();
+        assert_eq!(kinds(&plan), ["delete", "delete"]);
+        assert_eq!(plan.actions[1].action, Action::Delete { path: info });
+        assert_eq!(plan.actions[0].depends_on, None);
+        assert_eq!(plan.actions[1].depends_on, Some(0));
+        assert!(plan.actions.iter().all(|a| a.scope == Scope::HomeTrash));
+        assert_eq!(plan.notes, [NOTE_PERMANENT_TRASH]);
+        assert_eq!(plan.total_size, plan.actions[0].size);
+    }
+
+    #[test]
+    fn permanent_turns_trash_into_delete() {
+        use crate::bloat::ItemAction;
+        let t = FixtureTree::new();
+        t.write("home/user/.cache/foo/a", b"aaaa");
+        t.write("tmp/old", b"t");
+        let env = t.env();
+        let opts = PlanOptions {
+            permanent: true,
+            ..PlanOptions::default()
+        };
+        let items = [bitem(
+            &env,
+            "/home/user/.cache/foo",
+            ItemAction::Trash,
+            Scope::Home,
+        )];
+        let plan = build_clean_plan(&env, &items, &opts).unwrap();
+        assert_eq!(kinds(&plan), ["delete"]);
+        assert!(plan.notes.is_empty());
+
+        // Temp and trash items are never trashed, permanent or not.
+        let bad = [bitem(&env, "/tmp/old", ItemAction::Trash, Scope::UserTemp)];
+        for o in [PlanOptions::default(), opts] {
+            assert!(matches!(
+                build_clean_plan(&env, &bad, &o),
+                Err(CoreError::Parse { .. })
+            ));
+        }
     }
 }

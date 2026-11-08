@@ -16,6 +16,7 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 
+use crate::command::{CommandRunner, SystemRunner, resolve_trusted};
 use crate::config::Config;
 use crate::env::{Env, display_path};
 use crate::history::{self, HistoryAction, HistoryEntry};
@@ -56,17 +57,34 @@ struct Done {
 /// `ok` still describes what happened on disk); other entries are
 /// unaffected.
 pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
+    execute_with(env, cfg, plan, &SystemRunner)
+}
+
+/// [`execute`] with the command runner injected; `UserCommand` actions run
+/// through it.
+pub fn execute_with(
+    env: &Env,
+    cfg: &Config,
+    plan: &Plan,
+    runner: &dyn CommandRunner,
+) -> ExecReport {
     let batch = history::next_batch_id(env);
     let mut results = Vec::with_capacity(plan.actions.len());
     let mut freed = 0u64;
     for (i, pa) in plan.actions.iter().enumerate() {
         let id = format!("{batch}-{i}");
-        let path = pa.action.path();
+        let mut path = pa.action.path().to_path_buf();
+        let mut argv = None;
         let outcome = match skip_reason(env, plan, &results, pa.depends_on) {
             Some(reason) => Err(reason),
-            None => safety::verify(env, cfg, pa.scope, path, &pa.fingerprint)
+            // A command has no path to verify; its program is resolved in
+            // the trusted directories right now instead.
+            None if matches!(pa.action, Action::UserCommand { .. }) => {
+                run_command(env, &pa.action, runner, &mut path, &mut argv)
+            }
+            None => safety::verify(env, cfg, pa.scope, &path, &pa.fingerprint)
                 .map_err(|e| e.to_string())
-                .and_then(|()| recheck_scope(env, cfg, pa.scope, path))
+                .and_then(|()| recheck_scope(env, cfg, pa.scope, &path))
                 .and_then(|()| act(env, &pa.action, &pa.fingerprint, &batch)),
         };
         let (ok, error, done) = match outcome {
@@ -84,8 +102,9 @@ pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
                 Action::Trash { .. } => HistoryAction::Trash,
                 Action::Delete { .. } => HistoryAction::Delete,
                 Action::EditFile { .. } => HistoryAction::EditFile,
+                Action::UserCommand { .. } => HistoryAction::Command,
             },
-            path: path.to_path_buf(),
+            path,
             trashed: done.trashed,
             backup: done.backup,
             size: pa.size,
@@ -93,6 +112,7 @@ pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
             error: error.clone(),
             app_id: plan.app_id.clone(),
             restores: None,
+            argv,
         };
         let error = match history::append(env, std::slice::from_ref(&entry)) {
             Ok(()) => error,
@@ -116,6 +136,39 @@ pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
         results,
         freed,
     }
+}
+
+/// Runs a `UserCommand`. On return `path` is the in-system program path (or
+/// the bare name when it is not installed) and `argv` its arguments.
+fn run_command(
+    env: &Env,
+    action: &Action,
+    runner: &dyn CommandRunner,
+    path: &mut PathBuf,
+    argv: &mut Option<Vec<String>>,
+) -> Result<Done, String> {
+    let Action::UserCommand { program, args } = action else {
+        return Err("not a command".into());
+    };
+    *argv = Some(args.clone());
+    let resolved =
+        resolve_trusted(env, program).ok_or_else(|| format!("{program} is not installed"))?;
+    *path = env.unsys(&resolved);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = runner.run(&resolved, &args).map_err(|e| e.to_string())?;
+    if out.status == 0 {
+        return Ok(Done::default());
+    }
+    Err(out
+        .stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map_or_else(
+            || format!("exited with status {}", out.status),
+            str::to_string,
+        ))
 }
 
 /// Scope rules beyond `verify` that are re-run right before acting: a
@@ -169,6 +222,7 @@ fn act(env: &Env, action: &Action, fp: &Fingerprint, batch: &str) -> Result<Done
                 trashed: None,
                 backup,
             }),
+        Action::UserCommand { .. } => Err("a command cannot be run as a path action".into()),
     }
 }
 

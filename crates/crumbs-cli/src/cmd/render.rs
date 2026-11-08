@@ -14,6 +14,7 @@ fn verb(a: &Action) -> &'static str {
         Action::Trash { .. } => "trash",
         Action::Delete { .. } => "delete",
         Action::EditFile { .. } => "edit",
+        Action::UserCommand { .. } => "run",
     }
 }
 
@@ -120,6 +121,7 @@ pub fn report(env: &Env, reports: &[ExecReport]) -> anyhow::Result<bool> {
                     Action::Trash { .. } => "trashed",
                     Action::Delete { .. } => "deleted",
                     Action::EditFile { .. } => "edited",
+                    Action::UserCommand { .. } => "ran",
                 };
                 writeln!(out, "✓ {done} {path}")?;
                 restorable |= !matches!(res.action, Action::Delete { .. });

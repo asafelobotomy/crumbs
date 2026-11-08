@@ -19,6 +19,8 @@ pub enum HistoryAction {
     #[serde(alias = "edit_file")]
     EditFile,
     Restore,
+    /// A `UserCommand` ran; it cannot be undone.
+    Command,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +39,9 @@ pub struct HistoryEntry {
     /// `Restore` entries only: the id of the entry this one restored.
     #[serde(default)]
     pub restores: Option<String>,
+    /// `Command` entries only: the program's arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv: Option<Vec<String>>,
 }
 
 fn io_err(path: &Path, source: io::Error) -> CoreError {
@@ -159,6 +164,7 @@ mod tests {
             error: None,
             app_id: Some("appimage:~/X.AppImage".into()),
             restores: None,
+            argv: None,
         }
     }
 

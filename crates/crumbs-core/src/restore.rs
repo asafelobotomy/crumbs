@@ -107,6 +107,7 @@ fn restore_with(
                     error: error.clone(),
                     app_id: e.app_id.clone(),
                     restores: Some(e.id.clone()),
+                    argv: None,
                 };
                 logged += 1;
                 // Appended right after its action, so a later failure never
@@ -182,6 +183,7 @@ fn restore_one(
     match e.action {
         HistoryAction::Delete => Err("permanently deleted; cannot be restored".into()),
         HistoryAction::Restore => Err(INVALID_ENTRY.into()),
+        HistoryAction::Command => Err("commands cannot be undone".into()),
         HistoryAction::Trash => {
             let t = valid_trash(env, cfg, e).ok_or(INVALID_ENTRY)?;
             check_parents(env, &t.original)?;
@@ -742,5 +744,49 @@ mod tests {
         // The genuine entry still restores.
         let out = restore(&env, &Config::default(), &sel(&rep.batch), false).unwrap();
         assert!(out[0].ok, "{out:?}");
+    }
+
+    #[test]
+    fn restore_reports_commands_not_undoable() {
+        let t = FixtureTree::new();
+        t.write_exec("usr/bin/flatpak", b"#!/bin/sh\n");
+        let env = t.env();
+        let runner = crate::testing::FakeRunner::new().on(
+            "flatpak",
+            &["uninstall"],
+            crate::command::CmdOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        let plan = Plan {
+            app_id: None,
+            actions: vec![PlannedAction {
+                action: Action::UserCommand {
+                    program: "flatpak".into(),
+                    args: vec!["uninstall".into()],
+                },
+                size: 0,
+                fingerprint: crate::safety::Fingerprint {
+                    dev: 0,
+                    ino: 0,
+                    is_symlink: false,
+                },
+                scope: crate::safety::Scope::Home,
+                depends_on: None,
+                reason: "test".into(),
+            }],
+            total_size: 0,
+            notes: Vec::new(),
+        };
+        let rep = crate::executor::execute_with(&env, &Config::default(), &plan, &runner);
+        assert!(rep.results[0].ok);
+        for sel_ in [rep.batch.clone(), rep.results[0].history_id.clone()] {
+            let out = restore(&env, &Config::default(), &sel(&sel_), false).unwrap();
+            assert_eq!(out.len(), 1, "{sel_}");
+            assert!(!out[0].ok);
+            assert_eq!(out[0].error.as_deref(), Some("commands cannot be undone"));
+        }
     }
 }
