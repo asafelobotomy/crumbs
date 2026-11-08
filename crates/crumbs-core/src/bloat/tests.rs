@@ -1064,3 +1064,23 @@ fn entry_stat_uses_later_of_mtime_and_ctime() {
     let st = super::temp::EntryStat::of(&m).unwrap();
     assert_eq!(st.changed, m.modified().unwrap(), "a later mtime wins");
 }
+
+#[test]
+fn cache_skips_sockets_fifos_and_devices() {
+    use rustix::fs::{CWD, FileType, Mode, mknodat};
+    let t = FixtureTree::new();
+    t.write("home/user/.cache/plain/f", b"x");
+    let cache = t.dir.path().join("home/user/.cache");
+    mknodat(
+        CWD,
+        cache.join("fifo"),
+        FileType::Fifo,
+        Mode::from_raw_mode(0o600),
+        0,
+    )
+    .unwrap();
+    let _sock = std::os::unix::net::UnixListener::bind(cache.join("sock")).unwrap();
+    let cfg = Config::default();
+    let items = run(&t, &cfg, &inv(vec![]), Category::Cache);
+    assert_eq!(paths(&items), [PathBuf::from("/home/user/.cache/plain")]);
+}

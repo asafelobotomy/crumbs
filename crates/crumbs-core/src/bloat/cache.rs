@@ -77,7 +77,16 @@ impl Scanner for CacheScanner {
             .collect();
         let owners: Vec<(&App, Idents)> = cx.inv.apps.iter().map(|a| (a, Idents::of(a))).collect();
 
-        let mut names: Vec<OsString> = rd.flatten().map(|e| e.file_name()).collect();
+        // Only files, directories and symlinks: a socket, fifo or device
+        // is live or special, never cache to trash.
+        let mut names: Vec<OsString> = rd
+            .flatten()
+            .filter(|e| {
+                e.file_type()
+                    .is_ok_and(|t| t.is_file() || t.is_dir() || t.is_symlink())
+            })
+            .map(|e| e.file_name())
+            .collect();
         names.sort();
         let mut out = Vec::new();
         for name in names {
