@@ -152,6 +152,13 @@ fn action_target(action: &Action) -> PathBuf {
     }
 }
 
+fn human_duration(d: std::time::Duration) -> String {
+    match d.as_secs() {
+        s if s >= 60 && s % 60 == 0 => format!("{} min", s / 60),
+        s => format!("{s} s"),
+    }
+}
+
 /// Runs a `UserCommand`. On return `path` is the in-system program path (or
 /// the bare name when it is not installed) and `argv` its arguments.
 fn run_command(
@@ -171,7 +178,10 @@ fn run_command(
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = runner.run(&resolved, &args).map_err(|e| e.to_string())?;
     if out.timed_out {
-        return Err("timed out".into());
+        return Err(format!(
+            "{program} timed out after {}",
+            human_duration(USER_COMMAND_TIMEOUT)
+        ));
     }
     if out.status == 0 {
         return Ok(Done::default());

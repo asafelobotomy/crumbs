@@ -1,8 +1,11 @@
 use std::ffi::OsString;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+
+use rustix::process::{Pid, Signal, kill_process_group};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,7 +30,7 @@ pub trait CommandRunner: Send + Sync {
 }
 
 /// Variables a child may inherit; everything else is dropped.
-const ENV_ALLOWLIST: [&str; 8] = [
+const ENV_ALLOWLIST: [&str; 9] = [
     "HOME",
     "USER",
     "LOGNAME",
@@ -36,8 +39,8 @@ const ENV_ALLOWLIST: [&str; 8] = [
     "XDG_DATA_HOME",
     "XDG_CACHE_HOME",
     "XDG_STATE_HOME",
+    "DBUS_SESSION_BUS_ADDRESS",
 ];
-const ENV_ALLOWLIST_EXTRA: &str = "DBUS_SESSION_BUS_ADDRESS";
 const CHILD_PATH: &str = "/usr/bin:/usr/sbin:/bin:/sbin";
 const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a `UserCommand` may run.
@@ -72,9 +75,10 @@ impl SystemRunner {
             message: e.to_string(),
         };
         let mut cmd = Command::new(program);
-        cmd.args(args).env_clear();
+        // Its own process group, so a timeout can kill grandchildren too.
+        cmd.args(args).env_clear().process_group(0);
         for (k, v) in parent {
-            if ENV_ALLOWLIST.iter().any(|a| k == *a) || k == ENV_ALLOWLIST_EXTRA {
+            if ENV_ALLOWLIST.iter().any(|a| k == *a) {
                 cmd.env(k, v);
             }
         }
@@ -91,14 +95,17 @@ impl SystemRunner {
         let err = child.stderr.take().map(read_all);
         let deadline = Instant::now() + self.timeout;
         let (status, timed_out) = loop {
-            match child.try_wait().map_err(fail)? {
-                Some(st) => break (st.code().unwrap_or(-1), false),
-                None if Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+            match child.try_wait() {
+                Ok(Some(st)) => break (st.code().unwrap_or(-1), false),
+                Ok(None) if Instant::now() >= deadline => {
+                    kill_group(&mut child);
                     break (-1, true);
                 }
-                None => thread::sleep(POLL_INTERVAL),
+                Ok(None) => thread::sleep(POLL_INTERVAL),
+                Err(e) => {
+                    kill_group(&mut child);
+                    return Err(fail(e));
+                }
             }
         };
         let text = |h: Option<thread::JoinHandle<Vec<u8>>>| {
@@ -119,6 +126,16 @@ impl Default for SystemRunner {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// SIGKILLs the child's whole process group (it leads one) and reaps the
+/// child; descendants holding the output pipes die with it.
+fn kill_group(child: &mut Child) {
+    if let Some(pid) = i32::try_from(child.id()).ok().and_then(Pid::from_raw) {
+        let _ = kill_process_group(pid, Signal::KILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn read_all<R: Read + Send + 'static>(mut r: R) -> thread::JoinHandle<Vec<u8>> {
@@ -194,6 +211,37 @@ mod tests {
         assert!(out.timed_out);
         assert_eq!(out.status, -1);
         assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    #[test]
+    fn system_runner_timeout_kills_the_process_group() {
+        let t = FixtureTree::new();
+        let pidfile = t.dir.path().join("pgid");
+        // The shell backgrounds a sleep that inherits the pipes, then waits
+        // on another; killing only the shell would leave both running.
+        let script = format!(
+            "#!/bin/sh\nsleep 5 &\necho $$ > {}\nsleep 5\n",
+            pidfile.display()
+        );
+        let prog = t.write_exec("/usr/bin/grandkids", script.as_bytes());
+        let started = std::time::Instant::now();
+        let out = SystemRunner::with_timeout(Duration::from_millis(200))
+            .run(&prog, &[])
+            .unwrap();
+        assert!(out.timed_out);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let pgid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // Signal 0 to the group: fails with ESRCH once nothing is left.
+        let alive = Command::new("/bin/kill")
+            .args(["-0", "--", &format!("-{pgid}")])
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "process group {pgid} survived");
     }
 
     #[test]

@@ -231,17 +231,15 @@ fn is_excluded(cfg: &Config, path: &Path) -> bool {
         .any(|pat| glob_match(pat, &text) || could_match_below(pat, &text))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fingerprint {
     pub dev: u64,
     pub ino: u64,
     pub is_symlink: bool,
-    /// Status-change time. A file replaced by another that reuses the inode
-    /// still gets a new ctime. Never serialised: it is only meaningful
-    /// within the run that took the fingerprint.
-    #[serde(skip)]
+    /// Status-change time of a file or symlink: a file replaced by another
+    /// that reuses the inode still gets a new ctime. Always 0 for a
+    /// directory, whose ctime changes whenever an entry is added or removed.
     pub ctime: i64,
-    #[serde(skip)]
     pub ctime_nsec: i64,
 }
 
@@ -266,8 +264,8 @@ fn fingerprint_of(m: &fs::Metadata) -> Fingerprint {
         dev: m.dev(),
         ino: m.ino(),
         is_symlink: m.file_type().is_symlink(),
-        ctime: m.ctime(),
-        ctime_nsec: m.ctime_nsec(),
+        ctime: if m.is_dir() { 0 } else { m.ctime() },
+        ctime_nsec: if m.is_dir() { 0 } else { m.ctime_nsec() },
     }
 }
 
@@ -1040,5 +1038,17 @@ mod tests {
             verify(&env, &cfg, Scope::Home, p, &stale),
             Err(SafetyError::Changed("~/.config/foo/bar".into()))
         );
+    }
+
+    #[test]
+    fn directory_gaining_an_entry_still_verifies() {
+        let t = FixtureTree::new();
+        t.write("/home/user/.config/foo/bar", b"x");
+        let env = t.env();
+        let d = std::path::Path::new("/home/user/.config/foo");
+        let fp = fingerprint(&env, d).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        t.write("/home/user/.config/foo/new", b"y");
+        assert!(verify(&env, &Config::default(), Scope::Home, d, &fp).is_ok());
     }
 }

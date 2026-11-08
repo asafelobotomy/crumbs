@@ -607,12 +607,10 @@ fn execute_rechecks_temp_staleness() {
     stale.scope = Scope::UserTemp;
     let mut ok = planned(&env, delete("/tmp/gone"));
     ok.scope = Scope::UserTemp;
-    // Someone starts using the dir between scan and clean. Adding an entry
-    // bumps the dir's ctime, which `verify` now catches by itself, so the
-    // fingerprint is retaken to isolate the staleness recheck.
+    // Someone starts using the dir between scan and clean; the dir's own
+    // inode is unchanged, so `verify` alone would pass.
     age_days(&t.write("tmp/work/new", b"fresh"), 0);
     age_days(&dir, 30);
-    stale.fingerprint = fingerprint(&env, Path::new("/tmp/work")).unwrap();
     let report = execute(&env, &Config::default(), &plan_of(vec![stale, ok]));
     assert!(!report.results[0].ok);
     assert_eq!(
@@ -744,7 +742,10 @@ fn user_command_timeout_is_a_failure() {
         &runner,
     );
     assert!(!report.results[0].ok);
-    assert_eq!(report.results[0].error.as_deref(), Some("timed out"));
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("flatpak timed out after 30 min")
+    );
 }
 
 #[test]
