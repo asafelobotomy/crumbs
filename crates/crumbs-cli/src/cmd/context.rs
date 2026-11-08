@@ -11,6 +11,7 @@ use crumbs_core::rules::load_rules;
 use crumbs_core::sources::ListOptions;
 use crumbs_core::{CoreError, Env};
 
+use super::render::sanitise;
 use crate::output::ErrorEntry;
 
 /// `config.toml` could not be read or parsed. `main` reports it under
@@ -88,6 +89,13 @@ impl Context {
             notes,
         })
     }
+
+    /// Failed sources, then notes: what a command reports as warnings.
+    pub fn errors(&self) -> Vec<ErrorEntry> {
+        let mut errors: Vec<ErrorEntry> = self.inv.errors.iter().map(ErrorEntry::from).collect();
+        errors.extend(self.notes.iter().cloned());
+        errors
+    }
 }
 
 /// Prints notes as `warning: <source>: <message>` on stderr, or for
@@ -95,10 +103,11 @@ impl Context {
 pub fn print_notes(notes: &[ErrorEntry]) -> std::io::Result<()> {
     let mut err = anstream::stderr().lock();
     for n in notes {
+        let message = sanitise(&n.message);
         if n.source == "config" {
-            writeln!(err, "warning: {}", n.message)?;
+            writeln!(err, "warning: {message}")?;
         } else {
-            writeln!(err, "warning: {}: {}", n.source, n.message)?;
+            writeln!(err, "warning: {}: {message}", n.source)?;
         }
     }
     Ok(())

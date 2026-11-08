@@ -123,7 +123,7 @@ fn clean(env: &Env, out: Out, args: &OrphansArgs) -> anyhow::Result<ExitCode> {
         app: None,
         plan,
     }];
-    apply(env, &cx, out, &targets, act)
+    apply(env, &cx.cfg, &cx.errors(), out, &targets, act)
 }
 
 fn list(env: &Env, show_low: bool, json: bool) -> anyhow::Result<ExitCode> {

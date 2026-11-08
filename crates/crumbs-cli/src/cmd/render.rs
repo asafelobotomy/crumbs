@@ -32,8 +32,29 @@ pub fn sanitise(line: &str) -> String {
         .collect()
 }
 
-/// Prints each plan under its heading, then the totals line.
-pub fn preview(env: &Env, plans: &[(String, &Plan)], permanent: bool) -> anyhow::Result<()> {
+/// What a row shows for the action's target: the path, or for a command
+/// its whole command line.
+fn target(env: &Env, a: &Action) -> String {
+    match a {
+        Action::UserCommand { program, args } => {
+            let mut line = program.clone();
+            for arg in args {
+                line.push(' ');
+                line.push_str(arg);
+            }
+            sanitise(&line)
+        }
+        _ => display_path(env, a.path()),
+    }
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// Prints each plan under its heading, then the totals lines: trashed and
+/// deleted items are counted apart, whatever `--permanent` was.
+pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
     for (i, (heading, plan)) in plans.iter().enumerate() {
         {
             let mut out = anstream::stdout().lock();
@@ -49,11 +70,16 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)], permanent: bool) -> anyhow:
                 .actions
                 .iter()
                 .map(|a| {
+                    let size = match a.action {
+                        // Flatpak decides what goes; the size is unknown.
+                        Action::UserCommand { .. } => "—".to_string(),
+                        _ => fmt_size(a.size),
+                    };
                     vec![
                         verb(&a.action).to_string(),
-                        fmt_size(a.size),
-                        display_path(env, a.action.path()),
-                        a.reason.clone(),
+                        size,
+                        target(env, &a.action),
+                        sanitise(&a.reason),
                     ]
                 })
                 .collect();
@@ -76,32 +102,36 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)], permanent: bool) -> anyhow:
         }
     }
     let all = || plans.iter().flat_map(|(_, p)| &p.actions);
-    let removals = all()
-        .filter(|a| !matches!(a.action, Action::EditFile { .. }))
-        .count();
-    let edits = all()
-        .filter(|a| matches!(a.action, Action::EditFile { .. }))
-        .count();
-    let size: u64 = plans.iter().map(|(_, p)| p.total_size).sum();
+    let tally = |want: fn(&Action) -> bool| {
+        all()
+            .filter(|a| want(&a.action))
+            .fold((0usize, 0u64), |(n, size), a| (n + 1, size + a.size))
+    };
+    let (trashed, trash_size) = tally(|a| matches!(a, Action::Trash { .. }));
+    let (deleted, delete_size) = tally(|a| matches!(a, Action::Delete { .. }));
+    let (edits, _) = tally(|a| matches!(a, Action::EditFile { .. }));
+    let (commands, _) = tally(|a| matches!(a, Action::UserCommand { .. }));
     let mut out = anstream::stdout().lock();
     writeln!(out)?;
-    if removals > 0 {
-        if permanent {
-            writeln!(
-                out,
-                "will permanently delete {removals} items ({})",
-                fmt_size(size)
-            )?;
-        } else {
-            writeln!(
-                out,
-                "will move {removals} items ({}) to the trash",
-                fmt_size(size)
-            )?;
-        }
+    if trashed > 0 {
+        writeln!(
+            out,
+            "will move {trashed} items ({}) to the trash",
+            fmt_size(trash_size)
+        )?;
+    }
+    if deleted > 0 {
+        writeln!(
+            out,
+            "will permanently delete {deleted} items ({})",
+            fmt_size(delete_size)
+        )?;
     }
     if edits > 0 {
         writeln!(out, "will edit {edits} files (a backup of each is kept)")?;
+    }
+    if commands > 0 {
+        writeln!(out, "will run {}", plural(commands, "command", "commands"))?;
     }
     Ok(())
 }
@@ -111,46 +141,59 @@ fn can_undo(a: &Action) -> bool {
     matches!(a, Action::Trash { .. } | Action::EditFile { .. })
 }
 
-/// Prints one `✓`/`✗` line per action and the closing `freed …` line.
-/// Returns whether every action succeeded.
-pub fn report(env: &Env, reports: &[ExecReport]) -> anyhow::Result<bool> {
+/// Prints one `✓`/`✗` line per action and the closing line: `moved <size>
+/// to the trash` for what was trashed, `freed <size>` for what was deleted
+/// (always shown when nothing was trashed), and the undo hint when anything
+/// can be restored. Each report goes with the plan it ran. Returns whether
+/// every action succeeded.
+pub fn report(env: &Env, runs: &[(&Plan, &ExecReport)]) -> anyhow::Result<bool> {
     let mut out = anstream::stdout().lock();
     let mut all_ok = true;
     let mut undo: Vec<&str> = Vec::new();
-    for r in reports {
+    let (mut moved, mut freed) = (0u64, 0u64);
+    let (mut any_moved, mut any_freed) = (false, false);
+    for (plan, r) in runs {
         let mut restorable = false;
-        for res in &r.results {
-            let path = display_path(env, res.action.path());
+        for (res, planned) in r.results.iter().zip(&plan.actions) {
+            let shown = target(env, &res.action);
             if res.ok {
                 let done = match res.action {
-                    Action::Trash { .. } => "trashed",
-                    Action::Delete { .. } => "deleted",
+                    Action::Trash { .. } => {
+                        any_moved = true;
+                        moved = moved.saturating_add(planned.size);
+                        "trashed"
+                    }
+                    Action::Delete { .. } => {
+                        any_freed = true;
+                        freed = freed.saturating_add(planned.size);
+                        "deleted"
+                    }
                     Action::EditFile { .. } => "edited",
                     Action::UserCommand { .. } => "ran",
                 };
-                writeln!(out, "✓ {done} {path}")?;
+                writeln!(out, "✓ {done} {shown}")?;
                 restorable |= can_undo(&res.action);
             } else {
                 all_ok = false;
-                let err = res.error.as_deref().unwrap_or("failed");
-                writeln!(out, "✗ {path}: {err}")?;
+                let err = sanitise(res.error.as_deref().unwrap_or("failed"));
+                writeln!(out, "✗ {shown}: {err}")?;
             }
         }
         if restorable {
             undo.push(&r.batch);
         }
     }
-    let freed: u64 = reports.iter().map(|r| r.freed).sum();
-    if undo.is_empty() {
-        writeln!(out, "freed {}", fmt_size(freed))?;
-    } else {
-        writeln!(
-            out,
-            "freed {} · undo with: crumbs restore {}",
-            fmt_size(freed),
-            undo.join(" ")
-        )?;
+    let mut parts: Vec<String> = Vec::new();
+    if any_moved {
+        parts.push(format!("moved {} to the trash", fmt_size(moved)));
     }
+    if any_freed || !any_moved {
+        parts.push(format!("freed {}", fmt_size(freed)));
+    }
+    if !undo.is_empty() {
+        parts.push(format!("undo with: crumbs restore {}", undo.join(" ")));
+    }
+    writeln!(out, "{}", parts.join(" · "))?;
     Ok(all_ok)
 }
 

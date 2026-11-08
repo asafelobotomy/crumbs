@@ -1,11 +1,12 @@
 //! The flow shared by the commands that change files (`uninstall`,
-//! `orphans --clean`): usage checks, choosing findings, then preview,
-//! running-app check, confirmation, execution and report.
+//! `orphans --clean`, `clean`): usage checks, choosing findings, then
+//! preview, running-app check, confirmation, execution and report.
 
 use std::io::Write;
 use std::process::ExitCode;
 
 use clap::Args;
+use crumbs_core::config::Config;
 use crumbs_core::env::display_path;
 use crumbs_core::executor::{ExecReport, execute, running_processes};
 use crumbs_core::inventory::Inventory;
@@ -14,7 +15,7 @@ use crumbs_core::plan::{Action, Plan, PlannedAction};
 use crumbs_core::{App, Env};
 use serde_json::json;
 
-use super::context::{Context, print_notes};
+use super::context::print_notes;
 use super::render;
 use crate::output::{ErrorEntry, finding_kind, fmt_size, print_json_entries};
 use crate::prompt;
@@ -115,10 +116,19 @@ pub fn refuse_source_errors(
     inv: &Inventory,
     act: &ActFlags,
 ) -> anyhow::Result<Option<ExitCode>> {
-    if inv.errors.is_empty() || act.force || act.dry_run {
+    refuse_failed(out, inv.errors.iter().map(|e| e.source.as_str()), act)
+}
+
+/// [`refuse_source_errors`] for any failed sources, named by `failed`.
+pub fn refuse_failed<'a>(
+    out: Out,
+    failed: impl IntoIterator<Item = &'a str>,
+    act: &ActFlags,
+) -> anyhow::Result<Option<ExitCode>> {
+    let mut failed: Vec<&str> = failed.into_iter().collect();
+    if failed.is_empty() || act.force || act.dry_run {
         return Ok(None);
     }
-    let mut failed: Vec<&str> = inv.errors.iter().map(|e| e.source.as_str()).collect();
     failed.sort_unstable();
     failed.dedup();
     let msg = format!(
@@ -241,17 +251,18 @@ pub fn drop_overlaps(targets: &mut [Target]) {
 }
 
 /// Steps 4 to 7: preview, running-app check, confirmation, execution and
-/// report. JSON `report` has one entry per plan, in order: `null` for a
-/// plan with nothing to do; the whole field is `null` on a dry run.
+/// report. `errors` (failed sources, then notes) are warnings in the
+/// preview and the envelope's `errors` under `--json`. JSON `report` has
+/// one entry per plan, in order: `null` for a plan with nothing to do; the
+/// whole field is `null` on a dry run.
 pub fn apply(
     env: &Env,
-    cx: &Context,
+    cfg: &Config,
+    errors: &[ErrorEntry],
     out: Out,
     targets: &[Target],
     act: &ActFlags,
 ) -> anyhow::Result<ExitCode> {
-    let mut errors: Vec<ErrorEntry> = cx.inv.errors.iter().map(ErrorEntry::from).collect();
-    errors.extend(cx.notes.iter().cloned());
     let plans: Vec<&Plan> = targets.iter().map(|t| &t.plan).collect();
     let empty = plans.iter().all(|p| p.actions.is_empty());
 
@@ -260,18 +271,13 @@ pub fn apply(
             .iter()
             .map(|t| (t.heading.clone(), &t.plan))
             .collect();
-        render::preview(env, &headed, act.permanent)?;
-        let mut err = anstream::stderr().lock();
-        for e in &cx.inv.errors {
-            writeln!(err, "warning: {}: {}", e.source.as_str(), e.message)?;
-        }
-        drop(err);
-        print_notes(&cx.notes)?;
+        render::preview(env, &headed)?;
+        print_notes(errors)?;
     }
     if act.dry_run {
         if act.json {
             let data = json!({ "plans": plans, "report": null });
-            print_json_entries(out.command, &data, &errors)?;
+            print_json_entries(out.command, &data, errors)?;
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -279,7 +285,7 @@ pub fn apply(
         if act.json {
             let nulls = vec![serde_json::Value::Null; plans.len()];
             let data = json!({ "plans": plans, "report": nulls });
-            print_json_entries(out.command, &data, &errors)?;
+            print_json_entries(out.command, &data, errors)?;
         } else {
             writeln!(anstream::stdout().lock(), "nothing to do")?;
         }
@@ -319,7 +325,7 @@ pub fn apply(
 
     let reports: Vec<Option<ExecReport>> = plans
         .iter()
-        .map(|p| (!p.actions.is_empty()).then(|| execute(env, &cx.cfg, p)))
+        .map(|p| (!p.actions.is_empty()).then(|| execute(env, cfg, p)))
         .collect();
     let all_ok = reports
         .iter()
@@ -327,11 +333,15 @@ pub fn apply(
         .all(|r| r.results.iter().all(|x| x.ok));
     if act.json {
         let data = json!({ "plans": plans, "report": reports });
-        print_json_entries(out.command, &data, &errors)?;
+        print_json_entries(out.command, &data, errors)?;
     } else {
         writeln!(anstream::stdout().lock())?;
-        let done: Vec<ExecReport> = reports.into_iter().flatten().collect();
-        render::report(env, &done)?;
+        let runs: Vec<(&Plan, &ExecReport)> = plans
+            .iter()
+            .zip(&reports)
+            .filter_map(|(p, r)| r.as_ref().map(|r| (*p, r)))
+            .collect();
+        render::report(env, &runs)?;
     }
     Ok(ExitCode::from(if all_ok { 0 } else { 3 }))
 }

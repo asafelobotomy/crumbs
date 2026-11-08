@@ -13,6 +13,8 @@ use super::context::{ScanSetup, print_notes};
 use super::render::sanitise;
 use crate::output::{ErrorEntry, fmt_size, print_json_entries, print_table_with_details};
 
+pub const SYSTEM_UNAVAILABLE: &str =
+    "system cleanup needs privileged support (coming in a later version)";
 const OFF_NOTE: &str = "off (enable with --category or config)";
 
 #[derive(Args, Debug)]
@@ -47,10 +49,9 @@ fn skipped(category: Category) -> CategoryReport {
 
 pub fn run(env: &Env, args: &ScanArgs) -> anyhow::Result<ExitCode> {
     if args.system {
-        let msg = "system cleanup needs privileged support (coming in a later version)";
-        writeln!(anstream::stderr().lock(), "error: {msg}")?;
+        writeln!(anstream::stderr().lock(), "error: {SYSTEM_UNAVAILABLE}")?;
         if args.json {
-            let entry = [ErrorEntry::new("cli", msg.into())];
+            let entry = [ErrorEntry::new("cli", SYSTEM_UNAVAILABLE.into())];
             print_json_entries("scan", &serde_json::Value::Null, &entry)?;
         }
         return Ok(ExitCode::from(2));

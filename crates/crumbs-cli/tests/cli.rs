@@ -1458,3 +1458,296 @@ fn scan_sanitises_labels() {
     assert!(!text.contains('\u{7}'), "{text:?}");
     assert!(text.contains("\u{FFFD}evil"), "{text:?}");
 }
+
+// ---- clean (only ever inside the fixture) ----
+
+/// Lists apps and runtimes; `uninstall` appends its args to
+/// `$CRUMBS_ROOT/flatpak-args` instead of removing anything.
+const FLATPAK_RECORD: &str = "#!/bin/sh\nif [ \"$1\" = uninstall ]; then echo \"$@\" >> \"$CRUMBS_ROOT/flatpak-args\"; exit 0; fi\nprintf 'app.xemu.xemu\\txemu\\t0.8.136\\tuser\\t34.4 MB\\n'\n";
+/// The app listing works; only the runtime listing (the `flatpak-unused`
+/// scanner) fails.
+const FLATPAK_RUNTIME_FAIL: &str = "#!/bin/sh\ncase \"$*\" in *--runtime*) echo boom >&2; exit 1;; esac\nprintf 'app.xemu.xemu\\txemu\\t0.8.136\\tuser\\t34.4 MB\\n'\n";
+
+fn run_clean(t: &FixtureTree, args: &[&str]) -> (i32, String, String) {
+    let out = crumbs(t).arg("clean").args(args).output().unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+/// An old file of the user's directly in the fixture's `/tmp`.
+fn old_temp(t: &FixtureTree, name: &str) {
+    let p = t.write(&format!("/tmp/{name}"), &[1u8; 4000]);
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86_400);
+    std::fs::File::options()
+        .write(true)
+        .open(&p)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+}
+
+#[test]
+fn clean_cache_trashes_and_logs() {
+    let t = scan_fixture(FLATPAK_OK);
+    let (code, stdout, stderr) = run_clean(&t, &["cache", "--yes"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!real(&t, "/home/user/.cache/foo").exists());
+    assert!(trash_files(&t).contains(&"foo".to_string()));
+    // Only the named category.
+    assert!(real(&t, "/home/user/.cache/thumbnails/a.png").exists());
+    assert!(real(&t, "/home/user/.local/share/Trash/files/old.txt").exists());
+    assert!(stdout.contains("will move 1 items"), "{stdout}");
+    assert!(
+        stdout.contains("note: space is freed when the trash is emptied (or use --permanent)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("✓ trashed ~/.cache/foo"), "{stdout}");
+    let h = history_json(&t);
+    let batches = h["data"]["batches"].as_array().unwrap();
+    assert_eq!(batches.len(), 1, "{h}");
+    assert_eq!(batches[0]["items"], 1);
+    let batch = batches[0]["batch"].as_str().unwrap();
+    let last = stdout.lines().last().unwrap();
+    assert!(
+        last.starts_with("moved ")
+            && last.ends_with(&format!(
+                " to the trash · undo with: crumbs restore {batch}"
+            ))
+            && !last.contains("freed"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn clean_temp_deletes_permanently_with_wording() {
+    let t = scan_fixture(FLATPAK_OK);
+    old_temp(&t, "old-build.log");
+    let (code, stdout, _) = run_clean(&t, &["temp", "--dry-run"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(stdout.contains("/tmp/old-build.log"), "{stdout}");
+    assert!(
+        stdout.contains("note: permanently delete (temporary files)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("will permanently delete 1 items"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("to the trash"), "{stdout}");
+    let (code, stdout, stderr) = run_clean(&t, &["temp", "--yes"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!real(&t, "/tmp/old-build.log").exists());
+    assert!(
+        !trash_files(&t).contains(&"old-build.log".to_string()),
+        "deleted, not trashed"
+    );
+    assert!(stdout.contains("✓ deleted /tmp/old-build.log"), "{stdout}");
+    let last = stdout.lines().last().unwrap();
+    assert!(
+        last.starts_with("freed ") && last != "freed 0 B",
+        "{stdout}"
+    );
+    assert!(!stdout.contains("undo with"), "{stdout}");
+}
+
+#[test]
+fn clean_trash_empties_pairs() {
+    let t = scan_fixture(FLATPAK_OK);
+    let (code, stdout, stderr) = run_clean(&t, &["trash", "--yes"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!real(&t, "/home/user/.local/share/Trash/files/old.txt").exists());
+    assert!(!real(&t, "/home/user/.local/share/Trash/info/old.txt.trashinfo").exists());
+    assert!(
+        stdout.contains("note: permanently delete (emptying the trash)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("will permanently delete"), "{stdout}");
+    assert!(
+        stdout.contains("✓ deleted ~/.local/share/Trash/info/old.txt.trashinfo"),
+        "{stdout}"
+    );
+    let last = stdout.lines().last().unwrap();
+    assert!(
+        last.starts_with("freed ") && last != "freed 0 B",
+        "{stdout}"
+    );
+    assert!(!stdout.contains("undo with"), "{stdout}");
+    // The rest of the home is untouched.
+    assert!(real(&t, "/home/user/.cache/foo/blob").exists());
+}
+
+#[test]
+fn clean_flatpak_runs_command() {
+    let t = scan_fixture(FLATPAK_RECORD);
+    let args_file = real(&t, "/flatpak-args");
+    // Not pre-selected unless the category is named.
+    let (code, stdout, _) = run_clean(&t, &["--dry-run"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(!stdout.contains("flatpak uninstall"), "{stdout}");
+    let (code, stdout, _) = run_clean(&t, &["flatpak-unused", "--dry-run"]);
+    assert_eq!(code, 0, "{stdout}");
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("run"))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert!(
+        row.contains("—") && row.contains("flatpak uninstall --user --unused --noninteractive -y"),
+        "{row}"
+    );
+    assert!(stdout.contains("will run 1 command"), "{stdout}");
+    assert!(!args_file.exists());
+    let (code, stdout, stderr) = run_clean(&t, &["flatpak-unused", "--yes"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&args_file).unwrap(),
+        "uninstall --user --unused --noninteractive -y\n"
+    );
+    assert!(
+        stdout.contains("✓ ran flatpak uninstall --user --unused --noninteractive -y"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("undo with"), "{stdout}");
+}
+
+#[test]
+fn clean_dry_run_changes_nothing() {
+    let t = scan_fixture(FLATPAK_RECORD);
+    old_temp(&t, "old-build.log");
+    let before = tree_state(&t);
+    let (code, stdout, _) = run_clean(&t, &["--dry-run"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(stdout.contains("~/.cache/foo"), "{stdout}");
+    assert!(stdout.contains("/tmp/old-build.log"), "{stdout}");
+    let v = stdout_json(crumbs(&t).args([
+        "clean",
+        "trash",
+        "cache",
+        "flatpak-unused",
+        "--dry-run",
+        "--json",
+    ]));
+    assert_eq!(v["command"], "clean");
+    assert!(v["data"]["report"].is_null());
+    assert!(
+        !v["data"]["plans"][0]["actions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(tree_state(&t), before);
+}
+
+#[test]
+fn clean_non_interactive_without_yes_exit_2() {
+    let t = scan_fixture(FLATPAK_OK);
+    crumbs(&t)
+        .args(["clean", "cache"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "refusing to act without --yes in a non-interactive session",
+        ));
+    assert!(real(&t, "/home/user/.cache/foo/blob").exists());
+}
+
+#[test]
+fn clean_json_requires_yes_or_dry_run() {
+    let t = scan_fixture(FLATPAK_OK);
+    let v = json_error(&t, &["clean", "--json"], 2);
+    assert_eq!(v["command"], "clean");
+    let msg = v["errors"][0]["message"].as_str().unwrap();
+    assert_eq!(msg, "--json needs --yes or --dry-run");
+    assert!(real(&t, "/home/user/.cache/foo/blob").exists());
+    let v = stdout_json(crumbs(&t).args(["clean", "cache", "--json", "--yes"]));
+    assert_eq!(v["command"], "clean");
+    assert_eq!(v["data"]["report"][0]["results"][0]["ok"], true, "{v}");
+    assert!(!real(&t, "/home/user/.cache/foo").exists());
+}
+
+#[test]
+fn clean_scanner_error_refuses_without_force() {
+    let t = scan_fixture(FLATPAK_RUNTIME_FAIL);
+    let (code, _, stderr) = run_clean(&t, &["--yes"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains(
+            "refusing: some sources failed (flatpak-unused); re-run with --force to continue"
+        ),
+        "{stderr}"
+    );
+    assert!(real(&t, "/home/user/.cache/foo/blob").exists());
+    // A preview still works and warns.
+    let (code, stdout, stderr) = run_clean(&t, &["--dry-run"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("~/.cache/foo"), "{stdout}");
+    assert!(stderr.contains("warning: flatpak-unused: "), "{stderr}");
+    assert!(stderr.contains("boom"), "{stderr}");
+    // An inventory source failure refuses too.
+    let t2 = scan_fixture(FLATPAK_FAIL);
+    let (code, _, stderr) = run_clean(&t2, &["cache", "--yes"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("some sources failed (flatpak)"), "{stderr}");
+    assert!(real(&t2, "/home/user/.cache/foo/blob").exists());
+    let (code, _, stderr) = run_clean(&t, &["--yes", "--force"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!real(&t, "/home/user/.cache/foo").exists());
+}
+
+#[test]
+fn clean_restore_round_trip() {
+    let t = scan_fixture(FLATPAK_OK);
+    let (code, stdout, _) = run_clean(&t, &["cache", "--yes"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(!real(&t, "/home/user/.cache/foo").exists());
+    let batch = history_json(&t)["data"]["batches"][0]["batch"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let out = crumbs(&t).args(["restore", &batch]).output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("✓ restored ~/.cache/foo"), "{stdout}");
+    assert_eq!(
+        std::fs::read(real(&t, "/home/user/.cache/foo/blob")).unwrap(),
+        vec![1u8; 3000]
+    );
+    assert!(trash_files(&t).iter().all(|n| n != "foo"));
+}
+
+#[test]
+fn clean_system_exit_2() {
+    let t = scan_fixture(FLATPAK_OK);
+    crumbs(&t)
+        .args(["clean", "--system", "--yes"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "system cleanup needs privileged support (coming in a later version)",
+        ));
+    let v = json_error(&t, &["clean", "--system", "--json", "--yes"], 2);
+    assert_eq!(v["command"], "clean");
+    assert!(real(&t, "/home/user/.cache/foo/blob").exists());
+}
+
+#[test]
+fn clean_off_category_needs_naming() {
+    let t = scan_fixture(FLATPAK_OK);
+    let (code, stdout, stderr) = run_clean(&t, &["--yes"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!real(&t, "/home/user/.cache/foo").exists());
+    assert!(real(&t, "/home/user/.cargo/registry/cache/crate.bin").exists());
+    let (code, stdout, stderr) = run_clean(&t, &["dev-cache", "--yes"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!real(&t, "/home/user/.cargo/registry/cache").exists());
+    // Nothing left to clean in the default categories.
+    let (code, stdout, _) = run_clean(&t, &["cache", "thumbnails", "temp", "--yes"]);
+    assert_eq!(code, 0, "{stdout}");
+    let t3 = FixtureTree::new();
+    t3.write_exec("/usr/bin/flatpak", FLATPAK_OK.as_bytes());
+    let (code, stdout, _) = run_clean(&t3, &["--yes"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(stdout.trim(), "nothing to clean");
+}

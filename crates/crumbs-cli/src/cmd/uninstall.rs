@@ -105,7 +105,7 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
         });
     }
     drop_overlaps(&mut targets);
-    apply(env, &cx, out, &targets, &args.act)
+    apply(env, &cx.cfg, &cx.errors(), out, &targets, &args.act)
 }
 
 /// Whether an AppImage's own file passes the same checks the executor runs

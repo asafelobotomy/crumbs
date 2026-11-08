@@ -1,5 +1,6 @@
 pub mod act;
 pub mod apps;
+pub mod clean;
 pub mod context;
 pub mod doctor;
 pub mod history;
