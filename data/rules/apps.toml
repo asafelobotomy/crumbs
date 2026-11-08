@@ -1,0 +1,113 @@
+# Curated leftover rules. Format: see crates/crumbs-core/src/rules.rs.
+# A trailing `*` in the last path component matches every sibling with that prefix.
+# Shared parents (~/.mozilla, $XDG_CACHE_HOME/mozilla) are deliberately not listed.
+
+# Firefox
+[[app]]
+match = { package = ["firefox"], flatpak = ["org.mozilla.firefox"] }
+paths = ["~/.mozilla/firefox", "$XDG_CACHE_HOME/mozilla/firefox"]
+
+# Thunderbird
+[[app]]
+match = { package = ["thunderbird"], flatpak = ["org.mozilla.Thunderbird"] }
+paths = ["~/.thunderbird", "$XDG_CACHE_HOME/thunderbird"]
+
+# Chromium
+[[app]]
+match = { package = ["chromium"], flatpak = ["org.chromium.Chromium"] }
+paths = ["$XDG_CONFIG_HOME/chromium", "$XDG_CACHE_HOME/chromium"]
+
+# Google Chrome
+[[app]]
+match = { package = ["google-chrome"] }
+paths = ["$XDG_CONFIG_HOME/google-chrome", "$XDG_CACHE_HOME/google-chrome"]
+
+# Brave
+[[app]]
+match = { package = ["brave-bin", "brave-browser"], flatpak = ["com.brave.Browser"] }
+paths = ["$XDG_CONFIG_HOME/BraveSoftware", "$XDG_CACHE_HOME/BraveSoftware"]
+
+# VS Code
+[[app]]
+match = { package = ["visual-studio-code-bin", "code"], flatpak = ["com.visualstudio.code"] }
+paths = ["$XDG_CONFIG_HOME/Code", "~/.vscode"]
+
+# VSCodium
+[[app]]
+match = { package = ["vscodium", "vscodium-bin"], flatpak = ["com.vscodium.codium"] }
+paths = ["$XDG_CONFIG_HOME/VSCodium", "~/.vscode-oss"]
+
+# Cursor
+[[app]]
+match = { package = ["cursor-bin"], appimage = ["cursor"] }
+paths = ["$XDG_CONFIG_HOME/Cursor", "~/.cursor"]
+
+# Discord
+[[app]]
+match = { package = ["discord"], flatpak = ["com.discordapp.Discord"] }
+paths = ["$XDG_CONFIG_HOME/discord"]
+
+# Spotify
+[[app]]
+match = { package = ["spotify"], flatpak = ["com.spotify.Client"] }
+paths = ["$XDG_CONFIG_HOME/spotify", "$XDG_CACHE_HOME/spotify"]
+
+# Steam
+[[app]]
+match = { package = ["steam"], flatpak = ["com.valvesoftware.Steam"] }
+paths = ["~/.steam", "$XDG_DATA_HOME/Steam"]
+
+# OBS Studio
+[[app]]
+match = { package = ["obs-studio"], flatpak = ["com.obsproject.Studio"] }
+paths = ["$XDG_CONFIG_HOME/obs-studio"]
+
+# GIMP
+[[app]]
+match = { package = ["gimp"], flatpak = ["org.gimp.GIMP"] }
+paths = ["$XDG_CONFIG_HOME/GIMP", "$XDG_CACHE_HOME/gimp"]
+
+# Inkscape
+[[app]]
+match = { package = ["inkscape"], flatpak = ["org.inkscape.Inkscape"] }
+paths = ["$XDG_CONFIG_HOME/inkscape", "$XDG_CACHE_HOME/inkscape"]
+
+# LibreOffice
+[[app]]
+match = { package = ["libreoffice-fresh", "libreoffice-still"], flatpak = ["org.libreoffice.LibreOffice"] }
+paths = ["$XDG_CONFIG_HOME/libreoffice"]
+
+# Blender
+[[app]]
+match = { package = ["blender"], flatpak = ["org.blender.Blender"] }
+paths = ["$XDG_CONFIG_HOME/blender"]
+
+# Godot
+[[app]]
+match = { package = ["godot"], flatpak = ["org.godotengine.Godot"] }
+paths = ["$XDG_CONFIG_HOME/godot", "$XDG_DATA_HOME/godot", "$XDG_CACHE_HOME/godot"]
+
+# Telegram
+[[app]]
+match = { package = ["telegram-desktop"], flatpak = ["org.telegram.desktop"] }
+paths = ["$XDG_DATA_HOME/TelegramDesktop"]
+
+# Signal
+[[app]]
+match = { package = ["signal-desktop"], flatpak = ["org.signal.Signal"] }
+paths = ["$XDG_CONFIG_HOME/Signal"]
+
+# Slack
+[[app]]
+match = { package = ["slack-desktop"], flatpak = ["com.slack.Slack"] }
+paths = ["$XDG_CONFIG_HOME/Slack"]
+
+# Zoom
+[[app]]
+match = { package = ["zoom"], flatpak = ["us.zoom.Zoom"] }
+paths = ["~/.zoom", "$XDG_CONFIG_HOME/zoomus.conf"]
+
+# Android Studio
+[[app]]
+match = { package = ["android-studio"] }
+paths = ["~/.android", "$XDG_CONFIG_HOME/Google/AndroidStudio*", "$XDG_CACHE_HOME/Google/AndroidStudio*"]

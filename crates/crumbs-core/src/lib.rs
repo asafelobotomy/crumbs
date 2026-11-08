@@ -7,6 +7,7 @@ pub mod error;
 pub mod inventory;
 pub mod model;
 pub mod privilege;
+pub mod rules;
 pub mod safety;
 pub mod size;
 pub mod sources;
