@@ -102,6 +102,7 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
         leftovers_only: args.leftovers_only,
     };
     let mut targets = Vec::new();
+    let mut unselected_system = 0usize;
     for ((app, removal), target) in apps.into_iter().zip(removals).zip(unmanaged) {
         let mut found = plannable(find_leftovers(&cx.idx, app, args.show_low));
         // Offered, never pre-selected: root deletes only on an explicit pick.
@@ -113,6 +114,11 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
             args.show_low,
         ));
         found.retain(|f| keeps(env, app, f, args));
+        let system_found: Vec<PathBuf> = found
+            .iter()
+            .filter(|f| f.scope == Scope::SystemTree)
+            .map(|f| f.path.clone())
+            .collect();
         let prompt_text = format!("Leftovers of {} to remove", sanitise(&app.display_name));
         let Some(chosen) = choose(env, &prompt_text, found, args.act.interactive, |f| {
             f.preselected
@@ -120,10 +126,22 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
         else {
             return out.aborted();
         };
+        let chosen_paths: Vec<PathBuf> = chosen.iter().map(|f| f.path.clone()).collect();
         let mut plan = build_plan_unmanaged(env, Some(app), target.as_ref(), &chosen, &opts)?;
         if let Some(removal) = removal {
             attach_removal(&mut plan, removal);
         }
+        // Offered and not picked, and not removed with the app either.
+        unselected_system += system_found
+            .iter()
+            .filter(|p| !chosen_paths.contains(p))
+            .filter(|p| {
+                !plan
+                    .actions
+                    .iter()
+                    .any(|a| a.action.path().is_some_and(|ap| p.starts_with(ap)))
+            })
+            .count();
         targets.push(Target {
             heading: format!("{}  {}", sanitise(&app.display_name), sanitise(&app.id)),
             app: Some(app),
@@ -131,7 +149,17 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
         });
     }
     drop_overlaps(&mut targets);
-    apply(env, &cx.cfg, &cx.errors(), out, &targets, &args.act)
+    let notes = unselected_note(unselected_system);
+    apply(env, &cx.cfg, &cx.errors(), out, &targets, &args.act, &notes)
+}
+
+/// The preview note for system leftovers that were offered but not picked.
+fn unselected_note(n: usize) -> Vec<String> {
+    match n {
+        0 => Vec::new(),
+        1 => vec!["1 system leftover not selected (pick with -i)".into()],
+        n => vec![format!("{n} system leftovers not selected (pick with -i)")],
+    }
 }
 
 pub const NOTE_NO_UNDO: &str = "this cannot be undone by crumbs";
@@ -198,15 +226,18 @@ fn refuse_removal(out: Out, app: &App, e: &RemovalError) -> anyhow::Result<ExitC
 /// Whether a finding may be planned. The launchers and icons stay with an
 /// app that stays (`--leftovers-only`). `--keep-data` keeps everything but
 /// caches; when the AppImage file itself goes, its own launchers and icons
-/// go with it so nothing is left pointing at a removed file.
+/// go with it, and so do its file-type associations, so nothing is left
+/// pointing at a removed file.
 fn keeps(env: &Env, app: &App, f: &Finding, args: &UninstallArgs) -> bool {
     if args.leftovers_only {
         return !is_own_launcher(env, app, f) && (!args.keep_data || f.kind == FindingKind::Cache);
     }
     if args.keep_data {
         return f.kind == FindingKind::Cache
-            || (matches!(f.kind, FindingKind::DesktopEntry | FindingKind::Icon)
-                && is_own_launcher(env, app, f));
+            || (matches!(
+                f.kind,
+                FindingKind::DesktopEntry | FindingKind::Icon | FindingKind::MimeAssoc
+            ) && is_own_launcher(env, app, f));
     }
     true
 }

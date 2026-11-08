@@ -417,6 +417,23 @@ mod tests {
     }
 
     #[test]
+    fn glob_double_star_is_linear() {
+        let pattern = format!("/{}/x", vec!["**"; 30].join("/"));
+        let path = format!("/{}", "a/".repeat(100));
+        assert_eq!(path.len(), 201);
+        let start = std::time::Instant::now();
+        assert!(!glob_match(&pattern, &path));
+        assert!(start.elapsed() < std::time::Duration::from_millis(50));
+    }
+
+    #[test]
+    fn glob_dir_double_star_matches_dir() {
+        assert!(glob_match("/h/.cache/**", "/h/.cache"));
+        assert!(glob_match("/h/.cache/**", "/h/.cache/x/y"));
+        assert!(!glob_match("/h/.cache/**", "/h/.cachex"));
+    }
+
+    #[test]
     fn could_match_below_table() {
         let star = "/h/.config/*/keep";
         let cases = [

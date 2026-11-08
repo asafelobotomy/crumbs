@@ -2217,7 +2217,11 @@ fn system_tree_history_and_restore() {
     let out =
         crate::restore::restore(&env, &cfg, std::slice::from_ref(&report.batch), false).unwrap();
     assert_eq!(out.len(), 1);
-    assert_eq!(out[0].error.as_deref(), Some(crate::restore::NO_MATCH));
+    assert!(out[0].ok, "{out:?}");
+    assert_eq!(
+        out[0].error.as_deref(),
+        Some(crate::restore::NOTHING_RESTORABLE)
+    );
 }
 
 #[test]

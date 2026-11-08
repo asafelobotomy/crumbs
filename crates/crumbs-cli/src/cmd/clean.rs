@@ -136,7 +136,7 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
         app: None,
         plan: build_clean_plan(env, &chosen, &opts)?,
     }];
-    apply(env, &setup.cfg, &errors, out, &targets, act)
+    apply(env, &setup.cfg, &errors, out, &targets, act, &[])
 }
 
 /// Categories whose items are never ticked unless the category is named:

@@ -16,6 +16,7 @@ use crumbs_core::plan::{Action, Plan, PlannedAction};
 use crumbs_core::privilege::batch::{PrivilegedRunner, SystemPrivilegedRunner};
 use crumbs_core::privilege::{Escalation, detect_escalation};
 use crumbs_core::removal::still_installed;
+use crumbs_core::safety::Scope;
 use crumbs_core::{App, Env, SourceKind};
 use serde_json::json;
 
@@ -220,18 +221,7 @@ pub fn choose(
     if findings.is_empty() {
         return Ok(Some(findings));
     }
-    let items: Vec<String> = findings
-        .iter()
-        .map(|f| {
-            let shared = if f.shared { "  (shared)" } else { "" };
-            format!(
-                "{:<12} {:>10}  {}{shared}",
-                finding_kind(f.kind),
-                render::finding_size(&f.size),
-                render::shown_path(env, &f.path)
-            )
-        })
-        .collect();
+    let items: Vec<String> = findings.iter().map(|f| checklist_item(env, f)).collect();
     let ticks: Vec<bool> = findings.iter().map(&defaults).collect();
     let Some(picked) = prompt::multi_select(prompt_text, &items, &ticks)? else {
         return Ok(None);
@@ -244,6 +234,23 @@ pub fn choose(
             .map(|(_, f)| f)
             .collect(),
     ))
+}
+
+/// One line of the `-i` checklist; a shared item and one deleted as root
+/// say so.
+fn checklist_item(env: &Env, f: &Finding) -> String {
+    let shared = if f.shared { "  (shared)" } else { "" };
+    let root = if f.scope == Scope::SystemTree {
+        "  (root)"
+    } else {
+        ""
+    };
+    format!(
+        "{:<12} {:>10}  {}{shared}{root}",
+        finding_kind(f.kind),
+        render::finding_size(&f.size),
+        render::shown_path(env, &f.path)
+    )
 }
 
 pub struct Target<'a> {
@@ -326,7 +333,8 @@ pub fn drop_overlaps(targets: &mut [Target]) {
 /// report. `errors` (failed sources, then notes) are warnings in the
 /// preview and the envelope's `errors` under `--json`. JSON `report` has
 /// one entry per plan, in order: `null` for a plan with nothing to do; the
-/// whole field is `null` on a dry run.
+/// whole field is `null` on a dry run. `after_preview` are extra `note:`
+/// lines for the human preview only (never in the JSON).
 pub fn apply(
     env: &Env,
     cfg: &Config,
@@ -334,6 +342,7 @@ pub fn apply(
     out: Out,
     targets: &[Target],
     act: &ActFlags,
+    after_preview: &[String],
 ) -> anyhow::Result<ExitCode> {
     let plans: Vec<&Plan> = targets.iter().map(|t| &t.plan).collect();
     let empty = plans.iter().all(|p| p.actions.is_empty());
@@ -344,6 +353,11 @@ pub fn apply(
             .map(|t| (t.heading.clone(), &t.plan))
             .collect();
         render::preview(env, &headed)?;
+        let mut out = anstream::stdout().lock();
+        for note in after_preview {
+            writeln!(out, "note: {}", render::sanitise(note))?;
+        }
+        drop(out);
         print_notes(errors)?;
     }
     if act.dry_run {
@@ -875,6 +889,40 @@ mod tests {
             .iter()
             .filter_map(|a| a.action.path().map(Path::to_path_buf))
             .collect()
+    }
+
+    #[test]
+    fn checklist_item_marks_shared_and_root() {
+        let t = crumbs_core::testing::FixtureTree::new();
+        let env = t.env();
+        let mut f = Finding {
+            path: "/home/user/.config/x".into(),
+            kind: FindingKind::Config,
+            confidence: crumbs_core::leftovers::Confidence::High,
+            shared: false,
+            reason: String::new(),
+            size: crumbs_core::size::DiskUsage::default(),
+            preselected: false,
+            scope: Scope::Home,
+            fingerprint: Fingerprint {
+                dev: 0,
+                ino: 0,
+                is_symlink: false,
+                ctime: 0,
+                ctime_nsec: 0,
+            },
+            mime_lines: Vec::new(),
+        };
+        let plain = checklist_item(&env, &f);
+        assert!(
+            !plain.contains("(root)") && !plain.contains("(shared)"),
+            "{plain}"
+        );
+        f.scope = Scope::SystemTree;
+        f.path = "/opt/x".into();
+        assert!(checklist_item(&env, &f).ends_with("  (root)"));
+        f.shared = true;
+        assert!(checklist_item(&env, &f).ends_with("  (shared)  (root)"));
     }
 
     #[test]

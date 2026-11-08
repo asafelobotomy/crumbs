@@ -1130,6 +1130,29 @@ fn restore_path_skips_restored_entry() {
 }
 
 #[test]
+fn restore_delete_only_batch_says_nothing_restorable() {
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    json_error_free(
+        &t,
+        &["uninstall", "Tool", "--permanent", "--yes", "--json"],
+        0,
+    );
+    let batch = history_json(&t)["data"]["batches"][0]["batch"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (code, stdout, _) = run_out(crumbs(&t).args(["restore", &batch]));
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains("nothing in this batch can be restored (it only deleted or ran commands)"),
+        "{stdout}"
+    );
+    let v = json_error_free(&t, &["restore", &batch, "--json"], 0);
+    assert_eq!(v["data"]["outcomes"][0]["ok"], true, "{v}");
+}
+
+#[test]
 fn restore_unknown_selector_exit_2() {
     let t = fixture(FLATPAK_OK);
     with_leftovers(&t);
@@ -1238,6 +1261,30 @@ fn keep_data_removes_own_launchers_with_appimage() {
         )
         .exists()
     );
+}
+
+/// The launcher goes with the AppImage file, and so do its mimeapps lines.
+#[test]
+fn keep_data_still_removes_mime_lines_of_removed_launcher() {
+    let t = fixture(FLATPAK_OK);
+    gutcheck_launcher(&t);
+    t.write(
+        "/home/user/.config/mimeapps.list",
+        b"[Default Applications]\ntext/x-gut=appofholding-gutcheck.desktop\nimage/png=other.desktop\n",
+    );
+    let (code, stdout, stderr) =
+        run_out(crumbs(&t).args(["uninstall", "GutCheck", "--keep-data", "--yes"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        !real(
+            &t,
+            "/home/user/.local/share/applications/appofholding-gutcheck.desktop"
+        )
+        .exists()
+    );
+    let mime = std::fs::read_to_string(real(&t, "/home/user/.config/mimeapps.list")).unwrap();
+    assert!(!mime.contains("appofholding-gutcheck"), "{mime}");
+    assert!(mime.contains("image/png=other.desktop"), "{mime}");
 }
 
 #[test]
@@ -3013,6 +3060,40 @@ fn uninstall_lists_system_leftovers_not_preselected() {
     assert!(real(&t, "/etc/inky/inky.conf").exists());
     assert!(!real(&t, "/rm-args").exists());
     assert!(!stdout.contains("as root"), "{stdout}");
+}
+
+#[test]
+fn uninstall_preview_notes_unselected_system_leftovers() {
+    let t = inky_pkg_fixture();
+    let (code, stdout, stderr) =
+        run_out(crumbs(&t).args(["uninstall", "inky", "--leftovers-only", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("note: 2 system leftovers not selected (pick with -i)\n"),
+        "{stdout}"
+    );
+    // One left: singular.
+    let t = inky_unmanaged_fixture();
+    let (code, stdout, stderr) =
+        run_out(crumbs(&t).args(["uninstall", "unmanaged:inky.desktop", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("note: 1 system leftover not selected (pick with -i)\n"),
+        "{stdout}"
+    );
+    // JSON carries no such note.
+    let v = stdout_json(crumbs(&t).args([
+        "uninstall",
+        "unmanaged:inky.desktop",
+        "--dry-run",
+        "--json",
+    ]));
+    assert!(!v.to_string().contains("not selected"), "{v}");
+    // Nothing unselected, no note.
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    let (_, stdout, _) = run_out(crumbs(&t).args(["uninstall", "Tool", "--dry-run"]));
+    assert!(!stdout.contains("not selected"), "{stdout}");
 }
 
 #[test]
