@@ -26,7 +26,7 @@ pub enum Scope {
     #[default]
     Home,
     /// A direct child of `/tmp`: owned by the user, a regular file or a
-    /// directory, not a symlink.
+    /// directory, not a symlink; `/tmp` itself root-owned and sticky.
     UserTemp,
     /// A direct child of `{data_home}/Trash/files` or `{data_home}/Trash/info`,
     /// with `Trash`, `files` and `info` private to the user.
@@ -364,6 +364,14 @@ fn check_location(
         Scope::UserTemp => {
             // `/tmp` itself may be a mount, but never a symlink.
             check_real_dir(env, parent, &shown)?;
+            let safe =
+                fs::symlink_metadata(real_path(env, parent)).is_ok_and(|m| is_safe_tmp(env, &m));
+            if !safe {
+                return Err(SafetyError::Ineligible(
+                    display_path(env, parent),
+                    "is not root-owned with the sticky bit",
+                ));
+            }
         }
         Scope::HomeTrash => {
             let trash = env.unsys(&env.data_home).join("Trash");
@@ -379,6 +387,13 @@ fn check_location(
         }
     }
     Ok(path)
+}
+
+/// Whether in-system `/tmp` (its lstat data) is safe to act in: owned by
+/// [`Env::tmp_owner_uid`] (root on the real system) and sticky, so nobody
+/// else can rename or replace the user's entries in it.
+pub(crate) fn is_safe_tmp(env: &Env, m: &fs::Metadata) -> bool {
+    m.uid() == env.tmp_owner_uid && m.mode() & 0o1000 != 0
 }
 
 /// No directory strictly below `root`, down to and including `parent`, is

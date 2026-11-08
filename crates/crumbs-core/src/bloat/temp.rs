@@ -14,7 +14,7 @@ use super::{BloatItem, Category, ItemAction, ScanContext, Scanner};
 use crate::config::Config;
 use crate::env::{Env, display_path};
 use crate::error::CoreError;
-use crate::safety::{Scope, fingerprint, is_allowed_target};
+use crate::safety::{Scope, fingerprint, is_allowed_target, is_safe_tmp};
 
 /// Name prefixes of live session and service entries (Review Focus #2,
 /// extended by controller ruling R2).
@@ -227,11 +227,23 @@ fn max_age(cfg: &Config) -> Duration {
     Duration::from_secs(cfg.temp_age_days.saturating_mul(86_400))
 }
 
-/// `/tmp` (real path) and its device, when it is a real directory.
-fn tmp_dir(env: &Env) -> Option<(PathBuf, u64)> {
+/// The scanner's error when `/tmp` is not root-owned and sticky.
+pub(crate) const UNSAFE_TMP: &str = "unsafe /tmp: not root-owned with sticky bit";
+
+/// `/tmp` (real path) and its device, when it is a real directory; `Err`
+/// when it is one but not root-owned with the sticky bit.
+fn tmp_dir(env: &Env) -> Result<Option<(PathBuf, u64)>, &'static str> {
     let real = env.sys("/tmp");
-    let m = fs::symlink_metadata(&real).ok()?;
-    m.file_type().is_dir().then_some((real, m.dev()))
+    let Ok(m) = fs::symlink_metadata(&real) else {
+        return Ok(None);
+    };
+    if !m.file_type().is_dir() {
+        return Ok(None);
+    }
+    if !is_safe_tmp(env, &m) {
+        return Err(UNSAFE_TMP);
+    }
+    Ok(Some((real, m.dev())))
 }
 
 /// Re-runs the scan's rules for one `/tmp` child (in-system `path`) right
@@ -249,7 +261,7 @@ pub(crate) fn still_stale(
         return Err(not_temp());
     }
     let name = path.file_name().ok_or_else(not_temp)?;
-    let (tmp_real, tmp_dev) = tmp_dir(env).ok_or_else(not_temp)?;
+    let (tmp_real, tmp_dev) = tmp_dir(env)?.ok_or_else(not_temp)?;
     let open = open_inodes(env);
     let cx = Ctx {
         user_uid: env.uid,
@@ -272,8 +284,9 @@ impl Scanner for TempScanner {
         if cx.env.uid == 0 {
             return Err(CoreError::Unavailable(ROOT_REFUSAL));
         }
-        // `/tmp` itself must be a real directory; verify refuses otherwise.
-        let Some((tmp_real, tmp_dev)) = tmp_dir(cx.env) else {
+        // `/tmp` itself must be a real, root-owned, sticky directory;
+        // verify refuses otherwise.
+        let Some((tmp_real, tmp_dev)) = tmp_dir(cx.env).map_err(CoreError::Unavailable)? else {
             return Ok(Vec::new());
         };
         let Ok(mut names) = list_dir(&tmp_real) else {

@@ -1084,3 +1084,58 @@ fn cache_skips_sockets_fifos_and_devices() {
     let items = run(&t, &cfg, &inv(vec![]), Category::Cache);
     assert_eq!(paths(&items), [PathBuf::from("/home/user/.cache/plain")]);
 }
+
+/// `/tmp` must be owned by root (on the real system; the fixture user in
+/// a fake root, see `Env::tmp_owner_uid`) and carry the sticky bit.
+#[test]
+fn temp_refuses_unsafe_tmp() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = FixtureTree::new();
+    let f = t.write("tmp/old", b"x");
+    age_nofollow(&f, 30);
+    let tmp = t.dir.path().join("tmp");
+    let cfg = Config::default();
+    let r = FakeRunner::new();
+    let fp = crate::safety::fingerprint(&t.env(), Path::new("/tmp/old")).unwrap();
+    // Sticky and owned as expected: listed and verifiable.
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o1777)).unwrap();
+    assert_eq!(scan_one(&t, &cfg, &r, Category::Temp).unwrap().len(), 1);
+    verify(&t.env(), &cfg, Scope::UserTemp, Path::new("/tmp/old"), &fp).unwrap();
+    let unsafe_tmp = "unsafe /tmp: not root-owned with sticky bit";
+    // No sticky bit.
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o777)).unwrap();
+    let err = scan_one(&t, &cfg, &r, Category::Temp).unwrap_err();
+    assert_eq!(err.to_string(), unsafe_tmp);
+    let err = verify(&t.env(), &cfg, Scope::UserTemp, Path::new("/tmp/old"), &fp).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "refusing: /tmp is not root-owned with the sticky bit"
+    );
+    assert!(super::temp::still_stale(&t.env(), &cfg, Path::new("/tmp/old"), test_now()).is_err());
+    // Sticky, but owned by someone other than expected.
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o1777)).unwrap();
+    let mut env = t.env();
+    env.tmp_owner_uid = env.uid.wrapping_add(1);
+    let i = inv(vec![]);
+    let cx = ScanContext {
+        env: &env,
+        cfg: &cfg,
+        inv: &i,
+        runner: &r,
+        now: test_now(),
+    };
+    let err = super::temp::TempScanner.scan(&cx).unwrap_err();
+    assert_eq!(err.to_string(), unsafe_tmp);
+    assert!(verify(&env, &cfg, Scope::UserTemp, Path::new("/tmp/old"), &fp).is_err());
+}
+
+#[test]
+fn real_system_tmp_must_be_root_owned() {
+    if let Ok(env) = crate::env::Env::from_system() {
+        assert_eq!(env.tmp_owner_uid, 0);
+    }
+    // A fake root's `/tmp` is the fixture user's.
+    let t = FixtureTree::new();
+    let env = t.env();
+    assert_eq!(env.tmp_owner_uid, env.uid);
+}

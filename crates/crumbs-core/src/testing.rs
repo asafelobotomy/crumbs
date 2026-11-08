@@ -37,9 +37,23 @@ impl FixtureTree {
         self.dir.path().join(rel.trim_start_matches('/'))
     }
 
+    /// Gives the fixture's `/tmp`, once it is a real directory, the sticky
+    /// bit (mode 1777) like the real one; crumbs refuses a `/tmp` without
+    /// it. Called by every helper that creates paths.
+    fn sticky_tmp(&self) {
+        let tmp = self.real("tmp");
+        if let Ok(m) = fs::symlink_metadata(&tmp)
+            && m.is_dir()
+            && m.permissions().mode() & 0o1000 == 0
+        {
+            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o1777)).unwrap();
+        }
+    }
+
     pub fn write(&self, rel: &str, contents: &[u8]) -> PathBuf {
         let p = self.real(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
+        self.sticky_tmp();
         fs::write(&p, contents).unwrap();
         p
     }
@@ -55,11 +69,13 @@ impl FixtureTree {
         let p = self.real(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(target, &p).unwrap();
+        self.sticky_tmp();
     }
 
     pub fn mkdir(&self, rel: &str) -> PathBuf {
         let p = self.real(rel);
         fs::create_dir_all(&p).unwrap();
+        self.sticky_tmp();
         p
     }
 
