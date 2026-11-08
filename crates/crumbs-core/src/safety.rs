@@ -1,4 +1,9 @@
 //! The gate every destructive action passes through. All checks fail closed.
+//!
+//! `verify` only proves the state at the moment it is called. Callers must act
+//! on exactly the path they verified, using no-follow operations. `verify` and
+//! `fingerprint` refuse non-canonical paths (trailing `/`, `.`, `//`, `..`)
+//! because the kernel resolves `link/` and `link/.` through the symlink.
 
 use std::fs;
 use std::io;
@@ -27,6 +32,8 @@ pub enum SafetyError {
     OutsideAllowedRoots(String),
     #[error("refusing: {0} changed since it was scanned")]
     Changed(String),
+    #[error("refusing: {0} is not a canonical path")]
+    NonCanonical(String),
     #[error("{0} no longer exists")]
     Missing(String),
 }
@@ -134,6 +141,11 @@ pub struct Fingerprint {
     pub is_symlink: bool,
 }
 
+/// True when the path is absolute and already in normalised form.
+fn is_canonical(p: &Path) -> bool {
+    normalise(p).is_some_and(|n| n.as_os_str() == p.as_os_str())
+}
+
 fn real_path(env: &Env, in_system: &Path) -> PathBuf {
     match in_system.strip_prefix("/") {
         Ok(rest) => env.root.join(rest),
@@ -150,7 +162,14 @@ fn lstat(env: &Env, in_system: &Path) -> io::Result<Fingerprint> {
     })
 }
 
+/// Fails with `CoreError::Io` (`InvalidInput`) for non-canonical paths.
 pub fn fingerprint(env: &Env, in_system: &Path) -> Result<Fingerprint, CoreError> {
+    if !is_canonical(in_system) {
+        return Err(CoreError::Io {
+            path: in_system.to_path_buf(),
+            source: io::Error::new(io::ErrorKind::InvalidInput, "path is not canonical"),
+        });
+    }
     lstat(env, in_system).map_err(|source| CoreError::Io {
         path: in_system.to_path_buf(),
         source,
@@ -167,6 +186,9 @@ pub fn verify(
     expected: &Fingerprint,
 ) -> Result<(), SafetyError> {
     let shown = display_path(env, in_system);
+    if !is_canonical(in_system) {
+        return Err(SafetyError::NonCanonical(shown));
+    }
     if is_protected(env, cfg, in_system) {
         return Err(SafetyError::Protected(shown));
     }
@@ -393,5 +415,43 @@ mod tests {
             verify(&env, &cfg, &out, &fp),
             Err(SafetyError::OutsideAllowedRoots(_))
         ));
+    }
+
+    #[test]
+    fn verify_refuses_non_canonical_symlink_spellings() {
+        let (t, env, cfg) = setup();
+        t.mkdir("home/user/Documents");
+        t.symlink("home/user/.config/foo", "/home/user/Documents");
+        let link = p("/home/user/.config/foo");
+        let fp = fingerprint(&env, &link).unwrap();
+        assert!(fp.is_symlink);
+        assert_eq!(verify(&env, &cfg, &link, &fp), Ok(()));
+        for s in [
+            "/home/user/.config/foo/",
+            "/home/user/.config/foo/.",
+            "/home/user/.config//foo",
+        ] {
+            assert!(
+                matches!(
+                    verify(&env, &cfg, &p(s), &fp),
+                    Err(SafetyError::NonCanonical(_))
+                ),
+                "{s}"
+            );
+        }
+    }
+
+    #[test]
+    fn fingerprint_refuses_non_canonical() {
+        let (t, env, _cfg) = setup();
+        t.mkdir("home/user/.config/foo");
+        for s in [
+            "/home/user/.config/foo/",
+            "/home/user/.config/foo/.",
+            "/home/user/.config/../.config/foo",
+        ] {
+            assert!(fingerprint(&env, &p(s)).is_err(), "{s}");
+        }
+        assert!(fingerprint(&env, &p("/home/user/.config/foo")).is_ok());
     }
 }
