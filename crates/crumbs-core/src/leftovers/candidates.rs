@@ -30,7 +30,6 @@ pub(crate) enum Subject {
     /// A directory or file name (a dot entry's leading `.` stripped).
     Name(NameKey),
     /// `~/snap/<name>`. Never matched in M2 (no snap source); orphans only.
-    // The name is read by orphan detection.
     #[allow(dead_code)]
     Snap(String),
     /// `~/.var/app/<id>`.

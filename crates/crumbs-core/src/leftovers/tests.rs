@@ -652,3 +652,130 @@ fn flatpak_icons_need_full_id_or_desktop_stem() {
     let fs = r.find(0, true);
     assert!(at(&fs, ".local/share/icons/hicolor/48x48/apps/firefox.png").is_some());
 }
+
+fn orphans(t: &FixtureTree, apps: Vec<App>, show_low: bool) -> Vec<Finding> {
+    let (rules, _) = load_rules(&t.env());
+    let r = Run::with(t, apps, &rules, &Config::default());
+    find_orphans(&r.idx, show_low)
+}
+
+#[test]
+fn uninstalled_rule_app_is_high() {
+    let t = FixtureTree::new();
+    t.write("/home/user/.thunderbird/profiles.ini", b"x");
+    let fs = orphans(&t, vec![pacman("firefox", &["firefox"])], false);
+    let f = must(&fs, ".thunderbird");
+    assert_eq!(f.confidence, Confidence::High);
+    assert_eq!(f.reason, "belongs to thunderbird, which is not installed");
+    assert_eq!(f.kind, FindingKind::DotDir);
+    assert_eq!(f.size.files, 1);
+    assert_eq!(f.fingerprint, fingerprint(&t.env(), &f.path).unwrap());
+    assert!(!f.shared && f.mime_lines.is_empty());
+}
+
+#[test]
+fn installed_app_dir_not_orphan() {
+    let t = FixtureTree::new();
+    t.mkdir("/home/user/.thunderbird");
+    t.mkdir("/home/user/.config/GutCheck");
+    let apps = vec![
+        pacman("thunderbird", &["thunderbird"]),
+        appimage("GutCheck-0.19.0-x86_64.AppImage"),
+    ];
+    let fs = orphans(&t, apps, true);
+    assert!(fs.is_empty(), "{fs:#?}");
+}
+
+#[test]
+fn unknown_dir_is_low_hidden_by_default() {
+    let t = FixtureTree::new();
+    t.mkdir("/home/user/.config/mystery-tool");
+    t.mkdir("/home/user/snap/oldsnap");
+    assert!(orphans(&t, Vec::new(), false).is_empty());
+    let fs = orphans(&t, Vec::new(), true);
+    assert_eq!(
+        must(&fs, ".config/mystery-tool").confidence,
+        Confidence::Low
+    );
+    let snap = must(&fs, "snap/oldsnap");
+    assert_eq!(snap.confidence, Confidence::Low);
+    assert_eq!(snap.kind, FindingKind::SnapData);
+}
+
+#[test]
+fn flatpak_var_app_without_install_is_medium() {
+    let t = FixtureTree::new();
+    t.mkdir("/home/user/.var/app/org.gone.App");
+    t.mkdir("/home/user/.var/app/org.here.App");
+    let fs = orphans(&t, vec![flatpak("org.here.App")], false);
+    let f = must(&fs, ".var/app/org.gone.App");
+    assert_eq!(f.confidence, Confidence::Medium);
+    assert_eq!(f.kind, FindingKind::FlatpakData);
+    assert!(at(&fs, ".var/app/org.here.App").is_none());
+}
+
+#[test]
+fn broken_autostart_is_medium() {
+    let t = FixtureTree::new();
+    t.write_exec("/usr/bin/present", b"#!/bin/sh\n");
+    t.desktop(
+        "/home/user/.config/autostart/gone.desktop",
+        "[Desktop Entry]\nType=Application\nName=Gone\nExec=/opt/gone/bin/gone --x\n",
+    );
+    t.desktop(
+        "/home/user/.config/autostart/ok.desktop",
+        "[Desktop Entry]\nType=Application\nName=Ok\nExec=present\n",
+    );
+    t.desktop(
+        "/home/user/.local/share/applications/lost.desktop",
+        "[Desktop Entry]\nType=Application\nName=Lost\nExec=lostbin %U\n",
+    );
+    let fs = orphans(&t, Vec::new(), false);
+    let gone = must(&fs, ".config/autostart/gone.desktop");
+    assert_eq!(gone.confidence, Confidence::Medium);
+    assert_eq!(gone.kind, FindingKind::Autostart);
+    let lost = must(&fs, ".local/share/applications/lost.desktop");
+    assert_eq!(lost.confidence, Confidence::Medium);
+    assert_eq!(lost.kind, FindingKind::DesktopEntry);
+    assert!(at(&fs, ".config/autostart/ok.desktop").is_none());
+    let all = orphans(&t, Vec::new(), true);
+    assert_eq!(
+        must(&all, ".config/autostart/ok.desktop").confidence,
+        Confidence::Low
+    );
+}
+
+#[test]
+fn desktop_shell_files_ignored() {
+    let t = FixtureTree::new();
+    t.write("/home/user/.bashrc", b"x");
+    t.write("/home/user/.config/kwinrc", b"x");
+    t.mkdir("/home/user/.config/gtk-3.0");
+    t.mkdir("/home/user/.config/plasma-workspace");
+    t.mkdir("/home/user/.config/plasmashell");
+    t.write("/home/user/.local/share/kwinrc", b"x");
+    let fs = orphans(&t, Vec::new(), true);
+    assert!(at(&fs, ".bashrc").is_none());
+    assert!(at(&fs, ".config/kwinrc").is_none());
+    assert!(at(&fs, ".config/gtk-3.0").is_none());
+    assert!(at(&fs, ".config/plasma-workspace").is_none());
+    assert!(at(&fs, ".config/plasmashell").is_none());
+    // The `rc` rule is for the config directory only.
+    assert!(at(&fs, ".local/share/kwinrc").is_some(), "{fs:#?}");
+}
+
+#[test]
+fn orphans_never_preselected() {
+    let t = FixtureTree::new();
+    t.mkdir("/home/user/.thunderbird");
+    t.mkdir("/home/user/.var/app/org.gone.App");
+    t.mkdir("/home/user/.config/mystery-tool");
+    let fs = orphans(&t, Vec::new(), true);
+    assert_eq!(fs.len(), 3, "{fs:#?}");
+    assert!(fs.iter().all(|f| !f.preselected));
+    let order: Vec<_> = fs.iter().map(|f| f.confidence).collect();
+    assert_eq!(
+        order,
+        [Confidence::High, Confidence::Medium, Confidence::Low]
+    );
+}

@@ -128,24 +128,23 @@ impl LeftoverIndex {
         }
     }
 
-    // Read by orphan detection.
-    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn env(&self) -> &Env {
+        &self.env
+    }
+
     pub(crate) fn candidates(&self) -> &[Candidate] {
         &self.candidates
     }
 
     /// Whether any inventory app matches candidate `i`, at any confidence.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn matched_by_any(&self, i: usize) -> bool {
         self.matches.get(i).is_some_and(|m| !m.is_empty())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn inventory(&self) -> &Inventory {
         &self.inv
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn rules(&self) -> &[Rule] {
         &self.rules
     }

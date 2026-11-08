@@ -2,6 +2,7 @@
 
 mod candidates;
 pub mod matcher;
+mod orphans;
 mod score;
 #[cfg(test)]
 mod tests;
@@ -14,6 +15,7 @@ use crate::safety::Fingerprint;
 use crate::size::DiskUsage;
 
 pub use matcher::{LeftoverIndex, find_leftovers};
+pub use orphans::find_orphans;
 
 /// How sure the matcher is that a finding belongs to the app. Ordered
 /// `Low < Medium < High`.
