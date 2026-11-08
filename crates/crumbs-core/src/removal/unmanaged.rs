@@ -22,6 +22,9 @@ pub struct UnmanagedTarget {
     pub fingerprint: Fingerprint,
     pub size: DiskUsage,
     pub left_link: Option<PathBuf>,
+    /// A symlink to the program in a non-protected home location, with its
+    /// fingerprint: removed together with the target.
+    pub home_link: Option<(PathBuf, Fingerprint)>,
 }
 
 /// Plans the removal of an unmanaged app's own files: the `/opt/<dir>` or
@@ -120,16 +123,22 @@ pub fn plan_unmanaged(
     let verified =
         safety::verify_now(env, cfg, scope, &path).map_err(|e| refuse(format!("{e}")))?;
     let fingerprint = safety::fingerprint(env, &path).unwrap_or(verified);
-    let left_link = app
-        .program_link
-        .clone()
-        .filter(|l| !l.starts_with(&path) && safety::is_protected(env, cfg, l));
+    let mut left_link = None;
+    let mut home_link = None;
+    if let Some(link) = app.program_link.clone().filter(|l| !l.starts_with(&path)) {
+        let in_home = link.starts_with(&home);
+        match safety::verify_now(env, cfg, Scope::Home, &link) {
+            Ok(fp) if in_home => home_link = Some((link, fp)),
+            _ => left_link = Some(link),
+        }
+    }
     Ok(UnmanagedTarget {
         size: disk_usage(env, &path),
         path,
         scope,
         fingerprint,
         left_link,
+        home_link,
     })
 }
 

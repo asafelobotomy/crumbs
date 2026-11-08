@@ -131,6 +131,7 @@ pub struct PlanOptions {
 
 pub const NOTE_APP_STAYS: &str = "the app itself stays installed (leftovers only)";
 pub const REASON_APPIMAGE: &str = "AppImage file";
+pub const REASON_UNMANAGED_LINK: &str = "link to the app's program";
 pub const REASON_UNMANAGED: &str = "the app's own files";
 
 fn remove(path: PathBuf, opts: &PlanOptions) -> Action {
@@ -186,6 +187,17 @@ pub fn build_plan_unmanaged(
                 depends_on_plan: None,
                 reason: REASON_UNMANAGED.into(),
             });
+            if let Some((link, fingerprint)) = &t.home_link {
+                actions.push(PlannedAction {
+                    action: remove(link.clone(), opts),
+                    size: 0,
+                    fingerprint: *fingerprint,
+                    scope: Scope::Home,
+                    depends_on: None,
+                    depends_on_plan: None,
+                    reason: REASON_UNMANAGED_LINK.into(),
+                });
+            }
             if let Some(link) = &t.left_link {
                 notes.push(format!(
                     "{} is left in place (protected path)",
@@ -217,7 +229,7 @@ pub fn build_plan_unmanaged(
         if opts.keep_data && f.kind != FindingKind::Cache {
             continue;
         }
-        if skip_path.as_ref() == Some(&f.path) {
+        if skip_path.as_ref().is_some_and(|s| f.path.starts_with(s)) {
             continue;
         }
         if f.scope == Scope::SystemTree {
@@ -439,6 +451,7 @@ mod tests {
             fingerprint: safety::fingerprint(&env, Path::new("/opt/inky")).unwrap(),
             size: disk_usage(&env, Path::new("/opt/inky")),
             left_link: Some("/usr/bin/inky".into()),
+            home_link: None,
         };
         let home = finding(&env, "/home/user/.config/inky", FindingKind::Config);
         let app = App::new(SourceKind::Unmanaged, "inky.desktop");
@@ -460,6 +473,32 @@ mod tests {
                 .iter()
                 .any(|n| n == "/usr/bin/inky is left in place (protected path)")
         );
+        // Findings at or below the target go with it; a sibling stays.
+        t.write("opt/inkyfoo/x", b"x");
+        let below = finding(&env, "/opt/inky/a", FindingKind::SystemData);
+        let sibling = finding(&env, "/opt/inkyfoo", FindingKind::SystemData);
+        let p = build_plan_unmanaged(
+            &env,
+            Some(&app),
+            Some(&tg(Scope::SystemTree)),
+            &[below, sibling],
+            &o,
+        )
+        .unwrap();
+        assert_eq!(p.actions.len(), 2);
+        assert_eq!(p.actions[1].action.path(), Some(Path::new("/opt/inkyfoo")));
+        // A link in a home location is its own action, after the target.
+        let mut with_link = tg(Scope::SystemTree);
+        with_link.left_link = None;
+        with_link.home_link = Some((
+            "/home/user/.local/bin/inky".into(),
+            crate::safety::Fingerprint::default(),
+        ));
+        let p = build_plan_unmanaged(&env, Some(&app), Some(&with_link), &[], &o).unwrap();
+        assert_eq!(kinds(&p), ["delete", "trash"]);
+        assert_eq!(p.actions[1].depends_on, Some(0));
+        assert_eq!(p.actions[1].scope, Scope::Home);
+        assert!(!p.notes.iter().any(|n| n.contains("left in place")));
         // A home target is trashed, or deleted with --permanent.
         let p = build_plan_unmanaged(&env, Some(&app), Some(&tg(Scope::Home)), &[], &o).unwrap();
         assert_eq!(kinds(&p), ["trash"]);

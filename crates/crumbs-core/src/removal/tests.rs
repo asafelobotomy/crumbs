@@ -488,5 +488,22 @@ mod unmanaged {
         let tg = plan(&env, &i, &a).unwrap();
         assert_eq!(tg.path, Path::new("/opt/inky"));
         assert_eq!(tg.left_link.as_deref(), Some(Path::new("/usr/bin/inky")));
+        assert!(tg.home_link.is_none());
+    }
+
+    #[test]
+    fn unmanaged_home_symlink_planned_for_removal() {
+        let t = FixtureTree::new();
+        t.write_exec("opt/inky/Inky", b"");
+        t.symlink("home/user/.local/bin/inky", "/opt/inky/Inky");
+        let env = sys_env(&t);
+        let mut a = app("inky", "/opt/inky/Inky");
+        a.program_link = Some("/home/user/.local/bin/inky".into());
+        let i = inv(vec![a.clone()], &["/usr/bin/true"], true);
+        let tg = plan(&env, &i, &a).unwrap();
+        let (link, fp) = tg.home_link.unwrap();
+        assert_eq!(link, Path::new("/home/user/.local/bin/inky"));
+        assert!(fp.is_symlink);
+        assert!(tg.left_link.is_none());
     }
 }
