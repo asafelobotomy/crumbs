@@ -32,6 +32,7 @@ fn scan_cfg(t: &FixtureTree, runner: &FakeRunner, cfg: &Config, cat: Category) -
         apps: vec![],
         statuses: vec![],
         errors: vec![],
+        owned: Default::default(),
     };
     let cx = ScanContext {
         env: &env,

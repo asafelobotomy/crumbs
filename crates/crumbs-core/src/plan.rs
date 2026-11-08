@@ -9,6 +9,7 @@ use crate::env::Env;
 use crate::error::CoreError;
 use crate::leftovers::{Finding, FindingKind};
 use crate::model::{App, SourceKind};
+use crate::removal::UnmanagedTarget;
 use crate::safety::{self, Fingerprint, Scope};
 use crate::size::disk_usage;
 
@@ -83,6 +84,10 @@ pub struct PlannedAction {
     /// `drop_overlaps`); [`execute_many`](crate::executor::execute_many)
     /// skips this action unless that action succeeded. Not part of the JSON.
     pub depends_on_plan: Option<(usize, usize)>,
+    /// False when part of the size could not be read and nothing was
+    /// counted (a tree with `size.errors > 0` and 0 bytes): the preview
+    /// shows `-` and its total `+ unknown`. Not part of the JSON.
+    pub size_known: bool,
     pub reason: String,
 }
 
@@ -130,6 +135,20 @@ pub struct PlanOptions {
 
 pub const NOTE_APP_STAYS: &str = "the app itself stays installed (leftovers only)";
 pub const REASON_APPIMAGE: &str = "AppImage file";
+pub const REASON_UNMANAGED_LINK: &str = "link to the app's program";
+pub const REASON_UNMANAGED: &str = "the app's own files";
+
+/// Whether a size was read: false when part of it could not be read and
+/// nothing was counted.
+pub fn size_known(size: &crate::size::DiskUsage) -> bool {
+    !(size.errors > 0 && size.bytes == 0)
+}
+
+/// A root delete of a picked `/etc` or `/opt` leftover: planned with no
+/// dependency, whatever else the plan removes (see [`build_plan_unmanaged`]).
+pub fn is_system_leftover(pa: &PlannedAction) -> bool {
+    pa.scope == Scope::SystemTree && matches!(pa.action, Action::Delete { .. })
+}
 
 fn remove(path: PathBuf, opts: &PlanOptions) -> Action {
     if opts.permanent {
@@ -148,11 +167,69 @@ pub fn build_plan(
     findings: &[Finding],
     opts: &PlanOptions,
 ) -> Result<Plan, CoreError> {
+    build_plan_unmanaged(env, app, None, findings, opts)
+}
+
+/// Like [`build_plan`], and for an unmanaged app with a `target` (from
+/// `plan_unmanaged`) the target's removal comes first, every leftover
+/// depending on it except system leftovers (`Scope::SystemTree`), which
+/// depend on nothing. A system target is a root delete whatever
+/// `--permanent` says. With `leftovers_only`, or no target, the app stays.
+pub fn build_plan_unmanaged(
+    env: &Env,
+    app: Option<&App>,
+    target: Option<&UnmanagedTarget>,
+    findings: &[Finding],
+    opts: &PlanOptions,
+) -> Result<Plan, CoreError> {
     let mut actions = Vec::new();
     let mut notes = Vec::new();
     let mut skip_path: Option<PathBuf> = None;
     if let Some(app) = app {
-        if app.source == SourceKind::AppImage && !opts.leftovers_only {
+        if let (SourceKind::Unmanaged, Some(t), false) = (app.source, target, opts.leftovers_only) {
+            let action = if t.scope == Scope::SystemTree {
+                notes.push(NOTE_SYSTEM_DELETE.into());
+                Action::Delete {
+                    path: t.path.clone(),
+                }
+            } else {
+                remove(t.path.clone(), opts)
+            };
+            actions.push(PlannedAction {
+                action,
+                size: t.size.bytes,
+                fingerprint: t.fingerprint,
+                scope: t.scope,
+                depends_on: None,
+                depends_on_plan: None,
+                size_known: size_known(&t.size),
+                reason: REASON_UNMANAGED.into(),
+            });
+            if let Some((link, fingerprint)) = &t.home_link {
+                actions.push(PlannedAction {
+                    action: remove(link.clone(), opts),
+                    size: 0,
+                    fingerprint: *fingerprint,
+                    scope: Scope::Home,
+                    depends_on: None,
+                    depends_on_plan: None,
+                    size_known: true,
+                    reason: REASON_UNMANAGED_LINK.into(),
+                });
+            }
+            if let Some(link) = &t.left_link {
+                notes.push(format!(
+                    "{} is left in place{}",
+                    crate::env::display_path(env, link),
+                    if t.left_link_protected {
+                        " (protected path)"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            skip_path = Some(t.path.clone());
+        } else if app.source == SourceKind::AppImage && !opts.leftovers_only {
             let location = app.location.clone().ok_or_else(|| CoreError::Parse {
                 what: format!("app {}", app.id),
                 message: "AppImage has no location".into(),
@@ -165,6 +242,7 @@ pub fn build_plan(
                 scope: Scope::Home,
                 depends_on: None,
                 depends_on_plan: None,
+                size_known: true,
                 reason: REASON_APPIMAGE.into(),
             });
             skip_path = Some(location);
@@ -176,7 +254,26 @@ pub fn build_plan(
         if opts.keep_data && f.kind != FindingKind::Cache {
             continue;
         }
-        if skip_path.as_ref() == Some(&f.path) {
+        if skip_path.as_ref().is_some_and(|s| f.path.starts_with(s)) {
+            continue;
+        }
+        if f.scope == Scope::SystemTree {
+            // Root deletes are never trashed, whatever `--permanent` says.
+            if !notes.iter().any(|n| n == NOTE_SYSTEM_DELETE) {
+                notes.push(NOTE_SYSTEM_DELETE.into());
+            }
+            actions.push(PlannedAction {
+                action: Action::Delete {
+                    path: f.path.clone(),
+                },
+                size: f.size.bytes,
+                fingerprint: f.fingerprint,
+                scope: Scope::SystemTree,
+                depends_on: None,
+                depends_on_plan: None,
+                size_known: size_known(&f.size),
+                reason: f.reason.clone(),
+            });
             continue;
         }
         let (action, size) = if f.kind == FindingKind::MimeAssoc {
@@ -196,13 +293,20 @@ pub fn build_plan(
             scope: Scope::Home,
             depends_on: None,
             depends_on_plan: None,
+            size_known: true,
             reason: f.reason.clone(),
         });
     }
     if skip_path.is_some() {
-        // A full AppImage uninstall: nothing else goes unless the file did.
+        // A full AppImage or unmanaged uninstall: nothing else goes unless
+        // the app's own file or directory did. A system leftover is the
+        // exception: it was picked by hand and no package owns it (the same
+        // as `--leftovers-only`), and a privileged action cannot wait for
+        // another one.
         for a in actions.iter_mut().skip(1) {
-            a.depends_on = Some(0);
+            if !is_system_leftover(a) {
+                a.depends_on = Some(0);
+            }
         }
     }
     let total_size = actions.iter().map(|a| a.size).sum();
@@ -222,6 +326,8 @@ pub fn build_plan(
     })
 }
 
+pub const NOTE_SYSTEM_DELETE: &str =
+    "system files are deleted permanently with administrator rights and cannot be restored";
 pub const NOTE_TRASH_FREES_LATER: &str =
     "space is freed when the trash is emptied (or use --permanent)";
 pub const NOTE_PERMANENT_TEMP: &str = "permanently delete (temporary files)";
@@ -266,6 +372,7 @@ pub fn build_clean_plan(
                 scope: item.scope,
                 depends_on: None,
                 depends_on_plan: None,
+                size_known: true,
                 reason,
             });
             continue;
@@ -289,6 +396,7 @@ pub fn build_clean_plan(
             scope: item.scope,
             depends_on: None,
             depends_on_plan: None,
+            size_known: true,
             reason: reason.clone(),
         });
         for (extra, fp) in &item.extra_paths {
@@ -301,6 +409,7 @@ pub fn build_clean_plan(
                 scope: item.scope,
                 depends_on: Some(main),
                 depends_on_plan: None,
+                size_known: true,
                 reason: reason.clone(),
             });
         }
@@ -346,6 +455,7 @@ mod tests {
             shared: false,
             reason: format!("reason for {path}"),
             preselected: true,
+            scope: Scope::Home,
             mime_lines: Vec::new(),
         }
     }
@@ -362,6 +472,135 @@ mod tests {
                 Action::PackageRemove { .. } => "package-remove",
             })
             .collect()
+    }
+
+    #[test]
+    fn unmanaged_target_first_and_leftovers_depend_on_it() {
+        use crate::removal::UnmanagedTarget;
+        let t = FixtureTree::new();
+        t.write("opt/inky/a", b"aaaa");
+        t.write("home/user/.config/inky/b", b"bbbb");
+        let env = t.env();
+        let tg = |scope| UnmanagedTarget {
+            path: "/opt/inky".into(),
+            scope,
+            fingerprint: safety::fingerprint(&env, Path::new("/opt/inky")).unwrap(),
+            size: disk_usage(&env, Path::new("/opt/inky")),
+            left_link: Some("/usr/bin/inky".into()),
+            left_link_protected: true,
+            home_link: None,
+        };
+        let home = finding(&env, "/home/user/.config/inky", FindingKind::Config);
+        let app = App::new(SourceKind::Unmanaged, "inky.desktop");
+        let o = PlanOptions::default();
+        let plan = build_plan_unmanaged(
+            &env,
+            Some(&app),
+            Some(&tg(Scope::SystemTree)),
+            std::slice::from_ref(&home),
+            &o,
+        )
+        .unwrap();
+        assert_eq!(kinds(&plan), ["delete", "trash"]);
+        assert_eq!(plan.actions[0].scope, Scope::SystemTree);
+        assert_eq!(plan.actions[1].depends_on, Some(0));
+        assert!(plan.notes.iter().any(|n| n == NOTE_SYSTEM_DELETE));
+        assert!(
+            plan.notes
+                .iter()
+                .any(|n| n == "/usr/bin/inky is left in place (protected path)")
+        );
+        // Findings at or below the target go with it; a sibling stays.
+        t.write("opt/inkyfoo/x", b"x");
+        let below = finding(&env, "/opt/inky/a", FindingKind::SystemData);
+        let sibling = finding(&env, "/opt/inkyfoo", FindingKind::SystemData);
+        let p = build_plan_unmanaged(
+            &env,
+            Some(&app),
+            Some(&tg(Scope::SystemTree)),
+            &[below, sibling],
+            &o,
+        )
+        .unwrap();
+        assert_eq!(p.actions.len(), 2);
+        assert_eq!(p.actions[1].action.path(), Some(Path::new("/opt/inkyfoo")));
+        // A link in a home location is its own action, after the target.
+        let mut with_link = tg(Scope::SystemTree);
+        with_link.left_link = None;
+        with_link.home_link = Some((
+            "/home/user/.local/bin/inky".into(),
+            crate::safety::Fingerprint::default(),
+        ));
+        let p = build_plan_unmanaged(&env, Some(&app), Some(&with_link), &[], &o).unwrap();
+        assert_eq!(kinds(&p), ["delete", "trash"]);
+        assert_eq!(p.actions[1].depends_on, Some(0));
+        assert_eq!(p.actions[1].scope, Scope::Home);
+        assert!(!p.notes.iter().any(|n| n.contains("left in place")));
+        // A home target is trashed, or deleted with --permanent.
+        let p = build_plan_unmanaged(&env, Some(&app), Some(&tg(Scope::Home)), &[], &o).unwrap();
+        assert_eq!(kinds(&p), ["trash"]);
+        let perm = PlanOptions {
+            permanent: true,
+            ..o
+        };
+        let p = build_plan_unmanaged(&env, Some(&app), Some(&tg(Scope::Home)), &[], &perm).unwrap();
+        assert_eq!(kinds(&p), ["delete"]);
+        // Leftovers only: the target is ignored.
+        let lo = PlanOptions {
+            leftovers_only: true,
+            ..o
+        };
+        let p = build_plan_unmanaged(&env, Some(&app), Some(&tg(Scope::SystemTree)), &[home], &lo)
+            .unwrap();
+        assert_eq!(kinds(&p), ["trash"]);
+        assert!(p.notes.iter().any(|n| n == NOTE_APP_STAYS));
+    }
+
+    #[test]
+    fn build_plan_system_finding_is_root_delete() {
+        let t = FixtureTree::new();
+        t.write("opt/inky/a", b"aaaa");
+        t.write("home/user/.config/inky/b", b"bbbb");
+        let env = t.env();
+        let mut sys = finding(&env, "/opt/inky", FindingKind::SystemData);
+        sys.scope = Scope::SystemTree;
+        sys.preselected = false;
+        let home = finding(&env, "/home/user/.config/inky", FindingKind::Config);
+        let fs = [home, sys.clone()];
+        let app = App::new(SourceKind::Pacman, "inky");
+        let plan = build_plan(&env, Some(&app), &fs, &PlanOptions::default()).unwrap();
+        assert_eq!(kinds(&plan), ["trash", "delete"]);
+        assert_eq!(plan.actions[0].scope, Scope::Home);
+        let a = &plan.actions[1];
+        assert_eq!(a.scope, Scope::SystemTree);
+        assert_eq!(a.action.path(), Some(Path::new("/opt/inky")));
+        assert_eq!(a.fingerprint, sys.fingerprint);
+        assert!(plan.notes.iter().any(|n| n == NOTE_SYSTEM_DELETE));
+        assert_eq!(
+            plan.notes
+                .iter()
+                .filter(|n| *n == NOTE_SYSTEM_DELETE)
+                .count(),
+            1
+        );
+        // Without a system finding the note is absent.
+        let plan = build_plan(&env, Some(&app), &fs[..1], &PlanOptions::default()).unwrap();
+        assert!(!plan.notes.iter().any(|n| n == NOTE_SYSTEM_DELETE));
+        // A size that could not be read is carried as unknown.
+        assert!(plan.actions.iter().all(|a| a.size_known));
+        let mut unread = sys.clone();
+        unread.size = crate::size::DiskUsage {
+            bytes: 0,
+            errors: 1,
+            ..Default::default()
+        };
+        let plan = build_plan(&env, Some(&app), &[unread], &PlanOptions::default()).unwrap();
+        assert!(!plan.actions[0].size_known);
+        assert!(size_known(&crate::size::DiskUsage {
+            bytes: 4096,
+            errors: 1,
+            ..Default::default()
+        }));
     }
 
     #[test]
@@ -791,6 +1030,7 @@ mod tests {
             scope,
             depends_on: Some(0),
             depends_on_plan: None,
+            size_known: true,
             reason: "r".into(),
         };
         let cmd = pa(

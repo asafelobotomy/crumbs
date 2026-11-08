@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::env::Env;
 use crate::error::CoreError;
+use crate::safety::Scope;
 use crate::trash::Trashed;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +60,10 @@ pub struct HistoryEntry {
     /// it existed, and in `Restore` entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// `Delete` entries only: the scope the target was deleted in, when it
+    /// is not [`Scope::Home`]. Missing in lines written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Scope>,
 }
 
 pub const KIND_UNINSTALL: &str = "uninstall";
@@ -289,6 +294,7 @@ mod tests {
             restores: None,
             argv: None,
             packages: None,
+            scope: None,
         }
     }
 

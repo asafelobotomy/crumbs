@@ -463,20 +463,6 @@ fn uninstall_dry_run_changes_nothing() {
 }
 
 #[test]
-fn uninstall_unmanaged_requires_leftovers_only_exit_2() {
-    let t = fixture(FLATPAK_OK);
-    t.write("/home/user/.cache/foo/blob", b"x");
-    crumbs(&t)
-        .args(["uninstall", "Zed Foo", "--yes"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains(
-            "removing unmanaged apps isn't supported yet; use --leftovers-only",
-        ));
-    assert!(real(&t, "/home/user/.cache/foo/blob").exists());
-}
-
-#[test]
 fn uninstall_leftovers_only_pacman_keeps_package() {
     let t = fixture(FLATPAK_OK);
     t.write("/home/user/.cache/firefox/blob", b"x");
@@ -1144,6 +1130,29 @@ fn restore_path_skips_restored_entry() {
 }
 
 #[test]
+fn restore_delete_only_batch_says_nothing_restorable() {
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    json_error_free(
+        &t,
+        &["uninstall", "Tool", "--permanent", "--yes", "--json"],
+        0,
+    );
+    let batch = history_json(&t)["data"]["batches"][0]["batch"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (code, stdout, _) = run_out(crumbs(&t).args(["restore", &batch]));
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains("nothing in this batch can be restored"),
+        "{stdout}"
+    );
+    let v = json_error_free(&t, &["restore", &batch, "--json"], 0);
+    assert_eq!(v["data"]["outcomes"][0]["ok"], true, "{v}");
+}
+
+#[test]
 fn restore_unknown_selector_exit_2() {
     let t = fixture(FLATPAK_OK);
     with_leftovers(&t);
@@ -1252,6 +1261,30 @@ fn keep_data_removes_own_launchers_with_appimage() {
         )
         .exists()
     );
+}
+
+/// The launcher goes with the AppImage file, and so do its mimeapps lines.
+#[test]
+fn keep_data_still_removes_mime_lines_of_removed_launcher() {
+    let t = fixture(FLATPAK_OK);
+    gutcheck_launcher(&t);
+    t.write(
+        "/home/user/.config/mimeapps.list",
+        b"[Default Applications]\ntext/x-gut=appofholding-gutcheck.desktop\nimage/png=other.desktop\n",
+    );
+    let (code, stdout, stderr) =
+        run_out(crumbs(&t).args(["uninstall", "GutCheck", "--keep-data", "--yes"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        !real(
+            &t,
+            "/home/user/.local/share/applications/appofholding-gutcheck.desktop"
+        )
+        .exists()
+    );
+    let mime = std::fs::read_to_string(real(&t, "/home/user/.config/mimeapps.list")).unwrap();
+    assert!(!mime.contains("appofholding-gutcheck"), "{mime}");
+    assert!(mime.contains("image/png=other.desktop"), "{mime}");
 }
 
 #[test]
@@ -2721,6 +2754,11 @@ fn clean_system_escalation_denied_exit_5() {
     );
     assert!(real(&t, CORE).exists());
     assert!(recorded(&t, "/paccache-args").is_none());
+    // No tree delete among them: no mount note.
+    assert!(
+        !stderr.contains("check that nothing is mounted"),
+        "{stderr}"
+    );
     // No fake runner at all: nothing to escalate with.
     let (code, stdout, stderr) = run_out(crumbs(&t).args(["clean", "--system", "--yes"]));
     assert_eq!(code, 5, "{stdout}{stderr}");
@@ -2958,4 +2996,317 @@ fn clean_user_and_system_without_rights_changes_nothing_exit_5() {
     assert!(real(&t, "/home/user/.cache/foo/blob").exists());
     assert!(trash_files(&t).is_empty());
     assert!(recorded(&t, "/paccache-args").is_none());
+}
+
+// ---- system leftovers, unmanaged removal, `orphans --system` ----
+
+/// Makes `/`, `/etc` and `/opt` pass the system-tree checks (this user
+/// stands in for root) and installs a logging `rm` for the root batch.
+fn sys_ready(t: &FixtureTree) {
+    t.mkdir("etc");
+    t.mkdir("opt");
+    for rel in ["", "etc", "opt"] {
+        std::fs::set_permissions(
+            t.dir.path().join(rel),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    t.write_exec(
+        "/usr/bin/rm",
+        b"#!/bin/sh\necho \"$@\" >> \"$(dirname \"$0\")/../../rm-args\"\nexec /usr/bin/rm \"$@\"\n",
+    );
+    t.write_exec("/usr/bin/sh", b"#!/bin/sh\nexec /bin/sh \"$@\"\n");
+    // The guard compares mount namespaces with the trusted `readlink`.
+    t.write_exec(
+        "/usr/bin/readlink",
+        b"#!/bin/sh\nexec /usr/bin/readlink \"$@\"\n",
+    );
+    // The root batch refuses a tree with a mount point inside.
+    t.write(
+        "/proc/self/mountinfo",
+        b"36 35 98:0 /mnt1 / rw,noatime master:1 - ext3 /dev/root rw\n",
+    );
+}
+
+/// A package `inky` that owns only its launcher, with unowned `/opt/inky`
+/// and `/etc/inky` beside it.
+fn inky_pkg_fixture() -> FixtureTree {
+    let t = FixtureTree::new();
+    t.os_release("manjaro", "arch", "Manjaro Linux");
+    t.pacman_pkg("coreutils", "9.5-1", Some(2_000_000), &["usr/bin/ls"]);
+    t.pacman_pkg("inky", "1.0-1", Some(1_000), &["usr/bin/inky"]);
+    t.write_exec("/usr/bin/inky", b"");
+    t.write("/opt/inky/bin/inky", b"x");
+    t.write("/etc/inky/inky.conf", b"x");
+    sys_ready(&t);
+    t
+}
+
+/// An unmanaged app `inky` (an unowned launcher running `/opt/inky/inky`)
+/// with `/etc/inky` beside it; the package database is complete.
+fn inky_unmanaged_fixture() -> FixtureTree {
+    let t = FixtureTree::new();
+    t.os_release("manjaro", "arch", "Manjaro Linux");
+    t.pacman_pkg("coreutils", "9.5-1", Some(2_000_000), &["usr/bin/ls"]);
+    t.write_exec("/opt/inky/inky", b"");
+    t.write("/etc/inky/inky.conf", b"x");
+    t.desktop(
+        "/usr/share/applications/inky.desktop",
+        "[Desktop Entry]\nType=Application\nName=Inky\nExec=/opt/inky/inky\n",
+    );
+    sys_ready(&t);
+    t
+}
+
+#[test]
+fn uninstall_lists_system_leftovers_not_preselected() {
+    let t = inky_pkg_fixture();
+    let (code, stdout, stderr) =
+        run_out(sh_runner(&t).args(["uninstall", "inky", "--leftovers-only", "--yes"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    // `--yes` alone never selects a system leftover.
+    assert!(real(&t, "/opt/inky/bin/inky").exists());
+    assert!(real(&t, "/etc/inky/inky.conf").exists());
+    assert!(!real(&t, "/rm-args").exists());
+    assert!(!stdout.contains("as root"), "{stdout}");
+}
+
+#[test]
+fn uninstall_preview_notes_unselected_system_leftovers() {
+    let t = inky_pkg_fixture();
+    let (code, stdout, stderr) =
+        run_out(crumbs(&t).args(["uninstall", "inky", "--leftovers-only", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("note: 2 system leftovers not selected (pick with -i)\n"),
+        "{stdout}"
+    );
+    // One left: singular.
+    let t = inky_unmanaged_fixture();
+    let (code, stdout, stderr) =
+        run_out(crumbs(&t).args(["uninstall", "unmanaged:inky.desktop", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("note: 1 system leftover not selected (pick with -i)\n"),
+        "{stdout}"
+    );
+    // JSON carries no such note.
+    let v = stdout_json(crumbs(&t).args([
+        "uninstall",
+        "unmanaged:inky.desktop",
+        "--dry-run",
+        "--json",
+    ]));
+    assert!(!v.to_string().contains("not selected"), "{v}");
+    // Nothing unselected, no note.
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    let (_, stdout, _) = run_out(crumbs(&t).args(["uninstall", "Tool", "--dry-run"]));
+    assert!(!stdout.contains("not selected"), "{stdout}");
+}
+
+#[test]
+fn uninstall_unmanaged_removes_opt_dir_as_root() {
+    let t = inky_unmanaged_fixture();
+    let (code, stdout, stderr) =
+        run_out(crumbs(&t).args(["uninstall", "unmanaged:inky.desktop", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stdout.contains("delete (as root)"), "{stdout}");
+    assert!(stdout.contains("as root: "), "{stdout}");
+    assert!(real(&t, "/opt/inky/inky").exists());
+    let (code, stdout, stderr) =
+        run_out(sh_runner(&t).args(["uninstall", "unmanaged:inky.desktop", "--yes"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains(
+            "note: system files are deleted permanently with administrator rights and cannot be restored"
+        ),
+        "{stdout}"
+    );
+    assert!(stdout.contains("delete (as root)"), "{stdout}");
+    assert!(!real(&t, "/opt/inky").exists());
+    // The unselected leftover in /etc stays.
+    assert!(real(&t, "/etc/inky/inky.conf").exists());
+    let rm = std::fs::read_to_string(real(&t, "/rm-args")).unwrap();
+    assert_eq!(rm.lines().count(), 1, "one batch: {rm}");
+    let h = history_json(&t);
+    assert!(h.to_string().contains("system-tree"), "{h}");
+}
+
+#[test]
+fn uninstall_unmanaged_vendor_dir_exit_2_and_leftovers_only_works() {
+    let t = inky_unmanaged_fixture();
+    // A program in a vendor directory not named after the app.
+    t.write_exec("/opt/vendor/bin/tool", b"");
+    t.desktop(
+        "/usr/share/applications/zedbar.desktop",
+        "[Desktop Entry]\nType=Application\nName=Zed Bar\nExec=/opt/vendor/bin/tool\n",
+    );
+    t.write("/home/user/.cache/zedbar/blob", b"x");
+    let (code, _, stderr) = run_out(sh_runner(&t).args(["uninstall", "Zed Bar", "--yes"]));
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("does not match the app's name"), "{stderr}");
+    assert!(stderr.contains("use --leftovers-only"), "{stderr}");
+    assert!(real(&t, "/opt/vendor/bin/tool").exists());
+    assert!(real(&t, "/home/user/.cache/zedbar/blob").exists());
+    let v = json_error(&t, &["uninstall", "Zed Bar", "--json", "--yes"], 2);
+    let msg = v["errors"].as_array().unwrap().last().unwrap()["message"].to_string();
+    assert!(msg.contains("does not match the app's name"), "{msg}");
+    let (code, stdout, stderr) =
+        run_out(crumbs(&t).args(["uninstall", "Zed Bar", "--leftovers-only", "--yes"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!real(&t, "/home/user/.cache/zedbar").exists());
+    assert!(real(&t, "/opt/vendor/bin/tool").exists());
+}
+
+fn old_app_fixture() -> FixtureTree {
+    let t = inky_unmanaged_fixture();
+    t.write("/opt/old-app/bin/x", b"x");
+    t.write("/etc/old-app/x.conf", b"x");
+    t
+}
+
+#[test]
+fn orphans_system_lists_unowned_opt_dirs() {
+    let t = old_app_fixture();
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["orphans", "--system"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stdout.contains("/opt/old-app"), "{stdout}");
+    assert!(stdout.contains("system-data"), "{stdout}");
+    assert!(!stdout.contains("/opt/inky"), "{stdout}");
+    let (_, stdout, _) = run_out(crumbs(&t).args(["orphans"]));
+    assert!(!stdout.contains("/opt/old-app"), "{stdout}");
+    let v = stdout_json(crumbs(&t).args(["orphans", "--system", "--json"]));
+    let o = &v["data"]["orphans"][0];
+    assert_eq!(o["path"], "/opt/old-app", "{v}");
+    assert_eq!(o["scope"], "system-tree", "{v}");
+    // Home findings carry no scope.
+    let v = stdout_json(crumbs(&t).args(["orphans", "--json"]));
+    assert!(
+        v["data"]["orphans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|o| o.get("scope").is_none()),
+        "{v}"
+    );
+}
+
+#[test]
+fn orphans_system_never_lists_etc() {
+    let t = old_app_fixture();
+    let (_, stdout, _) = run_out(crumbs(&t).args(["orphans", "--system", "--show-low"]));
+    assert!(!stdout.contains("/etc/"), "{stdout}");
+    let (code, _, stderr) = run_out(sh_runner(&t).args([
+        "orphans",
+        "--system",
+        "--clean",
+        "--select",
+        "/etc/old-app",
+        "--yes",
+    ]));
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("not an orphan"), "{stderr}");
+    assert!(real(&t, "/etc/old-app/x.conf").exists());
+}
+
+#[test]
+fn orphans_system_select_deletes_as_root() {
+    let t = old_app_fixture();
+    // `--yes` alone selects nothing.
+    let (code, _, _) = run_out(sh_runner(&t).args(["orphans", "--system", "--clean", "--yes"]));
+    assert_eq!(code, 2);
+    assert!(real(&t, "/opt/old-app/bin/x").exists());
+    // A user orphan path is not a system orphan.
+    t.write("/home/user/.config/zzzgone/a", b"x");
+    let (code, _, stderr) = run_out(sh_runner(&t).args([
+        "orphans",
+        "--system",
+        "--clean",
+        "--select",
+        "~/.config/zzzgone",
+        "--show-low",
+        "--yes",
+    ]));
+    assert_eq!(code, 2, "{stderr}");
+    assert!(real(&t, "/home/user/.config/zzzgone/a").exists());
+    let (code, stdout, stderr) = run_out(sh_runner(&t).args([
+        "orphans",
+        "--system",
+        "--clean",
+        "--select",
+        "/opt/old-app",
+        "--yes",
+    ]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!real(&t, "/opt/old-app").exists());
+    assert!(real(&t, "/opt/inky/inky").exists());
+    assert!(stdout.contains("delete (as root)"), "{stdout}");
+}
+
+#[test]
+fn orphans_user_and_system_conflict_exit_2() {
+    let t = old_app_fixture();
+    let (code, _, stderr) = run_out(crumbs(&t).args(["orphans", "--user", "--system"]));
+    assert_eq!(code, 2);
+    assert!(stderr.contains("use either --user or --system"), "{stderr}");
+    json_error(&t, &["orphans", "--user", "--system", "--json"], 2);
+}
+
+#[test]
+fn system_delete_denied_exit_5_lists_rm_rf() {
+    let t = inky_unmanaged_fixture();
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "deny").args([
+        "uninstall",
+        "unmanaged:inky.desktop",
+        "--yes",
+    ]));
+    assert_eq!(code, 5, "{stdout}{stderr}");
+    assert!(real(&t, "/opt/inky/inky").exists());
+    assert!(
+        stderr.contains(
+            "  sudo '/usr/bin/rm' '-rf' '--one-file-system' '--' '/opt/inky'\n\
+             check that nothing is mounted inside these paths before running the rm commands\n"
+        ),
+        "{stderr}"
+    );
+    let v = json_error(
+        &t,
+        &["uninstall", "unmanaged:inky.desktop", "--yes", "--json"],
+        5,
+    );
+    assert_eq!(
+        v["data"]["manual_commands"],
+        serde_json::json!(["sudo '/usr/bin/rm' '-rf' '--one-file-system' '--' '/opt/inky'"]),
+        "{v}"
+    );
+}
+
+#[test]
+fn apps_show_lists_system_leftovers() {
+    let t = inky_pkg_fixture();
+    // Resembles the app's name only: low.
+    t.write("/etc/Inky-2/x", b"x");
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["apps", "show", "inky"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let row = |kind: &str, path: &str| {
+        stdout.lines().any(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            w.ends_with(&[kind, path, "root"])
+        })
+    };
+    assert!(row("system-config", "/etc/inky"), "{stdout}");
+    assert!(row("system-data", "/opt/inky"), "{stdout}");
+    assert!(!stdout.contains("/etc/Inky-2"), "{stdout}");
+    let (_, stdout, _) = run_out(crumbs(&t).args(["apps", "show", "inky", "--show-low"]));
+    assert!(stdout.contains("/etc/Inky-2"), "{stdout}");
+    let v = stdout_json(crumbs(&t).args(["apps", "show", "inky", "--json"]));
+    let l = v["data"]["leftovers"].as_array().unwrap();
+    let sys: Vec<&serde_json::Value> = l.iter().filter(|f| f["scope"] == "system-tree").collect();
+    assert_eq!(sys.len(), 2, "{v}");
+    assert!(sys.iter().all(|f| f["preselected"] == false), "{v}");
+    assert!(sys.iter().any(|f| f["path"] == "/etc/inky"), "{v}");
+    let v = stdout_json(crumbs(&t).args(["apps", "show", "inky", "--json", "--show-low"]));
+    assert!(v.to_string().contains("/etc/Inky-2"), "{v}");
 }

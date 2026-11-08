@@ -25,6 +25,7 @@ fn planned(env: &Env, action: Action) -> PlannedAction {
         scope: Scope::Home,
         depends_on: None,
         depends_on_plan: None,
+        size_known: true,
         reason: "test".into(),
         action,
     }
@@ -404,6 +405,29 @@ fn generic_basenames_never_match() {
 }
 
 #[test]
+fn running_detects_script_launched_electron_app() {
+    let t = FixtureTree::new();
+    let env = t.env();
+    let mut app = App::new(SourceKind::Unmanaged, "claude");
+    app.exec_names = vec!["claude".into()];
+    app.program = Some("/usr/lib/claude/claude".into());
+    app.program_link = Some("/usr/bin/claude".into());
+    // A launcher script run by the shell: argv1 is the script.
+    t.symlink("proc/30/exe", "/usr/bin/bash");
+    t.write("proc/30/cmdline", b"/bin/sh\0/usr/bin/claude\0--flag\0");
+    // An interpreter running the canonical program.
+    t.symlink("proc/31/exe", "/usr/bin/node");
+    t.write("proc/31/cmdline", b"node\0/usr/lib/claude/claude\0");
+    // A generic interpreter running something else, or the name only as a
+    // later argument, never matches.
+    t.symlink("proc/32/exe", "/usr/bin/node");
+    t.write("proc/32/cmdline", b"node\0/usr/lib/other/cli.js\0");
+    t.write("proc/33/cmdline", b"node\0x.js\0/usr/bin/claude\0");
+    t.write("proc/34/cmdline", b"/bin/sh\0/home/user/claude\0");
+    assert_eq!(running_processes(&env, &app), [30, 31]);
+}
+
+#[test]
 fn running_processes_without_proc_is_empty() {
     let t = FixtureTree::new();
     let env = t.env();
@@ -697,6 +721,7 @@ fn command_plan(program: &str, args: &[&str]) -> Plan {
         scope: Scope::Home,
         depends_on: None,
         depends_on_plan: None,
+        size_known: true,
         reason: "test".into(),
     }])
 }
@@ -890,6 +915,7 @@ fn unfingerprinted(action: Action) -> PlannedAction {
         scope: Scope::Home,
         depends_on: None,
         depends_on_plan: None,
+        size_known: true,
         reason: "test".into(),
     }
 }
@@ -936,6 +962,7 @@ fn core_delete(env: &Env, name: &str) -> PlannedAction {
         scope: Scope::System,
         depends_on: None,
         depends_on_plan: None,
+        size_known: true,
         reason: "test".into(),
     }
 }
@@ -1906,4 +1933,568 @@ fn execute_many_denied_fails_every_plan() {
         reports[2].results[0].error.as_deref(),
         Some(ESCALATION_DENIED)
     );
+}
+
+/// A mountinfo line for `mount` (a root-joined path in fixtures).
+fn mountinfo_line(mount: &Path) -> String {
+    format!(
+        "36 35 98:0 /mnt1 {} rw,noatime master:1 - ext3 /dev/root rw\n",
+        mount.display()
+    )
+}
+
+/// A fake root where `/opt/inky` and `/opt/blot` pass every SystemTree
+/// check: a 0755 chain owned by the test user, a pacman database that owns
+/// only `/opt/foo`, a mountinfo with nothing below `/opt`, and fixture `sh`,
+/// `readlink` and `rm` that run the real ones.
+fn system_tree_fixture() -> (FixtureTree, Env) {
+    let t = FixtureTree::new();
+    fixture_rm(&t);
+    t.write_exec("usr/bin/sh", b"#!/bin/sh\nexec /bin/sh \"$@\"\n");
+    t.write_exec(
+        "usr/bin/readlink",
+        b"#!/bin/sh\nexec /usr/bin/readlink \"$@\"\n",
+    );
+    t.pacman_pkg("foo", "1-1", Some(1), &["opt/foo/", "opt/foo/x"]);
+    t.write("opt/inky/a", b"a");
+    t.write("opt/inky/sub/b", b"b");
+    t.write("opt/blot/c", b"c");
+    t.write(
+        "proc/self/mountinfo",
+        mountinfo_line(Path::new("/")).as_bytes(),
+    );
+    for rel in ["", "opt"] {
+        fs::set_permissions(t.dir.path().join(rel), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut env = t.env();
+    env.set_system_owner_uid(env.uid);
+    (t, env)
+}
+
+fn tree_delete(env: &Env, p: &str) -> PlannedAction {
+    let mut pa = planned(env, delete(p));
+    pa.scope = Scope::SystemTree;
+    pa
+}
+
+fn run_tree(env: &Env, plan: &Plan) -> (ExecReport, Vec<Vec<u8>>) {
+    let pr = FakePrivilegedRunner::default();
+    let report = execute_full(
+        env,
+        &Config::default(),
+        plan,
+        &FakeRunner::new(),
+        &pr,
+        Some(&esc()),
+        &no_post_check,
+    );
+    let calls = pr.calls.lock().unwrap().clone();
+    (report, calls)
+}
+
+/// The user's mount namespace, as the guard compares it; `None` (with a
+/// message, so the caller skips) when `/proc` cannot be read here.
+fn own_mount_ns() -> Option<std::ffi::OsString> {
+    match fs::read_link("/proc/self/ns/mnt") {
+        Ok(ns) => Some(ns.into_os_string()),
+        Err(e) => {
+            eprintln!("skipped: /proc/self/ns/mnt is unreadable here ({e})");
+            None
+        }
+    }
+}
+
+/// The guard script a tree step in `env` runs, from the real builder.
+fn guard_script(env: &Env) -> std::ffi::OsString {
+    super::tree_script(
+        &env.sys("/var/lib/pacman/db.lck"),
+        &env.sys("/usr/bin/readlink"),
+        &env.sys("/usr/bin/rm"),
+    )
+}
+
+#[test]
+fn system_tree_delete_runs_one_rm_rf_step() {
+    let Some(ns) = own_mount_ns() else { return };
+    let (_t, env) = system_tree_fixture();
+    let plan = plan_of(vec![
+        tree_delete(&env, "/opt/inky"),
+        tree_delete(&env, "/opt/blot"),
+    ]);
+    let (report, calls) = run_tree(&env, &plan);
+    for r in &report.results {
+        assert!(r.ok, "{r:?}");
+    }
+    assert_eq!(calls.len(), 1, "one escalation for the whole run");
+    assert_eq!(step_count(&calls[0]), 2);
+    let script = String::from_utf8_lossy(&calls[0]);
+    let guard = guard_script(&env);
+    // The guard is one quoted word of the step, so its quotes are escaped.
+    let quoted = String::from_utf8_lossy(&crate::privilege::batch::sh_quote(&guard)).into_owned();
+    assert!(script.contains(&quoted), "{script}");
+    assert!(script.contains("'crumbs-rm'"), "{script}");
+    assert!(
+        script.contains(&format!("'{}'", ns.to_string_lossy())),
+        "{script}"
+    );
+    assert!(
+        script.contains("'inky'") && script.contains("'blot'"),
+        "{script}"
+    );
+    assert!(!env.sys("/opt/inky").exists());
+    assert!(!env.sys("/opt/blot").exists());
+    assert_eq!(report.freed, plan.total_size);
+}
+
+#[test]
+fn system_tree_guard_text() {
+    let env = FixtureTree::new().env();
+    let lock = env.sys("/var/lib/pacman/db.lck").display().to_string();
+    let readlink = env.sys("/usr/bin/readlink");
+    let rm = env.sys("/usr/bin/rm");
+    // Spelled out once here; every other test uses the builder.
+    let want = format!(
+        "{{ [ -e '{lock}' ] || [ -L '{lock}' ]; }} && {{ echo \"pacman is busy (database lock \
+         present); not deleting\" >&2; exit 97; }}; test \"$('{}' /proc/self/ns/mnt)\" = \"$1\" || {{ echo \"mount \
+         namespace differs; not deleting\" >&2; exit 97; }}; exec '{}' -rf --one-file-system \
+         -- \"$2\"",
+        readlink.display(),
+        rm.display()
+    );
+    assert_eq!(guard_script(&env), std::ffi::OsString::from(want));
+}
+
+#[test]
+fn system_tree_step_args_arrive_byte_exact() {
+    let Some(ns) = own_mount_ns() else { return };
+    let (t, env) = system_tree_fixture();
+    // An `sh` that logs each argument, NUL-terminated, then runs the real one.
+    let log = t.dir.path().join("sh.log");
+    let sh = format!(
+        "#!/bin/sh\nprintf '%s\\0' \"$@\" >> '{}'\nexec /bin/sh \"$@\"\n",
+        log.display()
+    );
+    t.write_exec("usr/bin/sh", sh.as_bytes());
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, _) = run_tree(&env, &plan);
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    let mut expected: Vec<u8> = Vec::new();
+    for arg in [
+        std::ffi::OsString::from("-c"),
+        guard_script(&env),
+        "crumbs-rm".into(),
+        ns,
+        env.sys("/opt/inky").into_os_string(),
+    ] {
+        expected.extend_from_slice(arg.as_encoded_bytes());
+        expected.push(0);
+    }
+    assert_eq!(fs::read(&log).unwrap(), expected);
+}
+
+#[test]
+fn system_tree_delete_refused_when_namespace_differs() {
+    let (_t, mut env) = system_tree_fixture();
+    env.set_mount_ns(Some("mnt:[1]".into()));
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, calls) = run_tree(&env, &plan);
+    let r = &report.results[0];
+    assert!(!r.ok);
+    assert_eq!(
+        r.error.as_deref(),
+        Some("mount namespace differs; not deleting"),
+        "{r:?}"
+    );
+    assert!(env.sys("/opt/inky/sub/b").exists());
+    // The step itself exited 97.
+    let out = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(std::ffi::OsStr::from_bytes(&calls[0]))
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let markers = crate::privilege::batch::parse_markers(&out.stdout, 1);
+    assert_eq!(markers[0].status, Some(97));
+    assert!(env.sys("/opt/inky/sub/b").exists());
+}
+
+#[test]
+fn system_tree_delete_refused_when_namespace_unreadable() {
+    let (_t, mut env) = system_tree_fixture();
+    env.set_mount_ns(None);
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, calls) = run_tree(&env, &plan);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("the mount namespace could not be read")
+    );
+    assert!(calls.is_empty());
+    assert!(env.sys("/opt/inky/a").exists());
+}
+
+#[test]
+fn system_tree_delete_refused_when_mount_below() {
+    let (t, env) = system_tree_fixture();
+    let info = [
+        mountinfo_line(Path::new("/")),
+        mountinfo_line(&t.dir.path().join("opt/inky/data")),
+    ]
+    .concat();
+    t.write("proc/self/mountinfo", info.as_bytes());
+    let plan = plan_of(vec![
+        tree_delete(&env, "/opt/inky"),
+        tree_delete(&env, "/opt/blot"),
+    ]);
+    let (report, calls) = run_tree(&env, &plan);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("a mount point is below it")
+    );
+    assert!(report.results[1].ok, "{:?}", report.results[1]);
+    assert_eq!(step_count(&calls[0]), 1);
+    assert!(!String::from_utf8_lossy(&calls[0]).contains("inky"));
+    assert!(env.sys("/opt/inky/a").exists());
+    assert!(!env.sys("/opt/blot").exists());
+}
+
+#[test]
+fn system_tree_delete_refused_when_mountinfo_unreadable() {
+    let (t, env) = system_tree_fixture();
+    t.write("proc/self/mountinfo", b"");
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, calls) = run_tree(&env, &plan);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("the mount table could not be read")
+    );
+    assert!(calls.is_empty());
+    assert!(env.sys("/opt/inky/a").exists());
+}
+
+#[test]
+fn system_tree_delete_refused_when_owned_since_scan() {
+    let (t, env) = system_tree_fixture();
+    let plan = plan_of(vec![
+        tree_delete(&env, "/opt/inky"),
+        tree_delete(&env, "/opt/blot"),
+    ]);
+    t.pacman_pkg("inky", "2-1", Some(1), &["opt/inky/new"]);
+    let (report, _) = run_tree(&env, &plan);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("a package owns files in it now")
+    );
+    assert!(report.results[1].ok, "{:?}", report.results[1]);
+    assert!(env.sys("/opt/inky/a").exists());
+}
+
+#[test]
+fn system_tree_delete_refused_while_pacman_locked() {
+    let (t, env) = system_tree_fixture();
+    t.write("var/lib/pacman/db.lck", b"");
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, calls) = run_tree(&env, &plan);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("pacman is busy (database lock present)")
+    );
+    assert!(calls.is_empty());
+    assert!(env.sys("/opt/inky/a").exists());
+}
+
+#[test]
+fn system_tree_delete_refused_without_package_database() {
+    let (t, env) = system_tree_fixture();
+    fs::remove_dir_all(t.dir.path().join("var/lib/pacman/local")).unwrap();
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, calls) = run_tree(&env, &plan);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("the package database could not be read")
+    );
+    assert!(calls.is_empty());
+    assert!(env.sys("/opt/inky/a").exists());
+
+    // An unreadable entry fails closed the same way.
+    let (t, env) = system_tree_fixture();
+    t.write("var/lib/pacman/local/bad-1-1/files/x", b"");
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, _) = run_tree(&env, &plan);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("the package database could not be read")
+    );
+    assert!(env.sys("/opt/inky/a").exists());
+}
+
+#[test]
+fn system_tree_history_and_restore() {
+    let (_t, env) = system_tree_fixture();
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, _) = run_tree(&env, &plan);
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    let raw = fs::read_to_string(env.state_home.join("crumbs/history.jsonl")).unwrap();
+    assert!(raw.contains("\"scope\":\"system-tree\""), "{raw}");
+    let (hist, _) = read_history(&env).unwrap();
+    assert_eq!(hist[0].scope, Some(Scope::SystemTree));
+    let cfg = Config::default();
+    let id = report.results[0].history_id.clone();
+    let out = crate::restore::restore(&env, &cfg, &[id], false).unwrap();
+    assert_eq!(out.len(), 1);
+    assert!(!out[0].ok);
+    assert_eq!(
+        out[0].error.as_deref(),
+        Some(crate::restore::MSG_SYSTEM_TREE)
+    );
+    let out =
+        crate::restore::restore(&env, &cfg, std::slice::from_ref(&report.batch), false).unwrap();
+    assert_eq!(out.len(), 1);
+    assert!(out[0].ok, "{out:?}");
+    assert_eq!(
+        out[0].error.as_deref(),
+        Some(crate::restore::NOTHING_RESTORABLE)
+    );
+}
+
+#[test]
+fn home_delete_history_has_no_scope() {
+    let t = FixtureTree::new();
+    t.write("home/user/.cache/foo/a", b"a");
+    let env = t.env();
+    let plan = plan_of(vec![planned(&env, delete("/home/user/.cache/foo"))]);
+    let report = execute(&env, &Config::default(), &plan);
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    let raw = fs::read_to_string(env.state_home.join("crumbs/history.jsonl")).unwrap();
+    assert!(!raw.contains("\"scope\""), "{raw}");
+}
+
+#[test]
+fn system_tree_step_refuses_when_lock_appears_in_the_batch() {
+    let (t, env) = system_tree_fixture();
+    // The lock appears after the user-side re-check: the step's `sh`
+    // creates it just before running the guard.
+    let lock = env.sys("/var/lib/pacman/db.lck");
+    let sh = format!("#!/bin/sh\n: > '{}'\nexec /bin/sh \"$@\"\n", lock.display());
+    t.write_exec("usr/bin/sh", sh.as_bytes());
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, calls) = run_tree(&env, &plan);
+    let r = &report.results[0];
+    assert!(!r.ok);
+    assert_eq!(
+        r.error.as_deref(),
+        Some("pacman is busy (database lock present); not deleting"),
+        "{r:?}"
+    );
+    assert!(env.sys("/opt/inky/sub/b").exists());
+    // The step itself exited 97.
+    let out = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(std::ffi::OsStr::from_bytes(&calls[0]))
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let markers = crate::privilege::batch::parse_markers(&out.stdout, 1);
+    assert_eq!(markers[0].status, Some(97));
+    assert!(env.sys("/opt/inky/sub/b").exists());
+}
+
+#[test]
+fn system_tree_delete_refused_when_tmpfiles_declares_it_now() {
+    let (t, env) = system_tree_fixture();
+    let plan = plan_of(vec![
+        tree_delete(&env, "/opt/inky"),
+        tree_delete(&env, "/opt/blot"),
+    ]);
+    t.write("usr/lib/tmpfiles.d/inky.conf", b"d /opt/inky/run 0755\n");
+    let (report, calls) = run_tree(&env, &plan);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("a package owns files in it now")
+    );
+    assert!(report.results[1].ok, "{:?}", report.results[1]);
+    assert_eq!(step_count(&calls[0]), 1);
+    assert!(env.sys("/opt/inky/a").exists());
+    assert!(!env.sys("/opt/blot").exists());
+
+    // Unreadable `tmpfiles.d` fails closed.
+    let (t, env) = system_tree_fixture();
+    t.write("etc/tmpfiles.d", b"not a directory");
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, calls) = run_tree(&env, &plan);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("the package database could not be read")
+    );
+    assert!(calls.is_empty());
+    assert!(env.sys("/opt/inky/a").exists());
+}
+
+#[test]
+fn system_tree_rechecks_read_pacman_once_per_batch() {
+    let (_t, env) = system_tree_fixture();
+    let plan = plan_of(vec![
+        tree_delete(&env, "/opt/inky"),
+        tree_delete(&env, "/opt/blot"),
+    ]);
+    super::PACMAN_LOADS.with(|n| n.set(0));
+    let (report, _) = run_tree(&env, &plan);
+    assert!(report.results.iter().all(|r| r.ok), "{report:?}");
+    assert_eq!(super::PACMAN_LOADS.with(std::cell::Cell::get), 1);
+}
+
+#[test]
+fn system_tree_delete_refused_without_trusted_readlink() {
+    let (t, env) = system_tree_fixture();
+    fs::remove_file(t.dir.path().join("usr/bin/readlink")).unwrap();
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, calls) = run_tree(&env, &plan);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("the mount namespace could not be read")
+    );
+    assert!(calls.is_empty());
+    assert!(env.sys("/opt/inky/a").exists());
+}
+
+#[test]
+fn failed_system_tree_delete_restore_says_system_tree() {
+    let (t, env) = system_tree_fixture();
+    t.write("var/lib/pacman/db.lck", b"");
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, _) = run_tree(&env, &plan);
+    assert!(!report.results[0].ok);
+    let id = report.results[0].history_id.clone();
+    let out = crate::restore::restore(&env, &Config::default(), &[id], false).unwrap();
+    assert_eq!(out.len(), 1);
+    assert!(!out[0].ok);
+    assert_eq!(
+        out[0].error.as_deref(),
+        Some(crate::restore::MSG_SYSTEM_TREE)
+    );
+}
+
+#[test]
+fn only_root_deletes_record_a_scope() {
+    let t = FixtureTree::new();
+    t.write("home/user/.local/share/Trash/files/x", b"x");
+    let env = t.env();
+    let mut pa = planned(&env, delete("/home/user/.local/share/Trash/files/x"));
+    pa.scope = Scope::HomeTrash;
+    let plan = plan_of(vec![pa]);
+    let report = execute(&env, &Config::default(), &plan);
+    let raw = fs::read_to_string(env.state_home.join("crumbs/history.jsonl")).unwrap();
+    assert!(!raw.contains("\"scope\""), "{report:?} {raw}");
+}
+
+/// A finding for an existing in-system path, as the scan makes it.
+fn scanned(
+    env: &Env,
+    path: &str,
+    kind: crate::leftovers::FindingKind,
+    scope: Scope,
+) -> crate::leftovers::Finding {
+    let p = PathBuf::from(path);
+    crate::leftovers::Finding {
+        size: disk_usage(env, &p),
+        fingerprint: fingerprint(env, &p).unwrap(),
+        path: p,
+        kind,
+        confidence: crate::leftovers::Confidence::Medium,
+        shared: false,
+        reason: "test".into(),
+        preselected: scope == Scope::Home,
+        scope,
+        mime_lines: Vec::new(),
+    }
+}
+
+#[test]
+fn unmanaged_uninstall_with_picked_system_leftover_runs_end_to_end() {
+    use crate::leftovers::FindingKind;
+    use crate::plan::{PlanOptions, build_plan_unmanaged};
+    let (t, env) = system_tree_fixture();
+    fs::create_dir_all(t.dir.path().join("etc/inky")).unwrap();
+    t.write("etc/inky/inky.conf", b"x");
+    fs::set_permissions(t.dir.path().join("etc"), fs::Permissions::from_mode(0o755)).unwrap();
+    t.write("home/user/.cache/inky/blob", b"b");
+    t.symlink("home/user/.local/bin/inky", "/opt/inky/a");
+    let mut app = crate::model::App::new(SourceKind::Unmanaged, "unmanaged:inky.desktop");
+    app.program = Some("/opt/inky/a".into());
+    let target = crate::removal::UnmanagedTarget {
+        path: "/opt/inky".into(),
+        scope: Scope::SystemTree,
+        fingerprint: fingerprint(&env, Path::new("/opt/inky")).unwrap(),
+        size: disk_usage(&env, Path::new("/opt/inky")),
+        left_link: None,
+        left_link_protected: false,
+        home_link: Some((
+            "/home/user/.local/bin/inky".into(),
+            fingerprint(&env, Path::new("/home/user/.local/bin/inky")).unwrap(),
+        )),
+    };
+    let findings = [
+        scanned(
+            &env,
+            "/home/user/.cache/inky",
+            FindingKind::Cache,
+            Scope::Home,
+        ),
+        scanned(
+            &env,
+            "/etc/inky",
+            FindingKind::SystemConfig,
+            Scope::SystemTree,
+        ),
+    ];
+    let plan = build_plan_unmanaged(
+        &env,
+        Some(&app),
+        Some(&target),
+        &findings,
+        &PlanOptions::default(),
+    )
+    .unwrap();
+    let deps: Vec<Option<usize>> = plan.actions.iter().map(|a| a.depends_on).collect();
+    // Home actions wait for the target; the picked system leftover waits
+    // for nothing.
+    assert_eq!(deps, [None, Some(0), Some(0), None]);
+    let (report, calls) = run_tree(&env, &plan);
+    assert_eq!(calls.len(), 1, "one batch");
+    assert_eq!(step_count(&calls[0]), 2);
+    for r in &report.results {
+        assert!(r.ok, "{r:?}");
+    }
+    assert!(!env.sys("/opt/inky").exists());
+    assert!(!env.sys("/etc/inky").exists());
+    assert!(!env.sys("/home/user/.cache/inky").exists());
+    assert!(fs::symlink_metadata(env.sys("/home/user/.local/bin/inky")).is_err());
+}
+
+#[test]
+fn system_tree_step_refuses_dangling_symlink_lock() {
+    let (t, env) = system_tree_fixture();
+    // A dangling symlink appears at the lock inside the batch.
+    let lock = env.sys("/var/lib/pacman/db.lck");
+    let sh = format!(
+        "#!/bin/sh\nln -s /nonexistent-crumbs-target '{}'\nexec /bin/sh \"$@\"\n",
+        lock.display()
+    );
+    t.write_exec("usr/bin/sh", sh.as_bytes());
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, _) = run_tree(&env, &plan);
+    let r = &report.results[0];
+    assert!(!r.ok);
+    assert_eq!(
+        r.error.as_deref(),
+        Some("pacman is busy (database lock present); not deleting"),
+        "{r:?}"
+    );
+    assert!(
+        fs::symlink_metadata(&lock)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!lock.exists(), "dangling");
+    assert!(env.sys("/opt/inky/sub/b").exists());
 }

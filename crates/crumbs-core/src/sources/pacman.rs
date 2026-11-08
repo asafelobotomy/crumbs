@@ -9,7 +9,7 @@ use crate::model::{App, SourceKind};
 
 use super::{AppSource, SourceContext, SourceListing};
 
-const DB_DIR: &str = "/var/lib/pacman/local";
+pub(crate) const DB_DIR: &str = "/var/lib/pacman/local";
 const APPLICATIONS_DIR: &str = "/usr/share/applications/";
 
 pub struct PacmanSource;
@@ -57,14 +57,16 @@ impl AppSource for PacmanSource {
         for dir in dirs {
             // Ownership must be complete even when desc is unusable.
             let files = match fs::read(dir.join("files")) {
-                Ok(b) => owned_files(&String::from_utf8_lossy(&b)),
+                Ok(b) => owned_entries(&b),
                 Err(e) => {
                     listing
                         .errors
                         .push(pkg_error(&dir, format!("cannot read files: {e}")));
-                    Vec::new()
+                    (Vec::new(), Vec::new())
                 }
             };
+            let (files, pkg_dirs) = files;
+            listing.owned_dirs.extend(pkg_dirs);
             let desc_path = dir.join("desc");
             let desc = match fs::read(&desc_path) {
                 Ok(b) => parse_sections(&String::from_utf8_lossy(&b)),
@@ -72,9 +74,7 @@ impl AppSource for PacmanSource {
                     listing
                         .errors
                         .push(pkg_error(&dir, format!("cannot read desc: {e}")));
-                    listing
-                        .owned_paths
-                        .extend(files.into_iter().map(PathBuf::from));
+                    listing.owned_paths.extend(files);
                     continue;
                 }
             };
@@ -82,9 +82,7 @@ impl AppSource for PacmanSource {
                 listing
                     .errors
                     .push(pkg_error(&dir, "desc has no %NAME%".into()));
-                listing
-                    .owned_paths
-                    .extend(files.into_iter().map(PathBuf::from));
+                listing.owned_paths.extend(files);
                 continue;
             };
 
@@ -95,7 +93,10 @@ impl AppSource for PacmanSource {
 
             let mut linked: Vec<&DesktopEntry> = Vec::new();
             for f in &files {
-                let Some(rel) = f.strip_prefix(APPLICATIONS_DIR) else {
+                let Ok(rel) = f.strip_prefix(APPLICATIONS_DIR) else {
+                    continue;
+                };
+                let Some(rel) = rel.to_str() else {
                     continue;
                 };
                 if !rel.ends_with(".desktop") {
@@ -121,9 +122,7 @@ impl AppSource for PacmanSource {
                 app.display_name = n;
             }
 
-            listing
-                .owned_paths
-                .extend(files.into_iter().map(PathBuf::from));
+            listing.owned_paths.extend(files);
             if app.has_gui || cx.opts.include_all {
                 listing.apps.push(app);
             }
@@ -170,15 +169,34 @@ pub(crate) fn first(sections: &HashMap<String, Vec<String>>, key: &str) -> Optio
         .filter(|v| !v.is_empty())
 }
 
-/// In-system absolute file paths from a `files` listing; directories dropped.
-fn owned_files(text: &str) -> Vec<String> {
-    parse_sections(text)
-        .remove("FILES")
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|l| !l.ends_with('/'))
-        .map(|l| format!("/{l}"))
-        .collect()
+/// In-system absolute `(files, directories)` from a `files` listing.
+///
+/// Parsed as bytes so non-UTF-8 names stay exact. Lines split on `\n` only;
+/// directory lines (trailing `/`) lose their slashes.
+pub(crate) fn owned_entries(bytes: &[u8]) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    let mut lines = bytes.split(|&b| b == b'\n');
+    if !lines.any(|l| l == b"%FILES%") {
+        return (files, dirs);
+    }
+    for line in lines.take_while(|l| !l.is_empty()) {
+        let end = line.iter().rposition(|&b| b != b'/').map_or(0, |i| i + 1);
+        let trimmed = &line[..end];
+        let mut abs = Vec::with_capacity(trimmed.len() + 1);
+        abs.push(b'/');
+        abs.extend_from_slice(trimmed);
+        let path = PathBuf::from(OsStr::from_bytes(&abs));
+        if line.ends_with(b"/") {
+            dirs.push(path);
+        } else {
+            files.push(path);
+        }
+    }
+    (files, dirs)
 }
 
 #[cfg(test)]
@@ -292,6 +310,8 @@ mod tests {
         assert!(l.owned_paths.contains(&PathBuf::from("/usr/bin/firefox")));
         assert!(!l.owned_paths.contains(&PathBuf::from("/usr/")));
         assert!(!l.owned_paths.contains(&PathBuf::from("/usr")));
+        assert!(l.owned_dirs.contains(&PathBuf::from("/usr")));
+        assert!(l.owned_dirs.contains(&PathBuf::from("/usr/bin")));
     }
 
     #[test]

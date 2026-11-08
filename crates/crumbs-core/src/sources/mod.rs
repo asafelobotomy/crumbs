@@ -31,6 +31,8 @@ pub struct SourceListing {
     pub apps: Vec<App>,
     /// In-system absolute paths owned by any package of this source.
     pub owned_paths: HashSet<PathBuf>,
+    /// In-system absolute directories owned by any package of this source.
+    pub owned_dirs: HashSet<PathBuf>,
     pub claimed_desktop_ids: HashSet<String>,
     pub errors: Vec<SourceError>,
 }

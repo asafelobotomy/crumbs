@@ -50,7 +50,7 @@ When `uninstall`, `orphans --clean` or `clean` is run with `--json` and refuses 
   "errors": [
     {
       "source": "cli",
-      "message": "removing unmanaged apps isn't supported yet; use --leftovers-only"
+      "message": "removing this unmanaged app's files isn't possible: /opt/google does not match the app's name; use --leftovers-only"
     }
   ]
 }
@@ -64,8 +64,8 @@ The exit code tells you which kind of failure it was (see below). `apps show` re
 |---|---|
 | 0 | Success (including a dry run and "nothing to do"). |
 | 1 | Error, or `uninstall`/`orphans --clean`/`clean` refused because a source or scanner failed (override with `--force`) or an app is running, or `uninstall` refused an AppImage whose file fails the safety checks, or refused a package removal: pacman's simulation refused it (for example it would break a dependency), the pacman database is locked (`pacman is busy (database lock present)`), or the name is not a plain package name. |
-| 2 | Usage error: bad flags, a missing package tool (`pacman is not installed` when removing a pacman app), an unknown category name, `--user` together with `--system`, a named category of the other kind (`clean cache --system`, `scan --user --category journal`), ambiguous or not-found app, `--json` without `--yes` or `--dry-run`, a destructive command run non-interactively without `--yes`, removing an unmanaged app without `--leftovers-only`, or `restore` with no selector matching any history entry. |
-| 3 | Partial failure: some source failed while another worked, some actions/restores failed (privileged ones included, when administrator rights were granted but a step failed, or the privileged run stopped part-way), or (`scan`) some category's scanner failed. |
+| 2 | Usage error: bad flags, a missing package tool (`pacman is not installed` when removing a pacman app), an unknown category name, `--user` together with `--system`, a named category of the other kind (`clean cache --system`, `scan --user --category journal`), ambiguous or not-found app, `--json` without `--yes` or `--dry-run`, a destructive command run non-interactively without `--yes`, an unmanaged app whose own files cannot be removed (the refusal text ends `; use --leftovers-only`, see `uninstall`), or `restore` with no selector matching any history entry (see `restore`). |
+| 3 | Partial failure: some source failed while another worked, some actions/restores failed (`restore` also when selectors are mixed: a batch with nothing restorable together with an unknown selector) (privileged ones included, when administrator rights were granted but a step failed, or the privileged run stopped part-way), or (`scan`) some category's scanner failed. |
 | 4 | Aborted by the user at a prompt. |
 | 5 | Administrator rights were needed and not available: no escalation program (`run0` on systemd 256 or newer, `pkexec`, or `sudo` on a terminal) was found, or the prompt was cancelled or denied. Nothing that needs those rights was changed. The human output lists the commands to run by hand, and `--json` carries them in `data.manual_commands` (see `uninstall`). |
 
@@ -108,13 +108,16 @@ Commands that take an app accept an ID, a name, a desktop ID or a display name. 
 | Field | Type | Meaning |
 |---|---|---|
 | `path` | string | In-system path. |
-| `kind` | string | `config`, `cache`, `data`, `state`, `dot-dir` (a directory directly in home), `dot-file` (a file or symlink there), `flatpak-data`, `snap-data`, `autostart`, `desktop-entry`, `icon`, `systemd-unit` or `mime-assoc`. |
+| `kind` | string | `config`, `cache`, `data`, `state`, `dot-dir` (a directory directly in home), `dot-file` (a file or symlink there), `flatpak-data`, `snap-data`, `autostart`, `desktop-entry`, `icon`, `systemd-unit`, `mime-assoc`, `system-config` (an unowned directory or file directly under `/etc`) or `system-data` (an unowned directory or file directly under `/opt`). |
 | `confidence` | string | `high`, `medium` or `low`. |
 | `shared` | boolean | Another installed app may also use it. |
 | `reason` | string | Why crumbs thinks it belongs to the app. |
 | `size` | object | `{ "bytes", "files", "errors" }`, all numbers. `errors` counts entries that could not be measured. |
 | `preselected` | boolean | Whether `uninstall` includes it by default. Always `false` for orphans. |
 | `mime_lines` | array of string | `mime-assoc` only: the exact `mimeapps.list` lines that would be removed. Empty otherwise. |
+| `scope` | string | `system-tree` for a `system-config` or `system-data` finding (deleted as root, never trashed; see the plan action's `scope`). Absent for everything else (the home directory). |
+
+**System leftovers** (`system-config`, `system-data`) are the direct children of `/etc` and `/opt` that no installed package owns (a path a package ships, or one a tmpfiles.d file declares, counts as owned; tmpfiles.d is read from `/usr/lib/tmpfiles.d`, `/usr/local/lib/tmpfiles.d`, `/run/tmpfiles.d` and `/etc/tmpfiles.d`, and its path fields are unquoted as systemd does, with a leading `%E` read as `/etc`; a literal path covers the candidate when it is the candidate or lies below it, never when it is an ancestor; a path with glob characters (`*?[`) or `%` specifiers covers it only when the pattern is at least as deep and its leading components each match the candidate's, so it could match the candidate or something inside it (each `%X` matches like `*`, never across `/`); a field that cannot be unquoted covers whatever its literal directory, up to the last `/` before the first special character, may hold) and that belong to a removed or detected app. They are never `high` (at most `medium`) and never `preselected`: `uninstall` plans them only when chosen with `-i`, and a plain run adds the human note `N system leftovers not selected (pick with -i)`. `apps show` lists them too, from the same search as `uninstall` (`low` ones only with `--show-low`), with `scope` `system-tree`; its human table marks them `root`. They are deleted permanently, as root, with `scope` `system-tree`. A picked system leftover never `depends_on` anything, not even the app's own removal: it was chosen by hand and no package owns it, as with `--leftovers-only`, so it is deleted even when the removal fails.
 
 **Plan**
 
@@ -133,15 +136,17 @@ Each action is `{ "action", "size", "reason" }`, plus two optional fields. `acti
 - `privileged-command` carries `program` and `args`, like `user-command`, but runs as root in the run's single privileged batch (see below). It has no path and cannot be undone. `uninstall` plans one to remove a system or custom-installation Flatpak app; `clean --system` plans them for most system categories.
 - `package-remove` carries `source` (`pacman`), `names` and `versions` (arrays of string, aligned: the app's package first, then every package pacman will remove with it), `program` and `args`. It runs as root in the privileged batch, has no path and cannot be undone by crumbs.
 
-`size` is bytes (0 for `edit-file`, and 0 for a command or `package-remove` whose size is unknown; a `privileged-command` from `clean --system` carries the size its scan estimated, such as the package cache).
+`size` is bytes (0 for `edit-file`, and 0 for a command or `package-remove` whose size is unknown; a `privileged-command` from `clean --system` carries the size its scan estimated, such as the package cache). A system-tree `delete` whose size could not be read (nothing counted) also has `size` 0; the human preview shows its size as `-` and the total as `will permanently delete N items (X + unknown)`. The JSON does not mark it.
 
 **Privileged batch.** All `privileged-command` and `package-remove` actions of one run, and each `delete` with `scope` `system`, are joined into one `/bin/sh` script and run once, so there is one authorisation prompt however many there are. The escalation program is `run0` (only on systemd 256 or newer), else `pkexec`, else `sudo` (only when stdin is a terminal). The script sets a fixed `PATH` and clears `LD_PRELOAD` and `LD_LIBRARY_PATH`; each program is resolved in the trusted system directories and every argument is single-quoted. It runs before the rest of the plan. The human preview says `these steps run with administrator rights; you will be asked once` (a `note:` line of the human output only; it is not in the plan's `notes`). A privileged action that `depends_on` another action is skipped. `--dry-run` never escalates.
+
+**System-tree deletes.** A `delete` with `scope` `system-tree` is never trashed and cannot be restored. Its target is a direct child of `/etc` or `/opt`, and the chain of directories from `/` down to it must be owned by root and not writable by others. Right before the batch crumbs refuses it when the target changed since the scan, or with one of these `error` texts (that action fails and nothing is deleted): `pacman is busy (database lock present)`, `a mount point is below it` (anything mounted at or below the target, read from `/proc/self/mountinfo`), `the mount table could not be read` (an unreadable or empty table), `a package owns files in it now` (the pacman database and tmpfiles.d are each read again, once per run, and tmpfiles.d declares nothing it covers), `the package database could not be read` (also when it is incomplete, or tmpfiles.d is unreadable) and `the mount namespace could not be read` (also when no trusted `readlink` is installed). The root step then runs `sh -c <guard> crumbs-rm <user mount namespace> <path>`: the guard exits 97 with `pacman is busy (database lock present); not deleting` when `/var/lib/pacman/db.lck` exists (a dangling symlink counts), and with `mount namespace differs; not deleting` unless the root shell shares the user's mount namespace (read with the trusted `readlink` by its absolute path), and only then `exec rm -rf --one-file-system -- <path>`. Its manual command (exit 5) is `rm -rf --one-file-system -- <path>`; the human output then adds the line `check that nothing is mounted inside these paths before running the rm commands` after the list (not in `manual_commands`). The human preview shows `delete (as root)` and the note `system files are deleted permanently with administrator rights and cannot be restored`; that note is also in the plan's `notes`.
 
 The optional fields are left out when they have no value:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `scope` | string | Where the path may lie: `user-temp` (a direct child of `/tmp`), `home-trash` (an entry of the home trash) or `system` (a root-owned system file, deleted as root in the privileged batch; only `coredumps` uses it). Absent means the home directory, as in M2; always absent on an action without a path. |
+| `scope` | string | Where the path may lie: `user-temp` (a direct child of `/tmp`), `home-trash` (an entry of the home trash) or `system` (a root-owned system file, deleted as root in the privileged batch; only `coredumps` uses it) or `system-tree` (a directory tree or file directly under `/etc` or `/opt`, deleted as root with `rm -rf --one-file-system`; see below). Absent means the home directory, as in M2; always absent on an action without a path. |
 | `depends_on` | number | Index of an earlier action in the same plan. If that action did not succeed, this one is skipped. The `.trashinfo` file of a trashed entry depends on the entry itself. |
 
 ## `apps list`
@@ -358,6 +363,37 @@ Orphans are never `high`:
 
 `orphans --clean` prints the same `{ plans, report }` shape as `uninstall` (below), with `command` `orphans`; its single plan has `app_id` null.
 
+### `orphans --system`
+
+`crumbs orphans --system [--show-low] [--json]` lists the directories directly under `/opt` that no installed package owns (no pacman-owned path at or below it, nothing declared in tmpfiles.d) and that no detected app claims. It never lists `/etc`: an orphan there cannot be told from a local edit of a live package's config. The shape is the same as `orphans`; every finding has `kind` `system-data`, `scope` `system-tree`, `preselected` false and `confidence` `low`, and since every finding is low, they are listed without `--show-low`. Without a complete pacman database the list is empty. `--user --system` exits 2. `orphans --system --clean --select <path>...` (or `-i`) deletes the chosen ones as root with the system-tree safeguards above; nothing is removed unless named.
+
+```json
+{
+  "schema_version": 1,
+  "command": "orphans",
+  "data": {
+    "orphans": [
+      {
+        "confidence": "low",
+        "kind": "system-data",
+        "mime_lines": [],
+        "path": "/opt/old-tool",
+        "preselected": false,
+        "reason": "not owned by any package and matched by no app",
+        "scope": "system-tree",
+        "shared": false,
+        "size": {
+          "bytes": 4096,
+          "errors": 0,
+          "files": 1
+        }
+      }
+    ]
+  },
+  "errors": []
+}
+```
+
 ## `uninstall` (and `orphans --clean`)
 
 `data`: `plans` (array of Plan, one per app, in the order given) and `report`:
@@ -448,11 +484,11 @@ How the app itself goes depends on its source:
 | flatpak, user installation | `user-command`: `flatpak uninstall --user -y --noninteractive <id>`. No administrator rights. |
 | flatpak, system installation | `privileged-command`: `flatpak uninstall --system -y --noninteractive <id>`. |
 | flatpak, custom installation | `privileged-command`: `flatpak uninstall --installation=<name> -y --noninteractive <id>`. |
-| unmanaged | not supported yet: exit 2, `removing unmanaged apps isn't supported yet; use --leftovers-only`. |
+| unmanaged | `uninstall unmanaged:<id>` removes the app's own files by path when that is unambiguous: a `delete` with `scope` `system-tree` for `/opt/<dir>` its canonical program sits in, or a `trash` of its directory in `~/opt` or `~/Applications`, or of the single program file in `~/bin` or `~/.local/bin`. A symlink to the program in a non-protected home location is trashed with it (it `depends_on` the target); a link in a protected location, or outside home, is left with a note. Otherwise exit 2 with `removing this unmanaged app's files isn't possible: <reason>; use --leftovers-only`. The reasons: `its program is in a protected or shared location` (for example `/usr/local`, or a program with no known path), `<path> belongs to a package` (a package owns something at or below it, or tmpfiles.d declares one), `package ownership is unknown (no pacman database)` and `package ownership is unknown (tmpfiles.d unreadable)` (`/opt` targets only), `<path> is shared with <app>, ...` (another detected app lives there), `<path> does not match the app's name` (a vendor directory such as `/opt/google`; only the app's own names count, never names derived from its `Exec` path), or a safety refusal for the path itself. `--leftovers-only` always works as the fallback. |
 
-`--delete-data` is never passed to Flatpak; `~/.var/app/<id>` is a leftover and is trashed, so it can be restored. The leftovers of a removed pacman or Flatpak app are planned with `depends_on` set to the removal's index: if the removal fails or is denied, they are skipped and stay where they are. A package removal is confirmed afterwards by reading the pacman database again: a package still installed makes the action `ok` false with `still installed`.
+`--delete-data` is never passed to Flatpak; `~/.var/app/<id>` is a leftover and is trashed, so it can be restored. The leftovers of a removed pacman or Flatpak app are planned with `depends_on` set to the removal's index: if the removal fails or is denied, they are skipped and stay where they are. Picked system leftovers (`scope` `system-tree`) are the exception: they depend on nothing (see System leftovers above), and the same holds beside an unmanaged app's own target. A package removal is confirmed afterwards by reading the pacman database again: a package still installed makes the action `ok` false with `still installed`.
 
-Refusals (exit 1): pacman's simulation fails (its message is shown, for example a dependency that would break), or the pacman database lock `db.lck` exists (`pacman is busy (database lock present)`). Names that are not plain package or application names are refused as well.
+Refusals (exit 2) for an unmanaged app are listed in the table above. Refusals (exit 1): pacman's simulation fails (its message is shown, for example a dependency that would break), or the pacman database lock `db.lck` exists (`pacman is busy (database lock present)`). Names that are not plain package or application names are refused as well.
 
 One run with several apps (`uninstall a b`) still shows one prompt: all privileged actions of all plans share the batch, and each plan gets its own report.
 
@@ -624,14 +660,14 @@ With `--leftovers-only`, the plan leaves out what launches or opens the app: its
 | `restored` | number | Entries of this batch that a later successful restore put back. |
 | `entries` | array | History entries (below). |
 
-**History entry**: `id` (`<batch>-<index>`), `batch`, `time`, `action` (`trash`, `delete`, `edit-file`, `restore`, `command`, `privileged-command` or `package-remove`; lines written by earlier builds may say `edit_file`, which means the same), `path`, `trashed` (null, or `{ original, files_path, info_path }`), `backup` (string or null), `size` (number), `ok` (boolean), `error` (string or null), `app_id` (string or null), `restores` (string or null), `argv` (array of string; present on `command`, `privileged-command` and `package-remove` entries only), `packages` (array of `[name, version]` pairs; present on `package-remove` entries only) and `kind` (string: `uninstall`, `orphans` or `clean`, the command that made the batch; absent on `restore` entries and on lines written by earlier builds).
+**History entry**: `id` (`<batch>-<index>`), `batch`, `time`, `action` (`trash`, `delete`, `edit-file`, `restore`, `command`, `privileged-command` or `package-remove`; lines written by earlier builds may say `edit_file`, which means the same), `path`, `trashed` (null, or `{ original, files_path, info_path }`), `backup` (string or null), `size` (number), `ok` (boolean), `error` (string or null), `app_id` (string or null), `restores` (string or null), `argv` (array of string; present on `command`, `privileged-command` and `package-remove` entries only), `packages` (array of `[name, version]` pairs; present on `package-remove` entries only) and `scope` (string; present only on a system delete: `system` or `system-tree`) and `kind` (string: `uninstall`, `orphans` or `clean`, the command that made the batch; absent on `restore` entries and on lines written by earlier builds).
 
 - `trashed` is set for `trash` entries, and on `restore` entries it repeats the trash record that was restored.
 - On an `edit-file` entry, `backup` is the copy of the file as it was before the edit.
 - On a `restore` entry, `restores` is the ID of the entry it restored. For a restored `edit-file`, `backup` is the **pre-restore backup**: a copy of the file as it was just before the restore overwrote it. For other entries `backup` is null.
 - On a `command` entry (a `user-command` action that ran), `path` is the program's in-system path (or its bare name when it is not installed), `argv` its arguments, `size` 0, `trashed` and `backup` null. It cannot be restored.
 - A `privileged-command` entry is the same for a command that ran as root: `path` is the program's in-system path, `argv` its arguments, `size` the size the scan estimated (0 when unknown), `trashed` and `backup` null. It cannot be restored.
-- A `package-remove` entry records a package removal that ran as root: `path` is the package manager (`/usr/bin/pacman`), `argv` the exact arguments, `packages` the `[name, version]` of each package that is **gone** afterwards (empty when the removal failed or was denied; after a partial failure only what was removed). `crumbs restore` says `packages cannot be restored by crumbs`. A permanent `delete` of a system file (`coredumps`) is recorded as a `delete` entry.
+- A `package-remove` entry records a package removal that ran as root: `path` is the package manager (`/usr/bin/pacman`), `argv` the exact arguments, `packages` the `[name, version]` of each package that is **gone** afterwards (empty when the removal failed or was denied; after a partial failure only what was removed). `crumbs restore` says `packages cannot be restored by crumbs`. A permanent `delete` of a system file (`coredumps`) is recorded as a `delete` entry, and so is a system-tree delete, with `scope` `system-tree`; both are root-owned deletes that `restore` refuses by name.
 - Failed and skipped attempts are recorded too (`ok` false, `error` set). A denied escalation is recorded with `ok` false.
 - A batch made by `clean` has `app_id` null and `kind` `clean` on its entries, so `history` labels it `clean`.
 
@@ -716,12 +752,19 @@ Selectors are batch IDs, entry IDs or absolute original paths. `data`: `outcomes
 
 | Field | Type | Meaning |
 |---|---|---|
-| `entry_id` | string | The restored history entry; empty string when the selector matched nothing. |
+| `entry_id` | string | The restored history entry; empty string when the selector matched nothing, and also for a recognised batch with nothing restorable (below). |
 | `path` | string | The entry's original path (the selector text when nothing matched). |
 | `ok` | boolean | |
-| `error` | string or null | For example `already restored`, `no matching history entry`. |
+| `error` | string or null | For example `already restored`, `no matching history entry`. On an `ok` outcome with an empty `entry_id` it is informational (below). |
 
-A batch selector restores the batch's successful `trash` and `edit-file` entries; `delete`, `command`, `privileged-command` and `package-remove` entries are skipped, since nothing of them can be put back (an entry ID names one anyway, and its outcome says `permanently deleted; cannot be restored`, `commands cannot be undone` or `packages cannot be restored by crumbs; reinstall with: pacman -S <app> && pacman -S --asdeps <deps>`, where the app is the one `app_id` names and the rest were removed with it; a removal that failed part-way still gives the commands for what it removed, prefixed with `the original removal only partly ran; `). A path selector names the newest successful trash entry for that path that has not been restored yet. `--dry-run` checks and reports without changing anything. Exit 0 when every outcome is `ok`; 2 when no selector matched any history entry (every outcome has an empty `entry_id`); otherwise 3.
+A batch selector restores the batch's successful `trash` and `edit-file` entries; `delete`, `command`, `privileged-command` and `package-remove` entries are skipped, since nothing of them can be put back (an entry ID names one anyway, and its outcome says `permanently deleted; cannot be restored`, `commands cannot be undone` or `packages cannot be restored by crumbs; reinstall with: pacman -S <app> && pacman -S --asdeps <deps>`, where the app is the one `app_id` names and the rest were removed with it; a removal that failed part-way still gives the commands for what it removed, prefixed with `the original removal only partly ran; `). A path selector names the newest successful trash entry for that path that has not been restored yet. `--dry-run` checks and reports without changing anything. A batch that exists but holds nothing that can be put back (it only deleted, ran commands or removed packages, or every trash entry in it failed) is not an error: its outcome is `ok: true`, `entry_id` empty, `path` the selector and `error` the informational text `nothing in this batch can be restored`. Consumers should key on `ok` together with `entry_id`: `ok` true with an empty `entry_id` means a recognised batch with nothing to restore, `ok` false with an empty `entry_id` means the selector matched nothing (`no matching history entry`).
+
+Exit 0 when every outcome is `ok`; 2 when every outcome has an empty `entry_id` and none is `ok` (no selector matched any history entry); otherwise 3. So a nothing-restorable batch alone exits 0, and one together with an unknown selector exits 3.
+
+Two further refusal texts, both with `ok` false and the entry's own `entry_id`:
+
+- A system-tree delete (`uninstall` of an unmanaged `/opt` app, `orphans --system --clean`, and any other `delete` with `scope` `system-tree`): `system files deleted as root cannot be restored`, also when that delete failed.
+- A trash entry whose trash directory fails the private-directory rule: `trash directory <path> has unsafe permissions or owner (needs a private 0700 directory owned by you)`. The trash root must be a real directory, owned by you, mode exactly `0700` and, for the home trash, inside your home directory; the same rule decides where `clean`, `uninstall` and `orphans` may trash to, so a refused root is skipped at trashing time too.
 
 ```json
 {

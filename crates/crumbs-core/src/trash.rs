@@ -117,15 +117,24 @@ fn nearest_existing(p: &Path) -> Option<&Path> {
 pub fn trash_dir_for(env: &Env, in_system: &Path) -> Result<PathBuf, CoreError> {
     let item = env.sys_path(in_system);
     let home_trash = env.data_home.join("Trash");
+    // Restore and the safety checks only accept a home trash under home.
+    let home_trash_dir = |env: &Env| {
+        if !env.unsys(&home_trash).starts_with(env.unsys(&env.home)) {
+            return Err(io_err(
+                in_system,
+                io::Error::other("the trash folder is outside your home directory"),
+            ));
+        }
+        ensure_private_dir(env, &home_trash)?;
+        Ok(home_trash.clone())
+    };
     // A missing item cannot be moved anyway; let the rename report that.
     let Some(item_dev) = dev_of_real(&item) else {
-        ensure_private_dir(env, &home_trash)?;
-        return Ok(home_trash);
+        return home_trash_dir(env);
     };
     let data_dev = nearest_existing(&env.data_home).and_then(dev_of_real);
     if data_dev == Some(item_dev) {
-        ensure_private_dir(env, &home_trash)?;
-        return Ok(home_trash);
+        return home_trash_dir(env);
     }
     let fail = |msg: &str| io_err(in_system, io::Error::other(msg.to_string()));
     let top =
@@ -134,8 +143,27 @@ pub fn trash_dir_for(env: &Env, in_system: &Path) -> Result<PathBuf, CoreError> 
         return Err(fail("refusing to use / as a trash topdir"));
     }
     let dir = top.join(format!(".Trash-{}", env.uid));
-    ensure_private_dir(env, &dir)?;
+    ensure_topdir_trash(env, &dir)?;
     Ok(dir)
+}
+
+/// Creates (if missing) a topdir trash root and applies the rule restore
+/// applies to it (`restore.rs::valid_topdir_trash`): a real directory owned
+/// by us with mode exactly 0700. Crumbs never trashes into a root it would
+/// refuse to restore from.
+fn ensure_topdir_trash(env: &Env, dir: &Path) -> Result<(), CoreError> {
+    ensure_private_dir(env, dir)?;
+    let m = fs::symlink_metadata(dir).map_err(|e| io_err(dir, e))?;
+    if m.mode() & 0o777 != 0o700 {
+        return Err(io_err(
+            dir,
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "trash directory must be a private 0700 directory",
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Percent-encodes an absolute path; keeps `A-Za-z0-9-._~/`.
@@ -532,6 +560,29 @@ mod tests {
     }
 
     #[test]
+    fn trash_refuses_trash_outside_home() {
+        let t = FixtureTree::new();
+        t.write("home/user/a", b"x");
+        t.mkdir("data");
+        let mut env = t.env();
+        env.data_home = t.dir.path().join("data");
+        let err = move_to_trash(&env, Path::new("/home/user/a")).unwrap_err();
+        assert!(err.to_string().contains("outside your home"), "{err}");
+        assert!(real(&env, "/home/user/a").exists());
+        assert!(!env.data_home.join("Trash").exists());
+    }
+
+    #[test]
+    fn trash_under_home_still_works() {
+        let t = FixtureTree::new();
+        t.write("home/user/a", b"x");
+        let env = t.env();
+        let got = move_to_trash(&env, Path::new("/home/user/a")).unwrap();
+        assert!(env.sys_path(&got.files_path).exists());
+        assert!(!real(&env, "/home/user/a").exists());
+    }
+
+    #[test]
     fn trash_works_with_existing_0755_dirs() {
         use std::os::unix::fs::PermissionsExt;
         let t = FixtureTree::new();
@@ -576,5 +627,31 @@ mod tests {
         assert!(info.contains("Path=/home/user/caf%E9\n"));
         restore_from_trash(&env, &got).unwrap();
         assert!(env.sys_path(&p).is_dir());
+    }
+
+    #[test]
+    fn topdir_trash_root_must_be_private_and_ours() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = FixtureTree::new();
+        let env = t.env();
+        let root = t.dir.path().join(format!("mnt/.Trash-{}", env.uid));
+        // Missing: created, mode 0700.
+        ensure_topdir_trash(&env, &root).unwrap();
+        assert_eq!(fs::metadata(&root).unwrap().mode() & 0o777, 0o700);
+        // The same rule restore applies: anything but 0700 is refused.
+        for mode in [0o755, 0o750, 0o500, 0o770, 0o701] {
+            fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(ensure_topdir_trash(&env, &root).is_err(), "{mode:o}");
+        }
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(ensure_topdir_trash(&env, &root).is_ok());
+        // Not ours.
+        let mut other = env.clone();
+        other.uid = env.uid.wrapping_add(1);
+        assert!(ensure_topdir_trash(&other, &root).is_err());
+        // A symlink to a private directory.
+        let link = t.dir.path().join("mnt/link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        assert!(ensure_topdir_trash(&env, &link).is_err());
     }
 }

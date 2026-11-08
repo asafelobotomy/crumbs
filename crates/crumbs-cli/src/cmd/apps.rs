@@ -5,13 +5,14 @@ use std::process::ExitCode;
 use clap::{Subcommand, ValueEnum};
 use crumbs_core::command::SystemRunner;
 use crumbs_core::inventory::{Resolved, discover, find_app};
-use crumbs_core::leftovers::{Finding, find_leftovers};
+use crumbs_core::leftovers::{Finding, find_leftovers, find_system_leftovers};
+use crumbs_core::safety::Scope;
 use crumbs_core::sources::ListOptions;
 use crumbs_core::{App, Env, SourceKind};
 use serde_json::json;
 
 use super::context::{Context, load_cfg, print_notes};
-use super::render::{sanitise, shown_path};
+use super::render::{finding_size, sanitise, shown_path};
 use crate::output::{
     ErrorEntry, confidence, finding_kind, fmt_size, partial_failure, print_json_entries,
     print_table, source_exit_code,
@@ -138,7 +139,9 @@ fn show(env: &Env, query: &str, show_low: bool, json: bool) -> anyhow::Result<Ex
     let mut err = anstream::stderr().lock();
     match find_app(inv, query) {
         Resolved::Found(app) => {
-            let leftovers = find_leftovers(&cx.idx, app, show_low);
+            // System leftovers too, as `uninstall` offers them.
+            let mut leftovers = find_leftovers(&cx.idx, app, show_low);
+            leftovers.extend(find_system_leftovers(env, &cx.cfg, &cx.idx, app, show_low));
             if json {
                 let data = json!({ "app": app, "leftovers": leftovers });
                 print_json_entries("apps show", &data, &errors)?;
@@ -185,23 +188,43 @@ fn print_leftovers(env: &Env, leftovers: &[Finding]) -> anyhow::Result<()> {
         .map(|f| {
             vec![
                 confidence(f.confidence),
-                fmt_size(f.size.bytes),
+                finding_size(&f.size),
                 finding_kind(f.kind),
                 shown_path(env, &f.path),
-                if f.shared { "shared" } else { "" }.to_string(),
+                match (f.shared, f.scope == Scope::SystemTree) {
+                    (true, true) => "shared, root",
+                    (true, false) => "shared",
+                    (false, true) => "root",
+                    (false, false) => "",
+                }
+                .to_string(),
             ]
         })
         .collect();
     print_table(&["CONF", "SIZE", "KIND", "PATH", "NOTE"], &rows)?;
-    let total: u64 = leftovers.iter().map(|f| f.size.bytes).sum();
-    let preselected = leftovers.iter().filter(|f| f.preselected).count();
     writeln!(
         anstream::stdout().lock(),
-        "\n{} leftovers, {} ({preselected} preselected)",
-        leftovers.len(),
-        fmt_size(total)
+        "\n{}",
+        leftovers_total(leftovers)
     )?;
     Ok(())
+}
+
+/// `N leftovers, <size> (M preselected)`; the size says `+ unknown` when
+/// some row's size is unknown (shown as `-`).
+fn leftovers_total(leftovers: &[Finding]) -> String {
+    let total: u64 = leftovers.iter().map(|f| f.size.bytes).sum();
+    let unknown = leftovers.iter().any(|f| finding_size(&f.size) == "-");
+    let preselected = leftovers.iter().filter(|f| f.preselected).count();
+    let size = if unknown {
+        format!("{} + unknown", fmt_size(total))
+    } else {
+        fmt_size(total)
+    };
+    format!(
+        "{} leftovers, {size} ({preselected} preselected)",
+        leftovers.len()
+    )
 }
 
 fn print_app(env: &Env, a: &App) -> anyhow::Result<()> {
@@ -237,4 +260,48 @@ fn print_app(env: &Env, a: &App) -> anyhow::Result<()> {
         writeln!(out, "{:<13} {v}", format!("{k}:"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crumbs_core::leftovers::{Confidence, FindingKind};
+    use crumbs_core::safety::Fingerprint;
+    use crumbs_core::size::DiskUsage;
+
+    fn finding(bytes: u64, errors: u64) -> Finding {
+        Finding {
+            path: "/opt/inky".into(),
+            kind: FindingKind::SystemData,
+            confidence: Confidence::Medium,
+            shared: false,
+            reason: String::new(),
+            size: DiskUsage {
+                bytes,
+                files: 0,
+                errors,
+            },
+            preselected: false,
+            scope: Scope::SystemTree,
+            fingerprint: Fingerprint::default(),
+            mime_lines: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn total_says_unknown_when_a_size_is() {
+        assert_eq!(
+            leftovers_total(&[finding(4096, 0)]),
+            "1 leftovers, 4.0 KiB (0 preselected)"
+        );
+        assert_eq!(
+            leftovers_total(&[finding(4096, 0), finding(0, 1)]),
+            "2 leftovers, 4.0 KiB + unknown (0 preselected)"
+        );
+        // Part read, something counted: known.
+        assert_eq!(
+            leftovers_total(&[finding(4096, 1)]),
+            "1 leftovers, 4.0 KiB (0 preselected)"
+        );
+    }
 }

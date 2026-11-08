@@ -8,9 +8,13 @@ use clap::Args;
 use crumbs_core::command::SystemRunner;
 use crumbs_core::desktop::parse_desktop;
 use crumbs_core::inventory::{Inventory, Resolved, find_app, find_app_exact};
-use crumbs_core::leftovers::{Finding, FindingKind, find_leftovers};
-use crumbs_core::plan::{NOTE_APP_STAYS, Plan, PlanOptions, PlannedAction, build_plan};
-use crumbs_core::removal::{RemovalError, RemovalPlan, plan_removal};
+use crumbs_core::leftovers::{Finding, FindingKind, find_leftovers, find_system_leftovers};
+use crumbs_core::plan::{
+    NOTE_APP_STAYS, Plan, PlanOptions, PlannedAction, build_plan_unmanaged, is_system_leftover,
+};
+use crumbs_core::removal::{
+    RemovalError, RemovalPlan, UnmanagedTarget, plan_removal, plan_unmanaged,
+};
 use crumbs_core::safety::{self, Fingerprint, Scope};
 use crumbs_core::{App, Env, SourceKind};
 
@@ -60,16 +64,24 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
         }
     }
     // How each app itself goes, in `apps` order; none with --leftovers-only.
+    // An unmanaged app goes by its path (`plan_unmanaged`), the rest by
+    // their package manager.
     let mut removals: Vec<Option<RemovalPlan>> = Vec::new();
+    let mut unmanaged: Vec<Option<UnmanagedTarget>> = Vec::new();
     for app in &apps {
-        if args.leftovers_only {
-            removals.push(None);
-            continue;
+        let (mut removal, mut target) = (None, None);
+        if !args.leftovers_only {
+            let planned = if app.source == SourceKind::Unmanaged {
+                plan_unmanaged(env, &cx.cfg, &cx.inv, app).map(|t| target = Some(t))
+            } else {
+                plan_removal(env, &SystemRunner::new(), app).map(|r| removal = Some(r))
+            };
+            if let Err(e) = planned {
+                return refuse_removal(out, app, &e);
+            }
         }
-        match plan_removal(env, &SystemRunner::new(), app) {
-            Ok(r) => removals.push(Some(r)),
-            Err(e) => return refuse_removal(out, app, &e),
-        }
+        removals.push(removal);
+        unmanaged.push(target);
     }
     if !args.leftovers_only {
         for app in &apps {
@@ -92,9 +104,23 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
         leftovers_only: args.leftovers_only,
     };
     let mut targets = Vec::new();
-    for (app, removal) in apps.into_iter().zip(removals) {
+    let mut unselected_system = 0usize;
+    for ((app, removal), target) in apps.into_iter().zip(removals).zip(unmanaged) {
         let mut found = plannable(find_leftovers(&cx.idx, app, args.show_low));
+        // Offered, never pre-selected: root deletes only on an explicit pick.
+        found.extend(find_system_leftovers(
+            env,
+            &cx.cfg,
+            &cx.idx,
+            app,
+            args.show_low,
+        ));
         found.retain(|f| keeps(env, app, f, args));
+        let system_found: Vec<PathBuf> = found
+            .iter()
+            .filter(|f| f.scope == Scope::SystemTree)
+            .map(|f| f.path.clone())
+            .collect();
         let prompt_text = format!("Leftovers of {} to remove", sanitise(&app.display_name));
         let Some(chosen) = choose(env, &prompt_text, found, args.act.interactive, |f| {
             f.preselected
@@ -102,10 +128,22 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
         else {
             return out.aborted();
         };
-        let mut plan = build_plan(env, Some(app), &chosen, &opts)?;
+        let chosen_paths: Vec<PathBuf> = chosen.iter().map(|f| f.path.clone()).collect();
+        let mut plan = build_plan_unmanaged(env, Some(app), target.as_ref(), &chosen, &opts)?;
         if let Some(removal) = removal {
             attach_removal(&mut plan, removal);
         }
+        // Offered and not picked, and not removed with the app either.
+        unselected_system += system_found
+            .iter()
+            .filter(|p| !chosen_paths.contains(p))
+            .filter(|p| {
+                !plan
+                    .actions
+                    .iter()
+                    .any(|a| a.action.path().is_some_and(|ap| p.starts_with(ap)))
+            })
+            .count();
         targets.push(Target {
             heading: format!("{}  {}", sanitise(&app.display_name), sanitise(&app.id)),
             app: Some(app),
@@ -113,7 +151,17 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
         });
     }
     drop_overlaps(&mut targets);
-    apply(env, &cx.cfg, &cx.errors(), out, &targets, &args.act)
+    let notes = unselected_note(unselected_system);
+    apply(env, &cx.cfg, &cx.errors(), out, &targets, &args.act, &notes)
+}
+
+/// The preview note for system leftovers that were offered but not picked.
+fn unselected_note(n: usize) -> Vec<String> {
+    match n {
+        0 => Vec::new(),
+        1 => vec!["1 system leftover not selected (pick with -i)".into()],
+        n => vec![format!("{n} system leftovers not selected (pick with -i)")],
+    }
 }
 
 pub const NOTE_NO_UNDO: &str = "this cannot be undone by crumbs";
@@ -121,7 +169,9 @@ const REASON_APP: &str = "the app itself";
 
 /// Puts the actions that remove the app itself first in `plan`, each
 /// depending on the one before; every leftover then depends on the last of
-/// them, so nothing of the app's goes unless all of the app did. Nothing
+/// them, so nothing of the app's goes unless all of the app did. A system
+/// leftover depends on nothing: it was picked by hand and no package owns
+/// it (as with `--leftovers-only`), and the root batch cannot wait. Nothing
 /// changes when there are none (an AppImage's file is already in the
 /// plan).
 fn attach_removal(plan: &mut Plan, removal: RemovalPlan) {
@@ -131,6 +181,9 @@ fn attach_removal(plan: &mut Plan, removal: RemovalPlan) {
     }
     plan.notes.retain(|note| note != NOTE_APP_STAYS);
     for pa in &mut plan.actions {
+        if is_system_leftover(pa) {
+            continue;
+        }
         pa.depends_on = Some(pa.depends_on.map_or(n - 1, |d| d + n));
     }
     let first: Vec<PlannedAction> = removal
@@ -150,6 +203,7 @@ fn attach_removal(plan: &mut Plan, removal: RemovalPlan) {
             scope: Scope::Home,
             depends_on: k.checked_sub(1),
             depends_on_plan: None,
+            size_known: true,
             reason: REASON_APP.into(),
         })
         .collect();
@@ -180,15 +234,18 @@ fn refuse_removal(out: Out, app: &App, e: &RemovalError) -> anyhow::Result<ExitC
 /// Whether a finding may be planned. The launchers and icons stay with an
 /// app that stays (`--leftovers-only`). `--keep-data` keeps everything but
 /// caches; when the AppImage file itself goes, its own launchers and icons
-/// go with it so nothing is left pointing at a removed file.
+/// go with it, and so do its file-type associations, so nothing is left
+/// pointing at a removed file.
 fn keeps(env: &Env, app: &App, f: &Finding, args: &UninstallArgs) -> bool {
     if args.leftovers_only {
         return !is_own_launcher(env, app, f) && (!args.keep_data || f.kind == FindingKind::Cache);
     }
     if args.keep_data {
         return f.kind == FindingKind::Cache
-            || (matches!(f.kind, FindingKind::DesktopEntry | FindingKind::Icon)
-                && is_own_launcher(env, app, f));
+            || (matches!(
+                f.kind,
+                FindingKind::DesktopEntry | FindingKind::Icon | FindingKind::MimeAssoc
+            ) && is_own_launcher(env, app, f));
     }
     true
 }
@@ -291,8 +348,8 @@ fn resolve<'a>(
 mod tests {
     use super::*;
     use crumbs_core::leftovers::Confidence;
-    use crumbs_core::plan::Action;
-    use crumbs_core::safety::Fingerprint;
+    use crumbs_core::plan::{Action, build_plan};
+    use crumbs_core::safety::{Fingerprint, Scope};
     use crumbs_core::size::DiskUsage;
     use crumbs_core::testing::FixtureTree;
 
@@ -305,6 +362,7 @@ mod tests {
             reason: String::new(),
             size: DiskUsage::default(),
             preselected: true,
+            scope: Scope::Home,
             fingerprint: Fingerprint {
                 dev: 0,
                 ino: 0,
@@ -343,6 +401,87 @@ mod tests {
         assert_eq!(deps, [None, Some(0), Some(1), Some(1)]);
         assert!(!plan.notes.iter().any(|n| n == NOTE_APP_STAYS));
         assert!(plan.notes.iter().any(|n| n == NOTE_NO_UNDO));
+    }
+
+    #[test]
+    fn pacman_removal_with_picked_etc_leftover_runs_in_one_batch() {
+        use crumbs_core::config::Config;
+        use crumbs_core::executor::execute_full;
+        use crumbs_core::privilege::{Escalation, EscalationKind};
+        use crumbs_core::size::disk_usage;
+        use crumbs_core::testing::{FakePrivilegedRunner, FakeRunner};
+        use std::os::unix::fs::PermissionsExt;
+
+        let t = FixtureTree::new();
+        t.pacman_pkg("inky", "1.0-1", Some(1), &["usr/bin/inky"]);
+        t.write_exec("usr/bin/pacman", b"#!/bin/sh\nexit 0\n");
+        t.write_exec("usr/bin/rm", b"#!/bin/sh\nexec /usr/bin/rm \"$@\"\n");
+        t.write_exec("usr/bin/sh", b"#!/bin/sh\nexec /bin/sh \"$@\"\n");
+        t.write_exec(
+            "usr/bin/readlink",
+            b"#!/bin/sh\nexec /usr/bin/readlink \"$@\"\n",
+        );
+        t.write(
+            "proc/self/mountinfo",
+            b"36 35 98:0 /mnt1 / rw,noatime master:1 - ext3 /dev/root rw\n",
+        );
+        t.write("etc/inky/inky.conf", b"x");
+        t.write("home/user/.cache/inky/blob", b"b");
+        for rel in ["", "etc"] {
+            std::fs::set_permissions(t.dir.path().join(rel), PermissionsExt::from_mode(0o755))
+                .unwrap();
+        }
+        let mut env = t.env();
+        env.set_system_owner_uid(env.uid);
+        let scanned = |path: &str, kind, scope| {
+            let mut f = finding(path, kind);
+            f.scope = scope;
+            f.size = disk_usage(&env, Path::new(path));
+            f.fingerprint = safety::fingerprint(&env, Path::new(path)).unwrap();
+            f
+        };
+        let app = App::new(SourceKind::Pacman, "pacman:inky");
+        let findings = [
+            scanned("/home/user/.cache/inky", FindingKind::Cache, Scope::Home),
+            scanned("/etc/inky", FindingKind::SystemConfig, Scope::SystemTree),
+        ];
+        let mut plan = build_plan(&env, Some(&app), &findings, &PlanOptions::default()).unwrap();
+        let removal = RemovalPlan {
+            actions: vec![Action::PackageRemove {
+                source: SourceKind::Pacman,
+                names: vec!["inky".into()],
+                versions: vec!["1.0-1".into()],
+                program: "pacman".into(),
+                args: vec!["-Rns".into(), "--noconfirm".into(), "inky".into()],
+            }],
+            ..RemovalPlan::default()
+        };
+        attach_removal(&mut plan, removal);
+        let deps: Vec<Option<usize>> = plan.actions.iter().map(|a| a.depends_on).collect();
+        // The home leftover waits for the package; the picked system
+        // leftover for nothing.
+        assert_eq!(deps, [None, Some(0), None]);
+        let pr = FakePrivilegedRunner::default();
+        let esc = Escalation {
+            kind: EscalationKind::Pkexec,
+            program: "/usr/bin/pkexec".into(),
+            requires_tty: false,
+        };
+        let report = execute_full(
+            &env,
+            &Config::default(),
+            &plan,
+            &FakeRunner::new(),
+            &pr,
+            Some(&esc),
+            &|_, _, _| Ok(Vec::new()),
+        );
+        for r in &report.results {
+            assert!(r.ok, "{r:?}");
+        }
+        assert_eq!(pr.calls.lock().unwrap().len(), 1, "one batch");
+        assert!(!env.sys("/etc/inky").exists());
+        assert!(!env.sys("/home/user/.cache/inky").exists());
     }
 
     #[test]

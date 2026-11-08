@@ -5,7 +5,9 @@ use std::io::Write;
 use crumbs_core::Env;
 use crumbs_core::env::display_path;
 use crumbs_core::executor::ExecReport;
-use crumbs_core::plan::{Action, Plan};
+use crumbs_core::plan::{Action, Plan, PlannedAction};
+use crumbs_core::safety::Scope;
+use crumbs_core::size::DiskUsage;
 
 use super::manual::{is_privileged, root_command};
 use crate::output::{fmt_size, print_table_with_details};
@@ -17,6 +19,24 @@ fn verb(a: &Action) -> &'static str {
         Action::EditFile { .. } => "edit",
         Action::UserCommand { .. } | Action::PrivilegedCommand { .. } => "run",
         Action::PackageRemove { .. } => "remove",
+    }
+}
+
+/// The action column of a preview row: a root delete says so.
+fn row_verb(a: &PlannedAction) -> &'static str {
+    match (&a.action, a.scope) {
+        (Action::Delete { .. }, Scope::SystemTree) => "delete (as root)",
+        (action, _) => verb(action),
+    }
+}
+
+/// A finding's size; `-` when part of it could not be read and nothing
+/// was counted.
+pub fn finding_size(size: &DiskUsage) -> String {
+    if size.errors > 0 && size.bytes == 0 {
+        "-".into()
+    } else {
+        fmt_size(size.bytes)
     }
 }
 
@@ -105,6 +125,27 @@ fn also_removed(a: &Action) -> Option<String> {
 pub const NOTE_PRIVILEGED: &str =
     "these steps run with administrator rights; you will be asked once";
 
+/// The size column of a preview row: `—` for a command (the program
+/// decides what goes), `-` for an action whose size could not be read.
+fn row_size(a: &PlannedAction) -> String {
+    match a.action {
+        Action::UserCommand { .. }
+        | Action::PrivilegedCommand { .. }
+        | Action::PackageRemove { .. } => "—".to_string(),
+        _ if !a.size_known => "-".to_string(),
+        _ => fmt_size(a.size),
+    }
+}
+
+/// A totals line's size: `X + unknown` when some action's size is unknown.
+fn total(size: u64, unknown: bool) -> String {
+    if unknown {
+        format!("{} + unknown", fmt_size(size))
+    } else {
+        fmt_size(size)
+    }
+}
+
 fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
@@ -127,16 +168,9 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
                 .actions
                 .iter()
                 .map(|a| {
-                    let size = match a.action {
-                        // The program decides what goes; the size is unknown.
-                        Action::UserCommand { .. }
-                        | Action::PrivilegedCommand { .. }
-                        | Action::PackageRemove { .. } => "—".to_string(),
-                        _ => fmt_size(a.size),
-                    };
                     vec![
-                        verb(&a.action).to_string(),
-                        size,
+                        row_verb(a).to_string(),
+                        row_size(a),
                         preview_target(env, &a.action),
                         sanitise(&a.reason),
                     ]
@@ -170,15 +204,18 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
     if all().any(is_privileged) {
         writeln!(anstream::stdout().lock(), "note: {NOTE_PRIVILEGED}")?;
     }
+    // (count, size, whether some size is unknown)
     let tally = |want: fn(&Action) -> bool| {
         all()
             .filter(|a| want(&a.action))
-            .fold((0usize, 0u64), |(n, size), a| (n + 1, size + a.size))
+            .fold((0usize, 0u64, false), |(n, size, unknown), a| {
+                (n + 1, size + a.size, unknown || !a.size_known)
+            })
     };
-    let (trashed, trash_size) = tally(|a| matches!(a, Action::Trash { .. }));
-    let (deleted, delete_size) = tally(|a| matches!(a, Action::Delete { .. }));
-    let (edits, _) = tally(|a| matches!(a, Action::EditFile { .. }));
-    let (commands, _) = tally(|a| {
+    let (trashed, trash_size, trash_unknown) = tally(|a| matches!(a, Action::Trash { .. }));
+    let (deleted, delete_size, delete_unknown) = tally(|a| matches!(a, Action::Delete { .. }));
+    let (edits, ..) = tally(|a| matches!(a, Action::EditFile { .. }));
+    let (commands, ..) = tally(|a| {
         matches!(
             a,
             Action::UserCommand { .. } | Action::PrivilegedCommand { .. }
@@ -191,7 +228,7 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
             out,
             "will move {} ({}) to the trash",
             plural(trashed, "item", "items"),
-            fmt_size(trash_size)
+            total(trash_size, trash_unknown)
         )?;
     }
     if deleted > 0 {
@@ -199,7 +236,7 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
             out,
             "will permanently delete {} ({})",
             plural(deleted, "item", "items"),
-            fmt_size(delete_size)
+            total(delete_size, delete_unknown)
         )?;
     }
     if edits > 0 {
@@ -301,6 +338,32 @@ mod tests {
             args: Vec::new(),
         };
         assert_eq!(also_removed(&a).as_deref(), Some("also removed: b 2, c"));
+    }
+
+    #[test]
+    fn unknown_size_shows_dash_and_unknown_total() {
+        use crumbs_core::safety::Fingerprint;
+        let mut a = PlannedAction {
+            action: Action::Delete {
+                path: "/opt/inky".into(),
+            },
+            size: 0,
+            fingerprint: Fingerprint::default(),
+            scope: Scope::SystemTree,
+            depends_on: None,
+            depends_on_plan: None,
+            size_known: false,
+            reason: String::new(),
+        };
+        assert_eq!(row_size(&a), "-");
+        assert_eq!(total(4096, true), "4.0 KiB + unknown");
+        assert_eq!(total(4096, false), "4.0 KiB");
+        // JSON is unchanged: the size is 0 and nothing says it is unknown.
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["size"], 0);
+        assert!(v.get("size_known").is_none(), "{v}");
+        a.size_known = true;
+        assert_eq!(row_size(&a), fmt_size(0));
     }
 
     #[test]

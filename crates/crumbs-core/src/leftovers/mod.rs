@@ -4,6 +4,7 @@ pub(crate) mod candidates;
 pub mod matcher;
 mod orphans;
 pub(crate) mod score;
+pub(crate) mod system;
 #[cfg(test)]
 mod tests;
 
@@ -11,11 +12,12 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::safety::Fingerprint;
+use crate::safety::{Fingerprint, Scope};
 use crate::size::DiskUsage;
 
 pub use matcher::{LeftoverIndex, find_leftovers};
-pub use orphans::find_orphans;
+pub use orphans::{find_orphans, find_system_orphans};
+pub use system::find_system_leftovers;
 
 /// How sure the matcher is that a finding belongs to the app. Ordered
 /// `Low < Medium < High`.
@@ -55,6 +57,10 @@ pub enum FindingKind {
     Icon,
     SystemdUnit,
     MimeAssoc,
+    /// An unowned entry directly in `/etc`.
+    SystemConfig,
+    /// An unowned entry directly in `/opt`.
+    SystemData,
 }
 
 /// One leftover of an app. `path` is in-system and canonical.
@@ -67,6 +73,9 @@ pub struct Finding {
     pub reason: String,
     pub size: DiskUsage,
     pub preselected: bool,
+    /// Where the action runs; `Home` (not serialised) for per-user files.
+    #[serde(skip_serializing_if = "Scope::is_home")]
+    pub scope: Scope,
     /// Taken when the index was built; `safety::verify` checks against it.
     #[serde(skip)]
     pub fingerprint: Fingerprint,

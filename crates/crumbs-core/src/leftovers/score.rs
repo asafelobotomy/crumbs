@@ -78,7 +78,7 @@ pub(crate) struct Idents {
     pub(crate) weak: Vec<Ident>,
 }
 
-fn usable(raw: &str, norm: &str) -> bool {
+pub(crate) fn usable(raw: &str, norm: &str) -> bool {
     let lower = raw.to_lowercase();
     raw.chars().count() >= MIN_LEN
         && norm.chars().count() >= MIN_LEN

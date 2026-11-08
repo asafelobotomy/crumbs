@@ -227,6 +227,7 @@ mod tests {
             apps,
             statuses: vec![],
             errors: vec![],
+            owned: Default::default(),
         };
         let runner = FakeRunner::new();
         let cx = ScanContext {

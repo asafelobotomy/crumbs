@@ -103,6 +103,20 @@ fn parse_rules(text: &str, what: &str, origin: &RuleOrigin) -> (Vec<Rule>, Vec<C
             ));
             continue;
         }
+        for path in raw
+            .paths
+            .iter()
+            .filter(|p| p.starts_with("/etc/") || p.starts_with("/opt/"))
+        {
+            if expand_system_rule_path(path).is_none() {
+                errors.push(parse_error(
+                    what,
+                    format!(
+                        "rule path {path} ignored: only /etc/<name> or /opt/<name> are allowed outside home"
+                    ),
+                ));
+            }
+        }
         rules.push(Rule {
             packages: m.package,
             flatpaks: m.flatpak,
@@ -240,6 +254,24 @@ pub fn expand_rule_path(env: &Env, raw: &str) -> Option<PathBuf> {
     (clean && path != home && path.starts_with(&home)).then_some(path)
 }
 
+/// A rule path naming a system leftover: exactly `/etc/<name>` or
+/// `/opt/<name>` (a trailing `/` is fine) with a name that
+/// [`crate::safety::is_system_leftover_name`] accepts. Anything else,
+/// including wildcards, `..` and deeper paths, is `None`.
+pub fn expand_system_rule_path(raw: &str) -> Option<PathBuf> {
+    let rest = raw
+        .strip_prefix("/etc/")
+        .map(|r| ("/etc", r))
+        .or_else(|| raw.strip_prefix("/opt/").map(|r| ("/opt", r)))?;
+    let name = rest.1.strip_suffix('/').unwrap_or(rest.1);
+    let ok = !name.is_empty()
+        && !name.contains(['/', '*'])
+        && name != "."
+        && name != ".."
+        && crate::safety::is_system_leftover_name(std::ffi::OsStr::new(name));
+    ok.then(|| Path::new(rest.0).join(name))
+}
+
 /// Expands every path of the rule and returns those that exist. A trailing `*`
 /// in the final component matches every existing sibling starting with the
 /// prefix (never an empty prefix).
@@ -285,6 +317,64 @@ fn glob_siblings(env: &Env, pattern: &Path, prefix: &str) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use crate::model::SourceKind;
+
+    #[test]
+    fn absolute_home_rule_path_does_not_warn() {
+        let t = FixtureTree::new();
+        user_rule_file(
+            &t,
+            "home.toml",
+            "[[app]]\nmatch = { package = [\"x\"] }\npaths = [\"/home/user/.foo\", \"/usr/bin/x\"]\n",
+        );
+        let (_, errors) = load_rules(&t.env());
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn invalid_absolute_rule_path_warns_but_keeps_rule() {
+        let t = FixtureTree::new();
+        user_rule_file(
+            &t,
+            "sys.toml",
+            "[[app]]\nmatch = { package = [\"x\"] }\npaths = [\"/etc/x\", \"/etc/x/y\", \"/opt/a/b\", \"/usr/bin/x\", \"~/.x\"]\n",
+        );
+        let (rules, errors) = load_rules(&t.env());
+        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+        assert_eq!(msgs.len(), 2, "{msgs:?}");
+        for p in ["/etc/x/y", "/opt/a/b"] {
+            assert!(
+                msgs.iter().any(|m| m.contains(&format!(
+                    "rule path {p} ignored: only /etc/<name> or /opt/<name> are allowed outside home"
+                ))),
+                "{p}: {msgs:?}"
+            );
+        }
+        assert!(rules.iter().any(|r| r.paths.len() == 5));
+    }
+
+    #[test]
+    fn system_rule_paths_are_etc_or_opt_children_only() {
+        let p = |s: &str| expand_system_rule_path(s);
+        assert_eq!(p("/etc/foo"), Some(PathBuf::from("/etc/foo")));
+        assert_eq!(p("/opt/foo/"), Some(PathBuf::from("/opt/foo")));
+        for bad in [
+            "/etc/foo/bar",
+            "/etc",
+            "/etc/",
+            "/opt/..",
+            "/opt/foo/..",
+            "/etc/foo*",
+            "/etc/ssh",
+            "/etc/foo.bak",
+            "/usr/foo",
+            "/etcfoo",
+            "etc/foo",
+            "~/etc/foo",
+            "",
+        ] {
+            assert_eq!(p(bad), None, "{bad}");
+        }
+    }
     use crate::testing::FixtureTree;
 
     fn user_rule_file(t: &FixtureTree, name: &str, body: &str) {

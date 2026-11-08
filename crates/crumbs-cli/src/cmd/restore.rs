@@ -17,7 +17,8 @@ pub fn run(env: &Env, selectors: &[String], dry_run: bool, json: bool) -> anyhow
     let all_ok = outcomes.iter().all(|o| o.ok);
     // No history entry selected at all (an empty `entry_id` is a selector
     // that matched nothing): a usage error rather than a partial failure.
-    let none_selected = !outcomes.is_empty() && outcomes.iter().all(|o| o.entry_id.is_empty());
+    let none_selected =
+        !outcomes.is_empty() && outcomes.iter().all(|o| o.entry_id.is_empty() && !o.ok);
     if json {
         print_json_entries("restore", &json!({ "outcomes": outcomes }), &notes)?;
     } else {
@@ -30,7 +31,10 @@ pub fn run(env: &Env, selectors: &[String], dry_run: bool, json: bool) -> anyhow
             } else {
                 shown_path(env, &o.path)
             };
-            if o.ok {
+            if o.ok && o.entry_id.is_empty() {
+                // A batch with nothing to put back: no entry, not an error.
+                writeln!(out, "{}", sanitise(o.error.as_deref().unwrap_or_default()))?;
+            } else if o.ok {
                 let verb = if dry_run { "would restore" } else { "restored" };
                 writeln!(out, "✓ {verb} {path}")?;
             } else {

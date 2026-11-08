@@ -6,10 +6,11 @@ pub(crate) mod files;
 #[cfg(test)]
 mod tests;
 
+use std::cell::OnceCell;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -20,11 +21,14 @@ use crate::config::Config;
 use crate::env::{Env, display_path};
 use crate::history::{self, HistoryAction, HistoryEntry};
 use crate::model::{App, SourceKind};
+use crate::mounts::mounts_at_or_below;
+use crate::ownership::{OwnedIndex, TmpfilesDeclared, load_pacman, tmpfiles_declared};
 use crate::plan::{Action, Plan};
 use crate::privilege::Escalation;
 use crate::privilege::batch::{
-    PrivilegedRunner, Step, SystemPrivilegedRunner, build_script, parse_markers,
+    PrivilegedRunner, Step, SystemPrivilegedRunner, build_script, parse_markers, sh_quote,
 };
+use crate::removal::lock_path;
 use crate::safety::{self, Fingerprint, Scope};
 use crate::size;
 use crate::trash::{self, Trashed};
@@ -115,10 +119,12 @@ pub fn execute_with(
 /// Runs a plan.
 ///
 /// First the privileged actions (`PrivilegedCommand`, `PackageRemove`, and
-/// `Delete` in [`Scope::System`], which becomes `rm -f -- <path>`), in plan
-/// order, as one root script run once through `priv_runner`: each program
-/// is resolved in the trusted directories and each System `Delete`
-/// verified (as the user) right before the script is built; one that fails
+/// `Delete` in [`Scope::System`], which becomes `rm -f -- <path>`, and in
+/// [`Scope::SystemTree`], which becomes a namespace-guarded
+/// `rm -rf --one-file-system -- <path>`), in plan order, as one root script
+/// run once through `priv_runner`: each program is resolved in the trusted
+/// directories and each System or SystemTree `Delete` verified and
+/// re-checked (as the user) right before the script is built; one that fails
 /// is left out of it. No script runs when nothing is left, and a privileged
 /// action that depends on another action is skipped (the batch runs before
 /// everything else). A step's marker with status 0 is success; any other
@@ -229,7 +235,9 @@ fn run_plans(
     post_check: Option<&PostCheck<'_>>,
 ) -> Vec<ExecReport> {
     let batches = batch_ids(env, plans.len());
-    let (attempts, failed, stopped) = run_privileged(env, cfg, plans, priv_runner, esc, post_check);
+    let checks = Rechecks::default();
+    let (attempts, failed, stopped) =
+        run_privileged(env, cfg, &checks, plans, priv_runner, esc, post_check);
     let mut results: Vec<Vec<Option<ActionResult>>> =
         plans.iter().map(|p| vec![None; p.actions.len()]).collect();
     let mut freed = vec![0u64; plans.len()];
@@ -268,7 +276,7 @@ fn run_plans(
                     &mut attempt.path,
                     &mut attempt.argv,
                 ),
-                None => verify_path(env, cfg, pa, &attempt.path)
+                None => verify_path(env, cfg, &checks, pa, &attempt.path)
                     .and_then(|()| act(env, &pa.action, &pa.fingerprint, &batches[k])),
             };
             if attempt.outcome.is_ok() {
@@ -314,7 +322,7 @@ impl Attempt {
 fn is_privileged(pa: &crate::plan::PlannedAction) -> bool {
     match pa.action {
         Action::PrivilegedCommand { .. } | Action::PackageRemove { .. } => true,
-        Action::Delete { .. } => pa.scope == Scope::System,
+        Action::Delete { .. } => matches!(pa.scope, Scope::System | Scope::SystemTree),
         Action::Trash { .. } | Action::EditFile { .. } | Action::UserCommand { .. } => false,
     }
 }
@@ -323,12 +331,124 @@ fn is_privileged(pa: &crate::plan::PlannedAction) -> bool {
 fn verify_path(
     env: &Env,
     cfg: &Config,
+    checks: &Rechecks,
     pa: &crate::plan::PlannedAction,
     path: &Path,
 ) -> Result<(), String> {
     safety::verify(env, cfg, pa.scope, path, &pa.fingerprint)
         .map_err(|e| e.to_string())
-        .and_then(|()| recheck_scope(env, cfg, pa.scope, path))
+        .and_then(|()| recheck_scope(env, cfg, checks, pa.scope, path))
+}
+
+/// State the re-checks share across one run: the package database and
+/// `tmpfiles.d` are each read at most once, however many targets need them.
+#[derive(Default)]
+struct Rechecks {
+    /// The owned index, or `None` when it could not be read completely.
+    owned: OnceCell<Option<OwnedIndex>>,
+    /// The `tmpfiles.d` declarations, or `None` when they could not be read.
+    declared: OnceCell<Option<TmpfilesDeclared>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread read the pacman database for a re-check.
+    pub(crate) static PACMAN_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl Rechecks {
+    fn owned(&self, env: &Env) -> Option<&OwnedIndex> {
+        self.owned
+            .get_or_init(|| {
+                #[cfg(test)]
+                PACMAN_LOADS.with(|n| n.set(n.get() + 1));
+                match load_pacman(env) {
+                    Ok(Some(idx)) if idx.is_complete() => Some(idx),
+                    _ => None,
+                }
+            })
+            .as_ref()
+    }
+
+    fn declared(&self, env: &Env) -> Option<&TmpfilesDeclared> {
+        self.declared
+            .get_or_init(|| tmpfiles_declared(env).ok())
+            .as_ref()
+    }
+}
+
+/// Why a [`Scope::SystemTree`] target is refused right before its step.
+pub const TREE_LOCKED: &str = "pacman is busy (database lock present)";
+pub const TREE_MOUNT_BELOW: &str = "a mount point is below it";
+pub const TREE_MOUNTS_UNREADABLE: &str = "the mount table could not be read";
+pub const TREE_DB_UNREADABLE: &str = "the package database could not be read";
+pub const TREE_OWNED: &str = "a package owns files in it now";
+pub const TREE_NS_UNREADABLE: &str = "the mount namespace could not be read";
+
+/// The exit status of a tree step whose guard refused: pacman's lock is
+/// present, or the root shell is in another mount namespace than crumbs
+/// (the mount check above would not hold there).
+pub const GUARD_REFUSED_STATUS: i32 = 97;
+
+/// The re-checks for a [`Scope::SystemTree`] target, after
+/// `safety::verify`: pacman holds no lock, no mount point lies at or
+/// below it, no package owns anything at or below it (the database read
+/// once per run, and fully), `tmpfiles.d` declares nothing it covers (read
+/// once per run; unreadable fails as [`TREE_DB_UNREADABLE`]), and this
+/// process's mount namespace can be read. Returns that namespace, which
+/// the root step must match.
+fn recheck_system_tree(env: &Env, checks: &Rechecks, path: &Path) -> Result<OsString, String> {
+    match fs::symlink_metadata(lock_path(env)) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        _ => return Err(TREE_LOCKED.into()),
+    }
+    match mounts_at_or_below(env, path) {
+        Ok(found) if found.is_empty() => {}
+        Ok(_) => return Err(TREE_MOUNT_BELOW.into()),
+        Err(_) => return Err(TREE_MOUNTS_UNREADABLE.into()),
+    }
+    let owned = checks.owned(env).ok_or(TREE_DB_UNREADABLE)?;
+    if owned.owns_at_or_below(path) {
+        return Err(TREE_OWNED.into());
+    }
+    let declared = checks.declared(env).ok_or(TREE_DB_UNREADABLE)?;
+    if declared.covers(path) {
+        return Err(TREE_OWNED.into());
+    }
+    env.user_mount_ns()
+        .ok_or_else(|| TREE_NS_UNREADABLE.to_string())
+}
+
+/// The `sh -c` script of a tree step. It deletes `$2` only when pacman's
+/// database lock `lock` (root-joined, so a fixture stays inside its root)
+/// is absent (no file and no symlink, dangling or not) and the root shell's
+/// mount namespace is `$1` (the user's), so the user-side checks describe
+/// what root sees; otherwise it exits [`GUARD_REFUSED_STATUS`]. `readlink` and `rm` are trusted program paths.
+pub(crate) fn tree_script(lock: &Path, readlink: &Path, rm: &Path) -> OsString {
+    let lock = sh_quote(lock.as_os_str());
+    // A dangling symlink at the lock counts as a lock too.
+    let mut script = b"{ [ -e ".to_vec();
+    script.extend_from_slice(&lock);
+    script.extend_from_slice(b" ] || [ -L ");
+    script.extend_from_slice(&lock);
+    script.extend_from_slice(
+        format!(
+            " ]; }} && {{ echo \"pacman is busy (database lock present); not deleting\" >&2; \
+             exit {GUARD_REFUSED_STATUS}; }}; test \"$("
+        )
+        .as_bytes(),
+    );
+    script.extend(sh_quote(readlink.as_os_str()));
+    script.extend_from_slice(
+        format!(
+            " /proc/self/ns/mnt)\" = \"$1\" || {{ echo \"mount namespace differs; not \
+             deleting\" >&2; exit {GUARD_REFUSED_STATUS}; }}; exec "
+        )
+        .as_bytes(),
+    );
+    script.extend(sh_quote(rm.as_os_str()));
+    script.extend_from_slice(b" -rf --one-file-system -- \"$2\"");
+    OsString::from_vec(script)
 }
 
 /// Per plan, its privileged attempts with their action indices.
@@ -347,6 +467,7 @@ type PlanAttempts = Vec<Vec<(usize, Attempt)>>;
 fn run_privileged(
     env: &Env,
     cfg: &Config,
+    checks: &Rechecks,
     plans: &[&Plan],
     priv_runner: &dyn PrivilegedRunner,
     esc: Option<&Escalation>,
@@ -376,7 +497,7 @@ fn run_privileged(
                         .get(ep)
                         .map_or_else(|| format!("action {ea}"), |p| shown_action(env, p, ea))
                 )),
-                (None, None) => privileged_step(env, cfg, pa, &mut attempt),
+                (None, None) => privileged_step(env, cfg, checks, pa, &mut attempt),
             };
             match step {
                 Ok(step) => {
@@ -561,10 +682,17 @@ fn check_packages(
 }
 
 /// The batch step for a privileged action, filling in its history fields.
-/// A System `Delete` is verified now; a program not installed fails.
+/// A System or SystemTree `Delete` is verified now; a program not
+/// installed fails.
+///
+/// A SystemTree `Delete` becomes `sh -c <tree_script> crumbs-rm <user mount
+/// namespace> <path>`, which runs `rm -rf --one-file-system -- <path>` only
+/// while pacman holds no lock and only in the user's mount namespace; a
+/// missing trusted `readlink` refuses it ([`TREE_NS_UNREADABLE`]).
 fn privileged_step(
     env: &Env,
     cfg: &Config,
+    checks: &Rechecks,
     pa: &crate::plan::PlannedAction,
     attempt: &mut Attempt,
 ) -> Result<Step, String> {
@@ -572,8 +700,25 @@ fn privileged_step(
         resolve_trusted(env, program).ok_or_else(|| format!("{program} is not installed"))
     };
     let (program, args) = match &pa.action {
+        Action::Delete { path } if pa.scope == Scope::SystemTree => {
+            safety::verify(env, cfg, pa.scope, path, &pa.fingerprint).map_err(|e| e.to_string())?;
+            let ns = recheck_system_tree(env, checks, path)?;
+            // Without it the guard cannot compare namespaces.
+            let readlink =
+                resolve_trusted(env, "readlink").ok_or_else(|| TREE_NS_UNREADABLE.to_string())?;
+            let sh = resolve("sh")?;
+            let rm = resolve("rm")?;
+            let args = vec![
+                OsString::from("-c"),
+                tree_script(&lock_path(env), &readlink, &rm),
+                OsString::from("crumbs-rm"),
+                ns,
+                env.sys_path(path).into_os_string(),
+            ];
+            return Ok(Step { program: sh, args });
+        }
         Action::Delete { path } => {
-            verify_path(env, cfg, pa, path)?;
+            verify_path(env, cfg, checks, pa, path)?;
             let rm = resolve("rm")?;
             let args = vec![
                 OsString::from("-f"),
@@ -646,6 +791,13 @@ fn record(env: &Env, plan: &Plan, batch: &str, i: usize, attempt: Attempt) -> Ac
         argv: attempt.argv,
         packages: attempt.packages,
         kind: plan.kind.clone(),
+        scope: match pa.action {
+            // Only root deletes say where they ran (docs/json-schema.md).
+            Action::Delete { .. } if matches!(pa.scope, Scope::System | Scope::SystemTree) => {
+                Some(pa.scope)
+            }
+            _ => None,
+        },
     };
     let error = match history::append(env, std::slice::from_ref(&entry)) {
         Ok(()) => error,
@@ -715,13 +867,24 @@ fn run_command(
 }
 
 /// Scope rules beyond `verify` that are re-run right before acting: a
-/// `UserTemp` entry must still be stale (old, unused, nothing open).
-fn recheck_scope(env: &Env, cfg: &Config, scope: Scope, path: &Path) -> Result<(), String> {
-    if scope != Scope::UserTemp {
-        return Ok(());
+/// `UserTemp` entry must still be stale (old, unused, nothing open); a
+/// `SystemTree` target must pass [`recheck_system_tree`].
+fn recheck_scope(
+    env: &Env,
+    cfg: &Config,
+    checks: &Rechecks,
+    scope: Scope,
+    path: &Path,
+) -> Result<(), String> {
+    match scope {
+        Scope::UserTemp => crate::bloat::temp::still_stale(env, cfg, path, env.now())
+            .map_err(|reason| format!("refusing: {} {reason}", display_path(env, path))),
+        // Unreachable in practice: a SystemTree `Delete` is privileged and
+        // re-checked in `privileged_step`, and no other action has this
+        // scope. Kept so the rule holds whoever calls this.
+        Scope::SystemTree => recheck_system_tree(env, checks, path).map(drop),
+        Scope::Home | Scope::HomeTrash | Scope::System => Ok(()),
     }
-    crate::bloat::temp::still_stale(env, cfg, path, env.now())
-        .map_err(|reason| format!("refusing: {} {reason}", display_path(env, path)))
 }
 
 /// Why an action must not run: the earlier action it depends on failed or
@@ -922,7 +1085,8 @@ const COMM_LEN: usize = 15;
 
 /// PIDs (sorted) of processes that look like `app`: the basename of the
 /// `exe` link (without the kernel's ` (deleted)` suffix), of `comm` or of
-/// `cmdline`'s first argument is one of `exec_names`; the `exe` link is the
+/// `cmdline`'s first argument is one of `exec_names`; `cmdline`'s first
+/// or second argument is the app's `program` (or `program_link`) path; the `exe` link is the
 /// root-joined `location`; or `environ` holds `APPIMAGE=<location>`. Names
 /// in [`GENERIC_BASENAMES`] never match by basename. Unreadable entries
 /// are skipped.
@@ -941,6 +1105,10 @@ pub fn running_processes(env: &Env, app: &App) -> Vec<u32> {
         .iter()
         .filter_map(|e| Path::new(e).file_name())
         .filter(|n| !is_generic(n))
+        .collect();
+    let programs: Vec<&Path> = [app.program.as_deref(), app.program_link.as_deref()]
+        .into_iter()
+        .flatten()
         .collect();
     let named = |n: &OsStr| exec_names.contains(&n);
     let comm_named = |comm: &[u8]| {
@@ -978,13 +1146,23 @@ pub fn running_processes(env: &Env, app: &App) -> Vec<u32> {
                         .is_some_and(named)
                 })
             };
+            let by_script = || {
+                fs::read(dir.join("cmdline")).is_ok_and(|c| {
+                    // A launcher script or interpreter names the program as
+                    // argv0 or argv1; only its exact path counts, never the
+                    // interpreter's name.
+                    c.split(|&b| b == 0)
+                        .take(2)
+                        .any(|arg| programs.iter().any(|p| p.as_os_str().as_bytes() == arg))
+                })
+            };
             let by_env = || {
                 appimage_var.as_deref().is_some_and(|var| {
                     fs::read(dir.join("environ"))
                         .is_ok_and(|bytes| bytes.split(|&b| b == 0).any(|kv| kv == var))
                 })
             };
-            (by_exe || by_comm() || by_argv0() || by_env()).then_some(pid)
+            (by_exe || by_comm() || by_argv0() || by_script() || by_env()).then_some(pid)
         })
         .collect();
     pids.sort_unstable();

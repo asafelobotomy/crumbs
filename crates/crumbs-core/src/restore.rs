@@ -17,7 +17,7 @@ use crate::env::{Env, display_path};
 use crate::error::CoreError;
 use crate::executor::files;
 use crate::history::{self, HistoryAction, HistoryEntry};
-use crate::safety::{is_allowed_user_target, is_canonical};
+use crate::safety::{Scope, is_allowed_user_target, is_canonical};
 use crate::trash::{self, Trashed};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -30,7 +30,12 @@ pub struct RestoreOutcome {
 
 pub const NO_MATCH: &str = "no matching history entry";
 pub const INVALID_ENTRY: &str = "history entry failed validation";
+/// A recognised batch with nothing to put back: not an error, just no work.
+pub const NOTHING_RESTORABLE: &str = "nothing in this batch can be restored";
 pub const ALREADY_RESTORED: &str = "already restored";
+/// Why a `Delete` of a [`Scope::SystemTree`](crate::safety::Scope::SystemTree)
+/// target cannot be undone.
+pub const MSG_SYSTEM_TREE: &str = "system files deleted as root cannot be restored";
 
 /// Restores the entries the selectors name. A selector is an entry id, a
 /// batch id (its successful entries that changed something) or an absolute
@@ -69,6 +74,15 @@ fn restore_with(
     let mut logged = 0usize;
     for sel in selectors {
         let matched = select(&entries, sel, &restored);
+        if matched.is_empty() && is_batch(&entries, sel) {
+            outcomes.push(RestoreOutcome {
+                entry_id: String::new(),
+                path: PathBuf::from(sel),
+                ok: true,
+                error: Some(NOTHING_RESTORABLE.into()),
+            });
+            continue;
+        }
         if matched.is_empty() {
             outcomes.push(RestoreOutcome {
                 entry_id: String::new(),
@@ -110,6 +124,7 @@ fn restore_with(
                     argv: None,
                     packages: None,
                     kind: None,
+                    scope: None,
                 };
                 logged += 1;
                 // Appended right after its action, so a later failure never
@@ -131,6 +146,13 @@ fn restore_with(
         }
     }
     Ok(outcomes)
+}
+
+/// Whether `sel` is the batch id of a recorded action.
+fn is_batch(entries: &[HistoryEntry], sel: &str) -> bool {
+    entries
+        .iter()
+        .any(|e| e.action != HistoryAction::Restore && e.batch == sel)
 }
 
 /// Entries a selector names, oldest first. A path names its newest entry
@@ -194,10 +216,15 @@ fn restore_one(
     if e.action == HistoryAction::PackageRemove {
         return Err(reinstall_hint(e));
     }
+    // Said whether or not the delete ran: nothing deleted as root comes back.
+    if e.action == HistoryAction::Delete && e.scope == Some(Scope::SystemTree) {
+        return Err(MSG_SYSTEM_TREE.into());
+    }
     if !e.ok {
         return Err("the original action failed; nothing to restore".into());
     }
     match e.action {
+        HistoryAction::Delete if e.scope == Some(Scope::SystemTree) => Err(MSG_SYSTEM_TREE.into()),
         HistoryAction::Delete => Err("permanently deleted; cannot be restored".into()),
         HistoryAction::Restore => Err(INVALID_ENTRY.into()),
         HistoryAction::Command | HistoryAction::PrivilegedCommand => {
@@ -205,7 +232,14 @@ fn restore_one(
         }
         HistoryAction::PackageRemove => Err(reinstall_hint(e)),
         HistoryAction::Trash => {
-            let t = valid_trash(env, cfg, e).ok_or(INVALID_ENTRY)?;
+            let t = check_trash(env, cfg, e).map_err(|f| match f {
+                TrashFault::Invalid => INVALID_ENTRY.to_string(),
+                TrashFault::BadRoot(root) => format!(
+                    "trash directory {} has unsafe permissions or owner \
+                     (needs a private 0700 directory owned by you)",
+                    display_path(env, &root)
+                ),
+            })?;
             check_parents(env, &t.original)?;
             if dry_run {
                 return dry_run_trash(env, &t).map(|()| None);
@@ -270,33 +304,93 @@ fn valid_target(env: &Env, cfg: &Config, p: &Path) -> bool {
     is_canonical(p) && is_allowed_user_target(env, cfg, p)
 }
 
+/// Whether `root` (in-system) is a trash directory of ours on the topdir
+/// above `original`: `<topdir>/.Trash-<uid>`, or the shared
+/// `<topdir>/.Trash/<uid>` under a sticky, non-symlink `.Trash`. The root is
+/// a real directory with mode 0700 and its `files` and `info` are real
+/// directories, all owned by us; the topdir is never `/`.
+fn valid_topdir_trash(env: &Env, root: &Path, original: &Path) -> bool {
+    let uid = env.uid.to_string();
+    let parent = root.parent();
+    let own = format!(".Trash-{uid}");
+    let (topdir, shared) = if root.file_name().is_some_and(|n| n == own.as_str()) {
+        (parent, None)
+    } else if root.file_name().is_some_and(|n| n == uid.as_str())
+        && parent
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == ".Trash")
+    {
+        (parent.and_then(Path::parent), parent)
+    } else {
+        return false;
+    };
+    let Some(topdir) = topdir else {
+        return false;
+    };
+    if topdir == Path::new("/") || !original.starts_with(topdir) {
+        return false;
+    }
+    let owned_dir = |p: &Path| {
+        fs::symlink_metadata(env.sys_path(p))
+            .ok()
+            .filter(|m| m.file_type().is_dir() && m.uid() == env.uid)
+    };
+    if let Some(shared) = shared {
+        // `symlink_metadata` does not follow, so a symlinked `.Trash` fails.
+        let sticky = fs::symlink_metadata(env.sys_path(shared))
+            .is_ok_and(|m| m.file_type().is_dir() && m.mode() & 0o1000 != 0);
+        if !sticky {
+            return false;
+        }
+    }
+    owned_dir(root).is_some_and(|m| m.mode() & 0o777 == 0o700)
+        && owned_dir(&root.join("files")).is_some()
+        && owned_dir(&root.join("info")).is_some()
+}
+
+/// Why an entry's `trashed` record is refused.
+#[derive(Debug, PartialEq, Eq)]
+enum TrashFault {
+    /// Not shaped like something `move_to_trash` produced.
+    Invalid,
+    /// Shaped right, but this trash root is not a private directory of
+    /// ours (or a home trash outside the home).
+    BadRoot(PathBuf),
+}
+
 /// The entry's `trashed` record, when it is shaped like something
 /// `move_to_trash` produced for `e.path`.
+#[cfg(test)]
 fn valid_trash(env: &Env, cfg: &Config, e: &HistoryEntry) -> Option<Trashed> {
-    let t = e.trashed.as_ref()?;
+    check_trash(env, cfg, e).ok()
+}
+
+fn check_trash(env: &Env, cfg: &Config, e: &HistoryEntry) -> Result<Trashed, TrashFault> {
+    let invalid = || TrashFault::Invalid;
+    let t = e.trashed.as_ref().ok_or_else(invalid)?;
     if t.original != e.path || !valid_target(env, cfg, &t.original) {
-        return None;
+        return Err(TrashFault::Invalid);
     }
     if !is_canonical(&t.files_path) || !is_canonical(&t.info_path) {
-        return None;
+        return Err(TrashFault::Invalid);
     }
-    let name = t.files_path.file_name()?;
-    let files_dir = t.files_path.parent()?;
-    if files_dir.file_name()? != "files" {
-        return None;
+    let name = t.files_path.file_name().ok_or_else(invalid)?;
+    let files_dir = t.files_path.parent().ok_or_else(invalid)?;
+    if files_dir.file_name().ok_or_else(invalid)? != "files" {
+        return Err(TrashFault::Invalid);
     }
-    let root = files_dir.parent()?;
+    let root = files_dir.parent().ok_or_else(invalid)?;
     let home_trash = env.unsys(&env.data_home).join("Trash");
-    let topdir_trash = format!(".Trash-{}", env.uid);
-    if root != home_trash && root.file_name()? != topdir_trash.as_str() {
-        return None;
+    let is_home = root == home_trash && home_trash.starts_with(env.unsys(&env.home));
+    if !is_home && !valid_topdir_trash(env, root, &t.original) {
+        return Err(TrashFault::BadRoot(root.to_path_buf()));
     }
     let mut info_name = name.to_os_string();
     info_name.push(".trashinfo");
     if t.info_path != root.join("info").join(info_name) {
-        return None;
+        return Err(TrashFault::Invalid);
     }
-    Some(t.clone())
+    Ok(t.clone())
 }
 
 fn valid_backup(env: &Env, cfg: &Config, e: &HistoryEntry, backup: &Path) -> bool {
@@ -415,6 +509,7 @@ mod tests {
                 scope: crate::safety::Scope::Home,
                 depends_on: None,
                 depends_on_plan: None,
+                size_known: true,
                 reason: "test".into(),
                 action,
             })
@@ -806,6 +901,105 @@ mod tests {
         assert!(out[0].ok, "{out:?}");
     }
 
+    /// A genuine trash entry rewritten to point into `root` (in-system).
+    fn entry_in(env: &Env, root: &str) -> HistoryEntry {
+        let mut e = read_history(env).unwrap().0[0].clone();
+        let tr = e.trashed.as_mut().unwrap();
+        let name = tr.files_path.file_name().unwrap().to_os_string();
+        let mut info = name.clone();
+        info.push(".trashinfo");
+        tr.files_path = Path::new(root).join("files").join(&name);
+        tr.info_path = Path::new(root).join("info").join(info);
+        e
+    }
+
+    fn mode(t: &FixtureTree, rel: &str, m: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(t.dir.path().join(rel), fs::Permissions::from_mode(m)).unwrap();
+    }
+
+    fn topdir_fixture() -> (FixtureTree, Env) {
+        let t = FixtureTree::new();
+        t.write("home/user/.config/a/x", b"A");
+        let env = t.env();
+        run(&env, vec![trash("/home/user/.config/a")]);
+        let uid = env.uid;
+        t.mkdir(&format!("home/.Trash-{uid}/files"));
+        t.mkdir(&format!("home/.Trash-{uid}/info"));
+        mode(&t, &format!("home/.Trash-{uid}"), 0o700);
+        (t, env)
+    }
+
+    #[test]
+    fn topdir_trash_needs_private_owner_dir() {
+        let (t, env) = topdir_fixture();
+        let cfg = Config::default();
+        let uid = env.uid;
+        let root = format!("/home/.Trash-{uid}");
+        let e = entry_in(&env, &root);
+        assert!(valid_trash(&env, &cfg, &e).is_some());
+        // Mode 0755.
+        mode(&t, &format!("home/.Trash-{uid}"), 0o755);
+        assert!(valid_trash(&env, &cfg, &e).is_none());
+        mode(&t, &format!("home/.Trash-{uid}"), 0o700);
+        assert!(valid_trash(&env, &cfg, &e).is_some());
+        // Wrong owner.
+        let mut other = env.clone();
+        other.uid = uid.wrapping_add(1);
+        let e2 = entry_in(&other, &format!("/home/.Trash-{}", other.uid));
+        assert!(valid_trash(&other, &cfg, &e2).is_none());
+        // `files` a symlink.
+        let files = t.dir.path().join(format!("home/.Trash-{uid}/files"));
+        fs::remove_dir(&files).unwrap();
+        t.mkdir("home/elsewhere");
+        std::os::unix::fs::symlink(t.dir.path().join("home/elsewhere"), &files).unwrap();
+        assert!(valid_trash(&env, &cfg, &e).is_none());
+        fs::remove_file(&files).unwrap();
+        t.mkdir(&format!("home/.Trash-{uid}/files"));
+        assert!(valid_trash(&env, &cfg, &e).is_some());
+        // The root itself a symlink.
+        let real = t.dir.path().join(format!("home/.Trash-{uid}"));
+        fs::rename(&real, t.dir.path().join("home/moved")).unwrap();
+        std::os::unix::fs::symlink(t.dir.path().join("home/moved"), &real).unwrap();
+        assert!(valid_trash(&env, &cfg, &e).is_none());
+        // A name that merely looks like a trash dir, with no directory.
+        let e3 = entry_in(&env, "/home/user/.Trash-0");
+        assert!(valid_trash(&env, &cfg, &e3).is_none());
+    }
+
+    #[test]
+    fn shared_dot_trash_needs_sticky() {
+        let (t, env) = topdir_fixture();
+        let cfg = Config::default();
+        let uid = env.uid;
+        t.mkdir(&format!("home/.Trash/{uid}/files"));
+        t.mkdir(&format!("home/.Trash/{uid}/info"));
+        mode(&t, &format!("home/.Trash/{uid}"), 0o700);
+        let e = entry_in(&env, &format!("/home/.Trash/{uid}"));
+        // `.Trash` without the sticky bit.
+        mode(&t, "home/.Trash", 0o777);
+        assert!(valid_trash(&env, &cfg, &e).is_none());
+        mode(&t, "home/.Trash", 0o1777);
+        assert!(valid_trash(&env, &cfg, &e).is_some());
+        // A symlinked `.Trash`.
+        let real = t.dir.path().join("home/.Trash");
+        fs::rename(&real, t.dir.path().join("home/.Trash-real")).unwrap();
+        std::os::unix::fs::symlink(t.dir.path().join("home/.Trash-real"), &real).unwrap();
+        assert!(valid_trash(&env, &cfg, &e).is_none());
+    }
+
+    #[test]
+    fn home_trash_outside_home_not_restorable() {
+        let t = FixtureTree::new();
+        t.write("home/user/.config/a/x", b"A");
+        let env = t.env();
+        run(&env, vec![trash("/home/user/.config/a")]);
+        let mut env2 = env.clone();
+        env2.data_home = t.dir.path().join("data");
+        let e = entry_in(&env, "/data/Trash");
+        assert!(valid_trash(&env2, &Config::default(), &e).is_none());
+    }
+
     #[test]
     fn restore_reports_commands_not_undoable() {
         let t = FixtureTree::new();
@@ -840,6 +1034,7 @@ mod tests {
                 scope: crate::safety::Scope::Home,
                 depends_on: None,
                 depends_on_plan: None,
+                size_known: true,
                 reason: "test".into(),
             }],
             total_size: 0,
@@ -856,7 +1051,8 @@ mod tests {
         // By batch: commands are skipped like other no-op entries.
         let out = restore(&env, &Config::default(), &sel(&rep.batch), false).unwrap();
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].error.as_deref(), Some(NO_MATCH));
+        assert!(out[0].ok, "{out:?}");
+        assert_eq!(out[0].error.as_deref(), Some(NOTHING_RESTORABLE));
     }
 
     #[test]
@@ -878,6 +1074,7 @@ mod tests {
             scope: crate::safety::Scope::Home,
             depends_on: None,
             depends_on_plan: None,
+            size_known: true,
             reason: "test".into(),
         };
         let plan = Plan {
@@ -969,6 +1166,63 @@ mod tests {
         // A batch restore skips both.
         let out = restore(&env, &Config::default(), &sel(&rep.batch), false).unwrap();
         assert_eq!(out.len(), 1);
+        assert!(out[0].ok, "{out:?}");
+        assert_eq!(out[0].error.as_deref(), Some(NOTHING_RESTORABLE));
+    }
+
+    #[test]
+    fn restore_delete_only_batch_says_nothing_restorable() {
+        let t = FixtureTree::new();
+        t.write("home/user/.config/a/x", b"A");
+        let env = t.env();
+        let rep = run(
+            &env,
+            vec![Action::Delete {
+                path: "/home/user/.config/a".into(),
+            }],
+        );
+        assert!(rep.results[0].ok, "{rep:?}");
+        let out = restore(&env, &Config::default(), &sel(&rep.batch), false).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].ok, "{out:?}");
+        assert!(out[0].entry_id.is_empty());
+        assert_eq!(out[0].error.as_deref(), Some(NOTHING_RESTORABLE));
+        // An id that names nothing is still no match.
+        let out = restore(&env, &Config::default(), &sel("1-0"), false).unwrap();
+        assert!(!out[0].ok);
         assert_eq!(out[0].error.as_deref(), Some(NO_MATCH));
+    }
+
+    #[test]
+    fn bad_topdir_root_gets_a_permissions_message() {
+        let (t, env) = topdir_fixture();
+        let cfg = Config::default();
+        let uid = env.uid;
+        let e = entry_in(&env, &format!("/home/.Trash-{uid}"));
+        mode(&t, &format!("home/.Trash-{uid}"), 0o755);
+        let want = format!(
+            "trash directory /home/.Trash-{uid} has unsafe permissions or owner \
+             (needs a private 0700 directory owned by you)"
+        );
+        assert_eq!(restore_one(&env, &cfg, &e, true, "1"), Err(want));
+        // A home trash outside the home gets it too.
+        let mut env2 = env.clone();
+        env2.data_home = t.dir.path().join("data");
+        let e = entry_in(&env, "/data/Trash");
+        assert_eq!(
+            restore_one(&env2, &cfg, &e, true, "1"),
+            Err(
+                "trash directory /data/Trash has unsafe permissions or owner \
+                 (needs a private 0700 directory owned by you)"
+                    .to_string()
+            )
+        );
+        // Other invalid entries keep the generic message.
+        let mut e = entry_in(&env, &format!("/home/.Trash-{uid}"));
+        e.path = "/etc/passwd".into();
+        assert_eq!(
+            restore_one(&env, &cfg, &e, true, "1"),
+            Err(INVALID_ENTRY.to_string())
+        );
     }
 }
