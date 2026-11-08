@@ -393,7 +393,7 @@ All three go through the M4 pipeline: preview, confirm, one privileged batch, hi
   - `crates/crumbs-cli/src/cmd/act.rs`, split into `act/mod.rs`, `act/privilege.rs`, `act/signals.rs` and `act/test_runner.rs`. Move code only, with no behaviour change.
 
 **Interfaces:**
-- **Restore:** `restore <batch>` on a delete-only batch prints `nothing in this batch can be restored (it only deleted or ran commands)` and exits 0, instead of `no matching history entry` with exit 2.
+- **Restore:** `restore <batch>` on a delete-only batch prints `nothing in this batch can be restored` and exits 0, instead of `no matching history entry` with exit 2.
 - **`--keep-data`:** when the app's launcher is removed, its `mimeapps.list` lines go too: the `MimeAssoc` finding is kept.
 - **`glob_match`:**
   - `**` is matched in linear time, with no exponential backtracking: a test of 30 `**` segments against a 200-character path finishes in under 50 ms.

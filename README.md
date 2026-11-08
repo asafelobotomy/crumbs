@@ -2,7 +2,7 @@
 
 crumBS is a Linux command-line tool that lists the apps installed on your system across pacman, Flatpak, AppImage and unmanaged `.desktop` sources, finds the files they leave behind, finds space you can reclaim (caches, the trash, old temporary files, logs, superseded AppImages), and moves the items you pick to the trash. It is pre-alpha software.
 
-**Status:** M4: `uninstall` fully removes pacman and Flatpak apps (and AppImages), and `scan` and `clean` handle system bloat with `--system`, on top of M3's reclaimable space in your own files and M2's leftovers, orphans, history and restore. Everything that needs administrator rights runs in one batch behind one prompt. Not available yet: removing unmanaged (path-based) apps, and system-wide leftovers (`/etc`, `/opt`); both are planned as M4b. apt, dnf and Snap come later.
+**Status:** M4b: `uninstall` fully removes pacman and Flatpak apps (and AppImages), and now also unmanaged apps by path; `uninstall` and `orphans --system` find system leftovers in `/etc` and `/opt`. `scan` and `clean` handle system bloat with `--system`, on top of M3's reclaimable space in your own files and M2's leftovers, orphans, history and restore. Everything that needs administrator rights runs in one batch behind one prompt. apt, dnf and Snap come later.
 
 ## Build
 
@@ -15,9 +15,10 @@ cargo build --release
 
 - `crumbs apps list [--source <source>] [--all] [--sort name|size] [--json]` lists installed apps.
 - `crumbs apps show <app> [--show-low] [--json]` shows one app and its leftovers.
-- `crumbs uninstall <app>... [--leftovers-only] [--keep-data] [--show-low] [-i] [--dry-run] [--yes] [--permanent] [--force] [--json]` removes an app and its leftovers. pacman apps are removed with `pacman -Rn` (the exact package list its simulation printed, dependencies included; the preview shows `also removed: ...`), Flatpak apps with `flatpak uninstall` for their installation (user, system or a named one), AppImages by trashing the file. Unmanaged apps need `--leftovers-only`. With `--leftovers-only` the app stays, and so do its launchers, icons and file-type associations. `--keep-data` keeps the app's settings and data and removes only its caches; when the AppImage file itself goes, its own launchers and icons go with it, so nothing is left pointing at a removed file.
+- `crumbs uninstall <app>... [--leftovers-only] [--keep-data] [--show-low] [-i] [--dry-run] [--yes] [--permanent] [--force] [--json]` removes an app and its leftovers. pacman apps are removed with `pacman -Rn` (the exact package list its simulation printed, dependencies included; the preview shows `also removed: ...`), Flatpak apps with `flatpak uninstall` for their installation (user, system or a named one), AppImages by trashing the file. An unmanaged app (`unmanaged:<id>`) has its own files removed by path when that is unambiguous, and is otherwise refused with a reason (see "System leftovers and unmanaged apps"); `--leftovers-only` is the fallback. With `--leftovers-only` the app stays, and so do its launchers, icons and file-type associations. `--keep-data` keeps the app's settings and data and removes only its caches; when the AppImage file itself goes, its own launchers and icons go with it, so nothing is left pointing at a removed file.
 - `crumbs orphans [--show-low] [--json]` lists per-user files that belong to no installed app.
-- `crumbs orphans --clean (--select <path>... | -i) [--dry-run] [--yes] ...` removes chosen orphans. Nothing is removed unless you name it.
+- `crumbs orphans --system [--show-low] [--json]` lists unowned directories directly under `/opt`; it never lists `/etc`.
+- `crumbs orphans --clean (--select <path>... | -i) [--dry-run] [--yes] ...` removes chosen orphans; with `--system` they are deleted as root. Nothing is removed unless you name it.
 - `crumbs history [--limit N] [--json]` lists past removals, newest first, each batch labelled with the app it uninstalled, `orphans`, `clean` or `restore`.
 - `crumbs restore <batch | entry | path>... [--dry-run] [--json]` puts items back. Restoring a batch skips what was permanently deleted, run as a command or removed as a package; naming such an entry by its ID says why it cannot come back.
 - `crumbs scan [--category <name>]... [--details] [--user | --system] [--json]` lists reclaimable space by category. `--system` lists the system categories instead. It only reads: it changes nothing, needs no administrator rights and writes no history. With `--details` every item is listed. Naming categories scans exactly those, even ones switched off in the config.
@@ -88,13 +89,57 @@ will permanently delete 1 item (12.0 KiB)
 will run 3 commands
 ```
 
+### System leftovers and unmanaged apps
+
+**System leftovers.** When you uninstall an app, crumbs also looks for directories and files directly under `/etc/<name>` and `/opt/<name>` that no installed package owns and that belong to that app. They are the riskiest thing crumbs can find, so:
+
+- they are **never selected by default**: a plain `uninstall` lists a count (`note: 1 system leftover not selected (pick with -i)`) and removes nothing there; you pick them with `-i`, where they are marked `(root)`;
+- they are **deleted permanently, as root**, not moved to the trash, and `crumbs restore` cannot bring them back (`system files deleted as root cannot be restored`);
+- their confidence is never above medium, because something in `/etc` can be a local edit of a package you still have.
+
+**Unmanaged apps.** `crumbs uninstall unmanaged:<id>` removes the files of an app that no package manager installed: the `/opt/<dir>` its program sits in (as root), or its directory in `~/opt` or `~/Applications`, or the single program in `~/bin` or `~/.local/bin` (trashed). It acts only when the target is unambiguous, and otherwise refuses with a reason and `--leftovers-only` as the fallback (exit 2):
+
+- `its program is in a protected or shared location`, for example `/usr/local`;
+- `<path> belongs to a package`: a package owns something at or below it, or a tmpfiles.d file declares it;
+- `package ownership is unknown (no pacman database)` or `(tmpfiles.d unreadable)`: crumbs will not guess that an `/opt` directory is unowned;
+- `<path> is shared with <app>`: another detected app lives there;
+- `<path> does not match the app's name`: a vendor directory such as `/opt/google` is not named after the app. Only the app's own names count, never a name taken from its `Exec` line.
+
+Example (a throwaway test tree):
+
+```
+$ crumbs uninstall unmanaged:inky.desktop --dry-run
+Inky  unmanaged:inky.desktop
+ACTION            SIZE     PATH       REASON
+delete (as root)  4.0 KiB  /opt/inky  the app's own files
+    - as root: '/usr/bin/rm' '-rf' '--one-file-system' '--' '/opt/inky'
+note: system files are deleted permanently with administrator rights and cannot be restored
+note: these steps run with administrator rights; you will be asked once
+
+will permanently delete 1 item (4.0 KiB)
+note: 1 system leftover not selected (pick with -i)
+
+$ crumbs uninstall unmanaged:chromething.desktop --dry-run
+error: removing this unmanaged app's files isn't possible: /opt/google does not match the app's name; use --leftovers-only
+```
+
+**`orphans --system`** lists the directories directly under `/opt` that no package owns and no detected app claims (`/etc` is never listed: an orphan there cannot be told from a local edit). It only reads. To delete, name them: `crumbs orphans --system --clean --select /opt/old-tool`, or use `-i`.
+
+```
+$ crumbs orphans --system
+CONF  SIZE     KIND         PATH           REASON
+low   4.0 KiB  system-data  /opt/old-tool  not owned by any package and matched by no app
+
+1 orphans, 4.0 KiB
+```
+
 ### Administrator rights
 
 Only these need them:
 
 - removing a pacman app (`pacman -Rn`), a system Flatpak app or a Flatpak app in a named installation;
 - the system categories (`clean --system`);
-- deleting a system file (a core dump).
+- deleting a system file (a core dump) or a system leftover or unmanaged app under `/etc` or `/opt`.
 
 Removing a per-user Flatpak app, an AppImage, leftovers and every user category need none. A run that has such steps asks **once**: crumbs joins them into one script and runs it through `run0` (on systemd 256 or newer), else `pkexec`, else `sudo` (`sudo` only when it can ask on a terminal). The preview says `these steps run with administrator rights; you will be asked once`, and shows each command exactly as it will run. `--dry-run`, `scan` and `apps` never ask.
 
@@ -176,9 +221,10 @@ Exit codes: 0 ok, 1 error, 2 usage error or ambiguous app, 3 partial failure (in
 
 ## Safety
 
-- **Trash first.** Files go to the freedesktop trash, not the void. Only `--permanent` deletes, and it says so in the preview. The exceptions are emptying the trash and clearing `/tmp` (`clean trash`, `clean temp`), which are always permanent and say so, as are the system categories and package removals (they run commands as root).
+- **Trash first.** Files go to the freedesktop trash, not the void. Only `--permanent` deletes, and it says so in the preview. The exceptions are emptying the trash and clearing `/tmp` (`clean trash`, `clean temp`), which are always permanent and say so, as are the system categories, package removals and system leftovers (they run commands as root).
 - **Careful with `/tmp`.** `temp` only runs when `/tmp` is owned by root and has the sticky bit. Only your own files and folders directly in `/tmp` are considered, only when older than `temp_age_days`, and never sockets, pipes, devices, symlinks, names that look like live sessions (X, tmux, ssh, dbus, ...) or anything a running process has open. Each is checked again right before it is deleted, and `temp` refuses to run as root.
 - **Privileged steps are simulated, verified and quoted.** A pacman removal is first simulated as you with `pacman -Rs --print`; if pacman refuses (a dependency would break), crumbs refuses too. The real command then names exactly the packages the simulation showed (`-Rn --noconfirm <names>`, never `-s`), so it cannot remove more than the preview listed. A pacman database lock (`db.lck`) stops the run (`pacman is busy`) before anything is asked. Afterwards crumbs reads the pacman database again, and a package still installed is reported as a failure, whatever the command said. Every program runs by its absolute path from the system directories with a fixed `PATH` and `LD_PRELOAD`/`LD_LIBRARY_PATH` cleared, every argument is single-quoted, names are checked to be plain package or app names, and a system file is checked again right before it is deleted as root. Flatpak is always told which installation (`--user`, `--system` or `--installation=<name>`) and never `--delete-data`: an app's data in `~/.var/app/<id>` is trashed as a restorable leftover instead. In tests and fake roots crumbs never escalates at all.
+- **System leftovers are deleted with care.** Only a direct child of `/etc` or `/opt` is ever a target, and every directory from `/` down to it must be owned by root and not writable by others, so no user can swap a path under crumbs. Right before the root step crumbs checks again: the target is unchanged since the preview; **nothing is mounted at or below it** (it refuses otherwise, and also when the mount table cannot be read); no package owns anything in it now (the pacman database is read again; tmpfiles.d declarations are checked when the plan is made); and pacman holds no lock. The root step itself first compares its **mount namespace** with yours and refuses to delete if they differ, so the mount check describes the tree root sees, then runs `rm -rf --one-file-system`, which never crosses into another filesystem.
 - **The history is private.** `history.jsonl` is opened without following symlinks; a symlinked directory or file is refused, and a looser mode is made owner-only (group and other bits cleared) with a warning; the owner's read and write (read, write and search for the directory) are restored when missing.
 - **Preview before anything happens.** `uninstall`, `orphans --clean` and `clean` show every path with its size and the reason it was chosen, then ask. `--dry-run` shows the plan and stops.
 - **No surprises in scripts.** Without a terminal, `--yes` is required (or `--dry-run`); `--json` needs one of the two as well.

@@ -30,9 +30,8 @@ pub struct RestoreOutcome {
 
 pub const NO_MATCH: &str = "no matching history entry";
 pub const INVALID_ENTRY: &str = "history entry failed validation";
-/// A batch that only deleted or ran commands: not an error, just no work.
-pub const NOTHING_RESTORABLE: &str =
-    "nothing in this batch can be restored (it only deleted or ran commands)";
+/// A recognised batch with nothing to put back: not an error, just no work.
+pub const NOTHING_RESTORABLE: &str = "nothing in this batch can be restored";
 pub const ALREADY_RESTORED: &str = "already restored";
 /// Why a `Delete` of a [`Scope::SystemTree`](crate::safety::Scope::SystemTree)
 /// target cannot be undone.

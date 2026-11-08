@@ -1145,7 +1145,7 @@ fn restore_delete_only_batch_says_nothing_restorable() {
     let (code, stdout, _) = run_out(crumbs(&t).args(["restore", &batch]));
     assert_eq!(code, 0, "{stdout}");
     assert!(
-        stdout.contains("nothing in this batch can be restored (it only deleted or ran commands)"),
+        stdout.contains("nothing in this batch can be restored"),
         "{stdout}"
     );
     let v = json_error_free(&t, &["restore", &batch, "--json"], 0);

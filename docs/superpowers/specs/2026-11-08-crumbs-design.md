@@ -428,7 +428,9 @@ Each milestone gets its own implementation plan and ends in a working, tested CL
      `/opt/<name>` leftovers not owned by any package, path-based removal of
      unmanaged apps, and the owned-directory database both need. They are the
      riskiest deletions and get their own plan; scope in
-     `docs/superpowers/notes/m4b-scope.md`.
+     `docs/superpowers/notes/m4b-scope.md`. — done
+   - **4c. MCP server** (planned) — MCP server (`crumbs mcp`), spec
+     `docs/superpowers/specs/2026-11-08-crumbs-mcp-design.md`.
 5. **Cross-distro** — dpkg, rpm, Snap sources; distro CI matrix.
 6. **Packaging** — musl build, AppImage, AUR, deb, rpm, release workflow.
 
