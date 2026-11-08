@@ -1,3 +1,4 @@
+pub mod appimage;
 pub mod flatpak;
 pub mod pacman;
 
