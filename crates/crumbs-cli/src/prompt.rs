@@ -9,11 +9,14 @@ pub fn is_interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
-/// Asks `<question> [y/N]`. Escape or Ctrl-C counts as no.
+/// Asks `<question> [y/N]`; the answer needs Enter. Escape or an empty
+/// answer counts as no. Ctrl-C ends the process (SIGINT) before anything
+/// runs; end of input is an error.
 pub fn confirm(question: &str) -> anyhow::Result<bool> {
     let answer = Confirm::new()
         .with_prompt(question)
         .default(false)
+        .wait_for_newline(true)
         .interact_opt()?;
     Ok(answer == Some(true))
 }

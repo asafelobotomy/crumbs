@@ -62,6 +62,9 @@ pub struct PlanOptions {
     pub permanent: bool,
     /// Keep everything except caches.
     pub keep_data: bool,
+    /// The app itself stays: an AppImage file is neither planned nor
+    /// looked at.
+    pub leftovers_only: bool,
 }
 
 pub const NOTE_APP_STAYS: &str = "the app itself stays installed (leftovers only)";
@@ -76,7 +79,8 @@ fn remove(path: PathBuf, opts: &PlanOptions) -> Action {
 }
 
 /// Builds the plan. For an AppImage app the file itself comes first, with
-/// its fingerprint taken now; a missing `location` is an error.
+/// its fingerprint taken now; a missing `location` is an error. With
+/// `leftovers_only` the app stays and the plan notes so.
 pub fn build_plan(
     env: &Env,
     app: Option<&App>,
@@ -87,7 +91,7 @@ pub fn build_plan(
     let mut notes = Vec::new();
     let mut skip_path: Option<PathBuf> = None;
     if let Some(app) = app {
-        if app.source == SourceKind::AppImage {
+        if app.source == SourceKind::AppImage && !opts.leftovers_only {
             let location = app.location.clone().ok_or_else(|| CoreError::Parse {
                 what: format!("app {}", app.id),
                 message: "AppImage has no location".into(),
@@ -197,6 +201,7 @@ mod tests {
         let opts = PlanOptions {
             permanent: true,
             keep_data: false,
+            ..PlanOptions::default()
         };
         let plan = build_plan(&env, None, &fs, &opts).unwrap();
         assert_eq!(kinds(&plan), ["delete", "delete"]);
@@ -232,6 +237,7 @@ mod tests {
         let opts = PlanOptions {
             permanent: false,
             keep_data: true,
+            ..PlanOptions::default()
         };
         let plan = build_plan(&env, None, &fs, &opts).unwrap();
         assert_eq!(plan.actions.len(), 1);
@@ -242,6 +248,29 @@ mod tests {
             }
         );
         assert_eq!(plan.total_size, fs[1].size.bytes);
+    }
+
+    #[test]
+    fn plan_leftovers_only_skips_appimage_file() {
+        let t = FixtureTree::new();
+        t.write("home/user/.config/foo/a", b"a");
+        let env = t.env();
+        // No location: a full plan fails, a leftovers-only plan never looks.
+        let mut app = App::new(SourceKind::AppImage, "Foo.AppImage");
+        app.location = None;
+        let fs = [finding(&env, "/home/user/.config/foo", FindingKind::Config)];
+        let opts = PlanOptions {
+            leftovers_only: true,
+            ..PlanOptions::default()
+        };
+        let plan = build_plan(&env, Some(&app), &fs, &opts).unwrap();
+        assert_eq!(kinds(&plan), ["trash"]);
+        assert_eq!(
+            plan.actions[0].action.path(),
+            Path::new("/home/user/.config/foo")
+        );
+        assert_eq!(plan.notes, [NOTE_APP_STAYS]);
+        assert_eq!(plan.app_id.as_deref(), Some("appimage:Foo.AppImage"));
     }
 
     #[test]
@@ -262,6 +291,7 @@ mod tests {
             let opts = PlanOptions {
                 permanent,
                 keep_data: false,
+                leftovers_only: false,
             };
             let plan = build_plan(&env, None, std::slice::from_ref(&mime), &opts).unwrap();
             assert_eq!(
@@ -294,6 +324,7 @@ mod tests {
         let opts = PlanOptions {
             permanent: false,
             keep_data: true,
+            ..PlanOptions::default()
         };
         let plan = build_plan(&env, Some(&app), &fs, &opts).unwrap();
         assert_eq!(plan.actions.len(), 1, "keep_data drops the config");

@@ -1,3 +1,4 @@
+pub mod act;
 pub mod apps;
 pub mod context;
 pub mod doctor;

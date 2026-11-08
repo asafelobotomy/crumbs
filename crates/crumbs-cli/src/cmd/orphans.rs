@@ -9,10 +9,8 @@ use crumbs_core::leftovers::find_orphans;
 use crumbs_core::plan::{PlanOptions, build_plan};
 use serde_json::json;
 
+use super::act::{ActFlags, Out, Target, apply, choose, plannable, precheck, refuse_source_errors};
 use super::context::{Context, print_notes};
-use super::uninstall::{
-    ActFlags, Target, apply, choose, plannable, precheck, refuse_source_errors,
-};
 use crate::output::{
     ErrorEntry, confidence, finding_kind, fmt_size, partial_failure, print_json_entries,
     print_table,
@@ -35,8 +33,12 @@ pub struct OrphansArgs {
 
 pub fn run(env: &Env, args: &OrphansArgs) -> anyhow::Result<ExitCode> {
     let act = &args.act;
+    let out = Out {
+        command: "orphans",
+        json: act.json,
+    };
     if args.clean {
-        return clean(env, args);
+        return clean(env, out, args);
     }
     if !args.select.is_empty()
         || act.interactive
@@ -45,18 +47,12 @@ pub fn run(env: &Env, args: &OrphansArgs) -> anyhow::Result<ExitCode> {
         || act.permanent
         || act.force
     {
-        writeln!(
-            anstream::stderr().lock(),
-            "error: --select, -i, --dry-run, --yes, --permanent and --force need --clean"
-        )?;
-        return Ok(ExitCode::from(2));
+        return out.fail(
+            2,
+            "--select, -i, --dry-run, --yes, --permanent and --force need --clean",
+        );
     }
     list(env, args.show_low, act.json)
-}
-
-fn usage(msg: &str) -> anyhow::Result<ExitCode> {
-    writeln!(anstream::stderr().lock(), "error: {msg}")?;
-    Ok(ExitCode::from(2))
 }
 
 /// An in-system path from a `--select` value; a leading `~` is the home.
@@ -73,32 +69,29 @@ fn select_path(env: &Env, s: &str) -> Option<PathBuf> {
 }
 
 /// `orphans --clean`: only explicitly chosen orphans are ever planned.
-fn clean(env: &Env, args: &OrphansArgs) -> anyhow::Result<ExitCode> {
+fn clean(env: &Env, out: Out, args: &OrphansArgs) -> anyhow::Result<ExitCode> {
     let act = &args.act;
     if !act.interactive && args.select.is_empty() {
-        return usage("orphans --clean needs --select <path>... or -i");
+        return out.fail(2, "orphans --clean needs --select <path>... or -i");
     }
-    if let Some(code) = precheck(act)? {
+    if let Some(code) = precheck(out, act)? {
         return Ok(code);
     }
     let cx = Context::load(env)?;
-    if let Some(code) = refuse_source_errors(&cx.inv, act.force)? {
+    if let Some(code) = refuse_source_errors(out, &cx.inv, act)? {
         return Ok(code);
     }
     let orphans = plannable(find_orphans(&cx.idx, args.show_low));
     let chosen = if act.interactive {
         match choose(env, "Orphans to remove", orphans, true, |_| false)? {
             Some(c) => c,
-            None => {
-                writeln!(anstream::stderr().lock(), "aborted")?;
-                return Ok(ExitCode::from(4));
-            }
+            None => return out.aborted(),
         }
     } else {
         let mut wanted = Vec::new();
         for s in &args.select {
             let Some(p) = select_path(env, s) else {
-                return usage(&format!("not an absolute path: {s}"));
+                return out.fail(2, &format!("not an absolute path: {s}"));
             };
             if !wanted.contains(&p) {
                 wanted.push(p);
@@ -112,7 +105,7 @@ fn clean(env: &Env, args: &OrphansArgs) -> anyhow::Result<ExitCode> {
                     } else {
                         ""
                     };
-                return usage(&format!("not an orphan: {}{hint}", display_path(env, p)));
+                return out.fail(2, &format!("not an orphan: {}{hint}", display_path(env, p)));
             }
         }
         orphans
@@ -122,7 +115,7 @@ fn clean(env: &Env, args: &OrphansArgs) -> anyhow::Result<ExitCode> {
     };
     let opts = PlanOptions {
         permanent: act.permanent,
-        keep_data: false,
+        ..PlanOptions::default()
     };
     let plan = build_plan(env, None, &chosen, &opts)?;
     let targets = [Target {
@@ -130,7 +123,7 @@ fn clean(env: &Env, args: &OrphansArgs) -> anyhow::Result<ExitCode> {
         app: None,
         plan,
     }];
-    apply(env, &cx, "orphans", &targets, act)
+    apply(env, &cx, out, &targets, act)
 }
 
 fn list(env: &Env, show_low: bool, json: bool) -> anyhow::Result<ExitCode> {

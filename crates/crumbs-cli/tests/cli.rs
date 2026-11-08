@@ -698,3 +698,152 @@ fn restore_occupied_exit_3() {
         .join("settings.json");
     assert!(kept.exists(), "{left:?}");
 }
+
+// ---- review fixes ----
+
+#[test]
+fn dry_run_not_refused_on_source_errors() {
+    let t = fixture(FLATPAK_FAIL);
+    with_leftovers(&t);
+    with_orphans(&t);
+    let out = crumbs(&t)
+        .args(["uninstall", "Tool", "--dry-run"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(stdout.contains("will move 3 items"), "{stdout}");
+    assert!(stderr.contains("warning: flatpak:"), "{stderr}");
+    assert!(!stderr.contains("refusing"), "{stderr}");
+    crumbs(&t)
+        .args([
+            "orphans",
+            "--clean",
+            "--select",
+            "~/.thunderbird",
+            "--dry-run",
+        ])
+        .assert()
+        .code(0)
+        .stderr(predicate::str::contains("warning: flatpak:"));
+    assert!(real(&t, "/home/user/.thunderbird").exists());
+    // Executing still refuses.
+    crumbs(&t)
+        .args(["orphans", "--clean", "--select", "~/.thunderbird", "--yes"])
+        .assert()
+        .code(1);
+    assert!(real(&t, "/home/user/.thunderbird").exists());
+}
+
+fn json_error(t: &FixtureTree, args: &[&str], code: i32) -> serde_json::Value {
+    let out = crumbs(t).args(args).output().unwrap();
+    assert_eq!(out.status.code(), Some(code));
+    assert!(!out.stderr.is_empty(), "human text stays on stderr");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["schema_version"], 1);
+    let errors = v["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|e| e["source"] == "cli"), "{v}");
+    v
+}
+
+#[test]
+fn json_errors_print_envelope() {
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    let v = json_error(&t, &["uninstall", "nope", "--json", "--yes"], 2);
+    assert_eq!(v["command"], "uninstall");
+    assert_eq!(v["data"]["plans"], serde_json::json!([]));
+    assert!(v["data"]["report"].is_null());
+    let msg = v["errors"].as_array().unwrap().last().unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(msg.contains("no installed app matches 'nope'"), "{msg}");
+    json_error(&t, &["uninstall", "Tool", "--json"], 2);
+    json_error(&t, &["uninstall", "T-o-o-l", "--json", "--yes"], 2);
+    json_error(&t, &["uninstall", "firefox", "--json", "--yes"], 2);
+    json_error(&t, &["orphans", "--clean", "--json", "--yes"], 2);
+    let f = fixture(FLATPAK_FAIL);
+    with_leftovers(&f);
+    json_error(&f, &["uninstall", "Tool", "--json", "--yes"], 1);
+    assert!(real(&f, "/home/user/.config/Tool").exists());
+}
+
+fn gutcheck_launcher(t: &FixtureTree) {
+    gutcheck(t);
+    t.desktop(
+        "/home/user/.local/share/applications/appofholding-gutcheck.desktop",
+        "[Desktop Entry]\nType=Application\nName=GutCheck\nExec=/home/user/Applications/GutCheck-0.19.0-x86_64.AppImage\nIcon=appofholding-gutcheck\n",
+    );
+    t.write(
+        "/home/user/.local/share/icons/hicolor/512x512/apps/appofholding-gutcheck.png",
+        b"png",
+    );
+}
+
+#[test]
+fn uninstall_leftovers_only_keeps_own_launcher() {
+    let t = fixture(FLATPAK_OK);
+    gutcheck_launcher(&t);
+    let full = String::from_utf8(
+        crumbs(&t)
+            .args(["uninstall", "GutCheck", "--dry-run"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(full.contains("appofholding-gutcheck.desktop"), "{full}");
+    assert!(full.contains("appofholding-gutcheck.png"), "{full}");
+    let out = crumbs(&t)
+        .args(["uninstall", "GutCheck", "--leftovers-only", "--yes"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(!stdout.contains("appofholding-gutcheck"), "{stdout}");
+    assert!(!real(&t, "/home/user/.config/GutCheck").exists());
+    assert!(
+        real(
+            &t,
+            "/home/user/.local/share/applications/appofholding-gutcheck.desktop"
+        )
+        .exists()
+    );
+    assert!(
+        real(
+            &t,
+            "/home/user/.local/share/icons/hicolor/512x512/apps/appofholding-gutcheck.png"
+        )
+        .exists()
+    );
+    assert!(
+        real(
+            &t,
+            "/home/user/Applications/GutCheck-0.19.0-x86_64.AppImage"
+        )
+        .exists()
+    );
+}
+
+#[test]
+fn json_report_aligned_with_plans() {
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    let v = stdout_json(crumbs(&t).args([
+        "uninstall",
+        "firefox",
+        "Tool",
+        "--leftovers-only",
+        "--json",
+        "--yes",
+    ]));
+    let plans = v["data"]["plans"].as_array().unwrap();
+    let report = v["data"]["report"].as_array().unwrap();
+    assert_eq!(plans.len(), 2, "{v}");
+    assert_eq!(report.len(), 2, "{v}");
+    assert!(plans[0]["actions"].as_array().unwrap().is_empty(), "{v}");
+    assert!(report[0].is_null(), "{v}");
+    assert_eq!(report[1]["results"].as_array().unwrap().len(), 2, "{v}");
+}
