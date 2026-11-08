@@ -31,6 +31,9 @@ pub struct HistoryEntry {
     pub ok: bool,
     pub error: Option<String>,
     pub app_id: Option<String>,
+    /// `Restore` entries only: the id of the entry this one restored.
+    #[serde(default)]
+    pub restores: Option<String>,
 }
 
 fn io_err(path: &Path, source: io::Error) -> CoreError {
@@ -43,6 +46,26 @@ fn io_err(path: &Path, source: io::Error) -> CoreError {
 /// Current unix milliseconds as a decimal string; entry ids are `<batch>-<index>`.
 pub fn new_batch_id() -> String {
     jiff::Timestamp::now().as_millisecond().to_string()
+}
+
+/// A batch id greater than every numeric batch already in the history, so
+/// two runs within the same millisecond never share ids. An unreadable
+/// history falls back to [`new_batch_id`].
+pub fn next_batch_id(env: &Env) -> String {
+    let now = jiff::Timestamp::now().as_millisecond();
+    let now = u128::try_from(now).unwrap_or(0);
+    let last = read_history(env)
+        .map(|(entries, _)| {
+            entries
+                .iter()
+                .filter_map(|e| e.batch.parse::<u128>().ok())
+                .max()
+        })
+        .unwrap_or(None);
+    match last {
+        Some(l) if l >= now => l.saturating_add(1).to_string(),
+        _ => now.to_string(),
+    }
 }
 
 /// RFC 3339 timestamp for `HistoryEntry::time`.
@@ -128,6 +151,7 @@ mod tests {
             ok: true,
             error: None,
             app_id: Some("appimage:~/X.AppImage".into()),
+            restores: None,
         }
     }
 
@@ -150,6 +174,22 @@ mod tests {
         let text = fs::read_to_string(dir.join("history.jsonl")).unwrap();
         assert_eq!(text.lines().count(), 3);
         assert!(text.contains("\"action\":\"trash\""));
+    }
+
+    #[test]
+    fn history_line_without_restores_parses() {
+        let line = br#"{"id":"1-0","batch":"1","time":"t","action":"trash","path":"/home/user/f","trashed":null,"backup":null,"size":1,"ok":true,"error":null,"app_id":null}"#;
+        let e: HistoryEntry = serde_json::from_slice(line).unwrap();
+        assert_eq!(e.restores, None);
+    }
+
+    #[test]
+    fn next_batch_id_is_after_existing() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        let future = "99999999999999".to_string();
+        append(&env, &[entry(0, &future)]).unwrap();
+        assert_eq!(next_batch_id(&env), "100000000000000");
     }
 
     #[test]
