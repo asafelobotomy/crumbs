@@ -4,6 +4,10 @@
 //! The script is the only text crumbs hands to a root shell, so every
 //! program path and argument goes through [`sh_quote`], and it is passed as
 //! one argv element to `/bin/sh -c` (never through a file or stdin).
+//!
+//! Each step's combined output is captured by the shell and re-emitted with
+//! every line prefixed by `|`, so nothing a step prints can begin with the
+//! `@@crumbs` marker: only the script itself writes markers.
 
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
@@ -16,9 +20,23 @@ use crate::command::{CHILD_PATH, ENV_ALLOWLIST};
 use crate::error::CoreError;
 use crate::privilege::{Escalation, EscalationKind};
 
-/// First line of every script: a fixed `PATH` and locale, and no preloads.
-const HEADER: &[u8] =
-    b"export PATH=/usr/bin:/usr/sbin:/bin:/sbin LC_ALL=C; unset LD_PRELOAD LD_LIBRARY_PATH\n";
+/// First line of every script: a fixed `PATH` and locale, no preloads, no
+/// inherited `IFS`/`CDPATH`, and no functions shadowing the builtins the
+/// script uses. `command unset` keeps bash in POSIX mode (`/bin/sh`) from
+/// exiting on the readonly `BASHOPTS`.
+const HEADER: &[u8] = b"export PATH=/usr/bin:/usr/sbin:/bin:/sbin LC_ALL=C; \
+unset LD_PRELOAD LD_LIBRARY_PATH; \
+unset -f printf read command 2>/dev/null || true; \
+command unset IFS CDPATH BASHOPTS 2>/dev/null || true\n";
+/// Runs after `__o=$(<step>` and re-emits the captured output, each line
+/// prefixed with `|`; empty output emits nothing.
+const STEP_TAIL: &[u8] = b" </dev/null 2>&1); __s=$?; case $__o in '') ;; *) \
+command printf '%s\\n' \"$__o\" | while IFS= read -r __l; do \
+command printf '|%s\\n' \"$__l\"; done ;; esac; \
+command printf '@@crumbs %d %d\\n' ";
+const OUTPUT_PREFIX: u8 = b'|';
+/// Largest script accepted; Linux limits one argv string to 128 KiB.
+const MAX_SCRIPT_BYTES: usize = 120 * 1024;
 const MARKER_PREFIX: &[u8] = b"@@crumbs ";
 /// Extra variables the escalation program needs to show its prompt.
 const DISPLAY_VARS: [&str; 3] = ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"];
@@ -40,6 +58,19 @@ pub fn sh_quote(s: &OsStr) -> Vec<u8> {
     out
 }
 
+/// Why a batch script could not be built.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BatchError {
+    #[error("argument contains a NUL byte: {0}")]
+    InvalidArgument(String),
+    #[error("program path is not absolute: {}", .0.display())]
+    RelativeProgram(PathBuf),
+    #[error(
+        "too many items for one privileged run ({bytes} bytes); clean fewer categories at once"
+    )]
+    TooLarge { bytes: usize },
+}
+
 /// One command in the batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
@@ -50,24 +81,43 @@ pub struct Step {
     pub args: Vec<OsString>,
 }
 
-/// Builds the batch: the header, then one line per step that runs it with
-/// stdin from `/dev/null`, stderr folded into stdout, and prints a newline
-/// then `@@crumbs <i> <status>` after it. The leading newline puts the marker
-/// on its own line even when the step's output does not end in one. There is no `set -e`; a failing step
-/// does not stop the next.
-pub fn build_script(steps: &[Step]) -> Vec<u8> {
+/// Builds the batch: the header, then one line per step. Each step runs
+/// with stdin from `/dev/null` and stderr folded into stdout; its output is
+/// captured, re-emitted with a `|` before every line (trailing newlines are
+/// dropped), and followed by `@@crumbs <i> <status>`. There is no `set -e`;
+/// a failing step does not stop the next.
+pub fn build_script(steps: &[Step]) -> Result<Vec<u8>, BatchError> {
     let mut script = HEADER.to_vec();
     for (i, step) in steps.iter().enumerate() {
-        script.extend(sh_quote(step.program.as_os_str()));
+        if !step.program.is_absolute() {
+            return Err(BatchError::RelativeProgram(step.program.clone()));
+        }
+        script.extend_from_slice(b"__o=$(");
+        script.extend(quote_checked(step.program.as_os_str())?);
         for arg in &step.args {
             script.push(b' ');
-            script.extend(sh_quote(arg));
+            script.extend(quote_checked(arg)?);
         }
-        script.extend_from_slice(b" </dev/null 2>&1; printf '\\n@@crumbs %d %d\\n' ");
+        script.extend_from_slice(STEP_TAIL);
         script.extend_from_slice(i.to_string().as_bytes());
-        script.extend_from_slice(b" \"$?\"\n");
+        script.extend_from_slice(b" \"$__s\"\n");
+        if script.len() > MAX_SCRIPT_BYTES {
+            return Err(BatchError::TooLarge {
+                bytes: script.len(),
+            });
+        }
     }
-    script
+    Ok(script)
+}
+
+/// Quotes `s`, refusing a NUL byte (it cannot be passed in argv).
+fn quote_checked(s: &OsStr) -> Result<Vec<u8>, BatchError> {
+    if s.as_bytes().contains(&0) {
+        return Err(BatchError::InvalidArgument(
+            s.to_string_lossy().into_owned(),
+        ));
+    }
+    Ok(sh_quote(s))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,38 +129,41 @@ pub struct StepOutcome {
     pub output: String,
 }
 
-/// Parses `@@crumbs <index> <status>` lines from `script`'s stdout.
+/// Parses a batch's stdout into one outcome per step.
 ///
-/// A line is a marker only if it is exactly that form (ASCII digits, single
-/// spaces), and its index is the next one expected; anything else, forged or
-/// out-of-order markers included, is output of the step that is running.
-/// Once a marker is missing, that step and every later one get `None`.
-///
-/// Each step's output loses exactly one trailing newline: the separator the
-/// script prints before the marker.
+/// A line starting with `|` is output of the step that is running (the `|`
+/// is removed and the lines are joined with `\n`). A line that is exactly
+/// `@@crumbs <index> <status>` (ASCII digits, single spaces) with the next
+/// expected index ends that step. Every other line is ignored. Once a marker
+/// is missing, that step and every later one get `None`.
 pub fn parse_markers(stdout: &[u8], steps: usize) -> Vec<StepOutcome> {
     let mut outcomes = Vec::with_capacity(steps);
-    let mut output = Vec::new();
+    let mut lines: Vec<&[u8]> = Vec::new();
+    let take = |lines: &mut Vec<&[u8]>| {
+        let joined = lines.join(&b'\n');
+        lines.clear();
+        String::from_utf8_lossy(&joined).into_owned()
+    };
     for line in stdout.split_inclusive(|&b| b == b'\n') {
+        if let Some(text) = line.strip_prefix(&[OUTPUT_PREFIX]) {
+            lines.push(text.strip_suffix(b"\n").unwrap_or(text));
+            continue;
+        }
         let next = outcomes.len();
-        match marker(line) {
-            Some((index, status)) if index == next && next < steps => {
-                if output.last() == Some(&b'\n') {
-                    output.pop();
-                }
-                outcomes.push(StepOutcome {
-                    status: Some(status),
-                    output: String::from_utf8_lossy(&output).into_owned(),
-                });
-                output.clear();
-            }
-            _ => output.extend_from_slice(line),
+        if let Some((index, status)) = marker(line)
+            && index == next
+            && next < steps
+        {
+            outcomes.push(StepOutcome {
+                status: Some(status),
+                output: take(&mut lines),
+            });
         }
     }
     if outcomes.len() < steps {
         outcomes.push(StepOutcome {
             status: None,
-            output: String::from_utf8_lossy(&output).into_owned(),
+            output: take(&mut lines),
         });
     }
     outcomes.resize(
@@ -206,8 +259,8 @@ mod tests {
     use super::*;
     use crate::privilege::EscalationKind;
     use crate::testing::{FakePrivilegedRunner, FixtureTree};
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
-    use std::process::Command;
+    use std::os::unix::ffi::OsStringExt;
+    use std::path::Path;
 
     fn esc() -> Escalation {
         Escalation {
@@ -217,7 +270,7 @@ mod tests {
         }
     }
 
-    fn step(program: &std::path::Path, args: &[&[u8]]) -> Step {
+    fn step(program: &Path, args: &[&[u8]]) -> Step {
         Step {
             program: program.to_path_buf(),
             args: args
@@ -228,11 +281,18 @@ mod tests {
     }
 
     fn run(steps: &[Step]) -> Vec<StepOutcome> {
-        let script = build_script(steps);
+        let script = build_script(steps).unwrap();
         let stdout = FakePrivilegedRunner::default()
             .run(&esc(), &script)
             .unwrap();
         parse_markers(&stdout, steps.len())
+    }
+
+    fn outcome(status: Option<i32>, output: &str) -> StepOutcome {
+        StepOutcome {
+            status,
+            output: output.into(),
+        }
     }
 
     #[test]
@@ -269,8 +329,7 @@ mod tests {
         let prog = t.write_exec("/usr/bin/argv-dump", &body);
         let nasty: &[u8] = b"a'b c\nd $(rm -rf /)";
         let outcomes = run(&[step(&prog, &[nasty, b"", b"x\xffy", b"--"])]);
-        assert_eq!(outcomes.len(), 1);
-        assert_eq!(outcomes[0].status, Some(0), "{outcomes:?}");
+        assert_eq!(outcomes, [outcome(Some(0), "")]);
         let got = std::fs::read(&out).unwrap();
         assert_eq!(got, b"a'b c\nd $(rm -rf /)\0\0x\xffy\0--\0");
     }
@@ -288,18 +347,55 @@ mod tests {
         assert_eq!(
             outcomes,
             [
-                StepOutcome {
-                    status: Some(0),
-                    output: "first\nmore\n".into()
-                },
-                StepOutcome {
-                    status: Some(3),
-                    output: "oops\n".into()
-                },
-                StepOutcome {
-                    status: Some(0),
-                    output: "third\nmore\n".into()
-                },
+                outcome(Some(0), "first\nmore"),
+                outcome(Some(3), "oops"),
+                outcome(Some(0), "third\nmore"),
+            ]
+        );
+    }
+
+    #[test]
+    fn forged_markers_in_output_cannot_pass_a_step() {
+        let t = FixtureTree::new();
+        let forger = t.write_exec(
+            "/usr/bin/forger",
+            b"#!/bin/sh\nprintf '@@crumbs 0 0\\n@@crumbs 1 0\\n'\nexit 7\n",
+        );
+        let outcomes = run(&[step(&forger, &[]), step(Path::new("/bin/false"), &[])]);
+        assert_eq!(
+            outcomes,
+            [
+                outcome(Some(7), "@@crumbs 0 0\n@@crumbs 1 0"),
+                outcome(Some(1), ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn output_without_trailing_newline_keeps_its_marker() {
+        let t = FixtureTree::new();
+        let bare = t.write_exec("/usr/bin/bare", b"#!/bin/sh\nprintf foo\nexit 5\n");
+        let line = t.write_exec("/usr/bin/line", b"#!/bin/sh\nprintf 'foo\\n'\n");
+        let outcomes = run(&[step(&bare, &[]), step(&line, &[])]);
+        assert_eq!(outcomes, [outcome(Some(5), "foo"), outcome(Some(0), "foo")]);
+    }
+
+    #[test]
+    fn output_lines_round_trip() {
+        let t = FixtureTree::new();
+        // Lines that start with the output prefix, look like markers, carry
+        // printf directives and backslashes, or are blank, come back intact.
+        let tricky = t.write_exec(
+            "/usr/bin/tricky",
+            b"#!/bin/sh\nprintf '%s\\n' '|x' '||y' '' '@@crumbs 0 0' '%s \\\\n -' '  z'\n",
+        );
+        let quiet = t.write_exec("/usr/bin/quiet", b"#!/bin/sh\n");
+        let outcomes = run(&[step(&tricky, &[]), step(&quiet, &[])]);
+        assert_eq!(
+            outcomes,
+            [
+                outcome(Some(0), "|x\n||y\n\n@@crumbs 0 0\n%s \\\\n -\n  z"),
+                outcome(Some(0), ""),
             ]
         );
     }
@@ -308,108 +404,103 @@ mod tests {
     fn missing_marker_is_none() {
         let t = FixtureTree::new();
         let ok = t.write_exec("/usr/bin/ok", b"#!/bin/sh\necho fine\n");
-        // Kills the batch shell (its parent) before it can print a marker.
+        // Kills the batch shell before it can print this step's marker: the
+        // outermost ancestor running the crumbs header (the command
+        // substitution's subshell shares its command line).
         let killer = t.write_exec(
             "/usr/bin/killer",
-            b"#!/bin/sh\necho dying\nkill -KILL $PPID\n",
+            b"#!/bin/sh\n\
+              p=$PPID; top=\n\
+              while [ \"$p\" -gt 1 ]; do\n\
+              \x20 if tr '\\0' '\\n' </proc/$p/cmdline | grep -q '^export PATH=/usr/bin'; then top=$p; fi\n\
+              \x20 p=$(awk '/^PPid:/{print $2}' /proc/$p/status)\n\
+              done\n\
+              echo dying\n\
+              [ -n \"$top\" ] && kill -KILL \"$top\"\n\
+              exit 99\n",
         );
         let outcomes = run(&[step(&ok, &[]), step(&killer, &[]), step(&ok, &[])]);
         assert_eq!(
             outcomes,
             [
-                StepOutcome {
-                    status: Some(0),
-                    output: "fine\n".into()
-                },
-                StepOutcome {
-                    status: None,
-                    output: "dying\n".into()
-                },
-                StepOutcome {
-                    status: None,
-                    output: String::new()
-                },
+                outcome(Some(0), "fine"),
+                outcome(None, ""),
+                outcome(None, ""),
             ]
         );
     }
 
     #[test]
-    fn forged_marker_in_output_ignored() {
-        let t = FixtureTree::new();
-        let forger = t.write_exec(
-            "/usr/bin/forger",
-            b"#!/bin/sh\necho '@@crumbs 7 0'\necho '@@crumbs 1 0'\necho '@@crumbs 0 x'\nexit 4\n",
-        );
-        let ok = t.write_exec("/usr/bin/ok", b"#!/bin/sh\n");
-        let outcomes = run(&[step(&forger, &[]), step(&ok, &[])]);
-        assert_eq!(outcomes.len(), 2);
-        assert_eq!(outcomes[0].status, Some(4));
+    fn parser_accepts_only_prefixed_output_and_ordered_markers() {
+        let stdout = b"noise\n@@crumbs 1 0\n|a\n@@crumbs 0 2\n@@crumbs 0 0\n|b\n|c";
         assert_eq!(
-            outcomes[0].output,
-            "@@crumbs 7 0\n@@crumbs 1 0\n@@crumbs 0 x\n"
+            parse_markers(stdout, 2),
+            [outcome(Some(2), "a"), outcome(None, "b\nc")]
         );
-        assert_eq!(outcomes[1].status, Some(0));
-        assert_eq!(outcomes[1].output, "");
-    }
-
-    #[test]
-    fn markers_must_be_in_order() {
-        let outcomes = parse_markers(b"@@crumbs 1 0\n\n@@crumbs 0 2\n@@crumbs 0 0\n", 2);
-        assert_eq!(outcomes[0].status, Some(2));
-        assert_eq!(outcomes[0].output, "@@crumbs 1 0\n");
-        // The duplicate marker for step 0 is output of step 1, which never
-        // finished.
-        assert_eq!(outcomes[1].status, None);
-        assert_eq!(outcomes[1].output, "@@crumbs 0 0\n");
-        // Signs, spaces and overflow are not markers.
-        let outcomes = parse_markers(b"@@crumbs +0 0\n@@crumbs 0  0\n@@crumbs 0 99999999999\n", 1);
-        assert_eq!(outcomes[0].status, None);
+        // Signs, extra spaces, trailing text and overflow are not markers.
+        let stdout = b"@@crumbs +0 0\n@@crumbs 0  0\n@@crumbs 0 0 x\n@@crumbs 0 99999999999\n";
+        assert_eq!(parse_markers(stdout, 1), [outcome(None, "")]);
+        // A marker past the step count is ignored.
+        assert_eq!(
+            parse_markers(b"@@crumbs 0 0\n@@crumbs 1 0\n", 1),
+            [outcome(Some(0), "")]
+        );
         assert_eq!(parse_markers(b"", 0), []);
     }
 
     #[test]
-    fn marker_found_after_output_without_newline() {
-        let t = FixtureTree::new();
-        let bare = t.write_exec("/usr/bin/bare", b"#!/bin/sh\nprintf foo\nexit 5\n");
-        let line = t.write_exec("/usr/bin/line", b"#!/bin/sh\nprintf 'foo\\n'\n");
-        let quiet = t.write_exec("/usr/bin/quiet", b"#!/bin/sh\n");
-        let outcomes = run(&[step(&bare, &[]), step(&line, &[]), step(&quiet, &[])]);
+    fn nul_in_program_or_argument_is_refused() {
+        let err = build_script(&[step(Path::new("/usr/bin/rm"), &[b"a\0b"])]).unwrap_err();
+        assert!(matches!(err, BatchError::InvalidArgument(_)), "{err:?}");
+        let err = build_script(&[step(Path::new("/usr/bin/r\0m"), &[])]).unwrap_err();
+        assert!(matches!(err, BatchError::InvalidArgument(_)), "{err:?}");
+    }
+
+    #[test]
+    fn relative_program_is_refused() {
+        let err = build_script(&[step(Path::new("rm"), &[])]).unwrap_err();
+        assert_eq!(err, BatchError::RelativeProgram(PathBuf::from("rm")));
+    }
+
+    #[test]
+    fn oversize_script_is_refused() {
+        let big = vec![b'x'; 121 * 1024];
+        let err = build_script(&[step(Path::new("/usr/bin/rm"), &[&big])]).unwrap_err();
+        let BatchError::TooLarge { bytes } = err else {
+            panic!("{err:?}");
+        };
+        assert!(bytes > MAX_SCRIPT_BYTES);
         assert_eq!(
-            outcomes,
-            [
-                StepOutcome {
-                    status: Some(5),
-                    output: "foo".into()
-                },
-                // Only the separator newline is dropped; the program's own
-                // line ending stays, so there is no extra blank line.
-                StepOutcome {
-                    status: Some(0),
-                    output: "foo\n".into()
-                },
-                StepOutcome {
-                    status: Some(0),
-                    output: String::new()
-                },
-            ]
+            err.to_string(),
+            format!(
+                "too many items for one privileged run ({bytes} bytes); clean fewer categories at once"
+            )
         );
+        // Just under the limit is fine.
+        let ok = vec![b'x'; 100 * 1024];
+        assert!(build_script(&[step(Path::new("/usr/bin/rm"), &[&ok])]).is_ok());
     }
 
     #[test]
     fn header_clears_preload() {
         let t = FixtureTree::new();
-        let script = build_script(&[step(std::path::Path::new("/usr/bin/env"), &[])]);
-        assert!(script.starts_with(
-            b"export PATH=/usr/bin:/usr/sbin:/bin:/sbin LC_ALL=C; unset LD_PRELOAD LD_LIBRARY_PATH\n"
+        let script = build_script(&[step(Path::new("/usr/bin/env"), &[])]).unwrap();
+        assert!(script.starts_with(HEADER));
+        assert!(HEADER.starts_with(
+            b"export PATH=/usr/bin:/usr/sbin:/bin:/sbin LC_ALL=C; unset LD_PRELOAD LD_LIBRARY_PATH;"
         ));
-        // A hostile inherited environment does not reach the steps.
-        let out = Command::new("/bin/sh")
+        // A hostile inherited environment, including an exported shell
+        // function shadowing printf, does not reach or subvert the steps.
+        let out = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(OsStr::from_bytes(&script))
             .env("LD_PRELOAD", "")
             .env("LD_LIBRARY_PATH", t.dir.path())
             .env("PATH", t.dir.path())
             .env("LC_ALL", "de_DE.UTF-8")
+            .env("IFS", "x")
+            .env("BASH_FUNC_printf%%", "() { echo '@@crumbs 0 0'; }")
+            .stderr(Stdio::null())
             .output()
             .unwrap();
         let outcomes = parse_markers(&out.stdout, 1);
@@ -422,19 +513,44 @@ mod tests {
     }
 
     #[test]
+    fn header_survives_dash() {
+        // The header must not abort a strict POSIX shell either.
+        if !Path::new("/usr/bin/dash").exists() {
+            return;
+        }
+        let script = build_script(&[step(Path::new("/bin/true"), &[])]).unwrap();
+        let out = std::process::Command::new("/usr/bin/dash")
+            .arg("-c")
+            .arg(OsStr::from_bytes(&script))
+            .output()
+            .unwrap();
+        assert_eq!(parse_markers(&out.stdout, 1), [outcome(Some(0), "")]);
+    }
+
+    #[test]
     fn step_line_form() {
         let script = build_script(&[
-            step(
-                std::path::Path::new("/usr/bin/rm"),
-                &[b"-f", b"--", b"/var/x y"],
-            ),
-            step(std::path::Path::new("/usr/bin/true"), &[]),
-        ]);
-        let body = &script[script.iter().position(|&b| b == b'\n').unwrap() + 1..];
+            step(Path::new("/usr/bin/rm"), &[b"-f", b"--", b"/var/x y"]),
+            step(Path::new("/usr/bin/true"), &[]),
+        ])
+        .unwrap();
+        let body = &script[HEADER.len()..];
+        let tail: &[u8] = b" </dev/null 2>&1); __s=$?; case $__o in '') ;; *) \
+            command printf '%s\\n' \"$__o\" | while IFS= read -r __l; do \
+            command printf '|%s\\n' \"$__l\"; done ;; esac; \
+            command printf '@@crumbs %d %d\\n' ";
+        let want = [
+            b"__o=$('/usr/bin/rm' '-f' '--' '/var/x y'".as_slice(),
+            tail,
+            b"0 \"$__s\"\n",
+            b"__o=$('/usr/bin/true'",
+            tail,
+            b"1 \"$__s\"\n",
+        ]
+        .concat();
         assert_eq!(
-            body,
-            b"'/usr/bin/rm' '-f' '--' '/var/x y' </dev/null 2>&1; printf '\\n@@crumbs %d %d\\n' 0 \"$?\"\n\
-              '/usr/bin/true' </dev/null 2>&1; printf '\\n@@crumbs %d %d\\n' 1 \"$?\"\n"
+            String::from_utf8_lossy(body),
+            String::from_utf8_lossy(&want)
         );
     }
 
