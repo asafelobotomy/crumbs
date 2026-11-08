@@ -17,6 +17,8 @@ pub struct Config {
     pub exclude: Vec<String>,
     /// Extra directories scanned for AppImages.
     pub appimage_dirs: Vec<PathBuf>,
+    /// One message per entry dropped on load (never read from the file).
+    pub warnings: Vec<String>,
 }
 
 /// Raw file form; unknown keys are ignored so newer configs load on older
@@ -44,8 +46,8 @@ fn expand(env: &Env, s: &str) -> Option<String> {
 }
 
 /// Loads `{config_home}/crumbs/config.toml`. A missing file yields the
-/// default config. Relative `protect`/`appimage_dirs`/`exclude` entries are
-/// dropped.
+/// default config. Entries that are not absolute after `~` expansion are
+/// dropped, each with a message in `warnings`.
 pub fn load_config(env: &Env) -> Result<Config, CoreError> {
     let path = env.config_home.join("crumbs/config.toml");
     let text = match std::fs::read_to_string(&path) {
@@ -57,16 +59,29 @@ pub fn load_config(env: &Env) -> Result<Config, CoreError> {
         what: "config.toml".into(),
         message: e.to_string(),
     })?;
-    let paths = |v: &[String]| -> Vec<PathBuf> {
+    let mut warnings = Vec::new();
+    let mut strings = |key: &str, v: &[String]| -> Vec<String> {
         v.iter()
-            .filter_map(|s| expand(env, s))
-            .map(PathBuf::from)
+            .filter_map(|s| {
+                let r = expand(env, s);
+                if r.is_none() {
+                    warnings.push(format!(
+                        "config.toml: ignoring {key} entry '{s}' (must start with / or ~/)"
+                    ));
+                }
+                r
+            })
             .collect()
     };
+    let protect = strings("protect", &raw.protect);
+    let exclude = strings("exclude", &raw.exclude);
+    let appimage_dirs = strings("appimage_dirs", &raw.appimage_dirs);
+    let paths = |v: Vec<String>| v.into_iter().map(PathBuf::from).collect();
     Ok(Config {
-        protect: paths(&raw.protect),
-        exclude: raw.exclude.iter().filter_map(|s| expand(env, s)).collect(),
-        appimage_dirs: paths(&raw.appimage_dirs),
+        protect: paths(protect),
+        exclude,
+        appimage_dirs: paths(appimage_dirs),
+        warnings,
     })
 }
 
@@ -77,6 +92,12 @@ pub fn load_config(env: &Env) -> Result<Config, CoreError> {
 /// except that a pattern also matches anything beneath a path it matches
 /// (so the literal `/a/b` matches `/a/b/c/d`, split on a `/` boundary).
 pub fn glob_match(pattern: &str, path: &str) -> bool {
+    // A trailing slash (`~/.cache/`) means the directory itself.
+    let pattern = if pattern.len() > 1 {
+        pattern.trim_end_matches('/')
+    } else {
+        pattern
+    };
     let (p, s) = (pattern.as_bytes(), path.as_bytes());
     if matches_at(p, s) {
         return true;
@@ -141,6 +162,19 @@ mod tests {
     }
 
     #[test]
+    fn invalid_entries_warn() {
+        let t = FixtureTree::new();
+        t.write(
+            "/home/user/.config/crumbs/config.toml",
+            b"protect = [\"foo/bar\", \"/ok\"]\n",
+        );
+        let c = load_config(&t.env()).unwrap();
+        assert_eq!(c.protect, [PathBuf::from("/ok")]);
+        assert_eq!(c.warnings.len(), 1);
+        assert!(c.warnings[0].contains("foo/bar"), "{:?}", c.warnings);
+    }
+
+    #[test]
     fn unknown_keys_ignored() {
         let t = FixtureTree::new();
         t.write(
@@ -177,6 +211,8 @@ mod tests {
             ("/a/b", "/a/b/c/d", true),
             ("/a/b", "/a/bc", false),
             ("/a/b", "/a", false),
+            ("/a/b/", "/a/b", true),
+            ("/a/b/", "/a/b/c", true),
             ("/a/b.c", "/a/bxc", false),
         ];
         for (pat, path, want) in cases {
