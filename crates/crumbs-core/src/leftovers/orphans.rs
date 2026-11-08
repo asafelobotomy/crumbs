@@ -5,13 +5,16 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::command::TRUSTED_DIRS;
+use crate::config::Config;
 use crate::env::Env;
+use crate::ownership::tmpfiles_declared;
 use crate::rules::{Rule, RuleOrigin, resolve_rule_paths, rule_matches};
-use crate::safety::Scope;
+use crate::safety::{self, Scope};
 use crate::size::disk_usage;
 
 use super::candidates::{Candidate, Subject, lexical};
 use super::matcher::LeftoverIndex;
+use super::system::Claimant;
 use super::{Confidence, Finding, FindingKind};
 
 /// Names that belong to the desktop or the shell rather than to an app.
@@ -193,6 +196,77 @@ pub(crate) fn find_orphans_at(
             .cmp(&Reverse(b.confidence))
             .then_with(|| a.path.cmp(&b.path))
     });
+    out
+}
+
+/// Unowned real directories directly in `/opt` that no detected app claims
+/// (by any name, weak or strong, or a rule path) and that are not the
+/// program directory or `location` of one. Never looks in `/etc`. Always
+/// `Low`, never pre-selected, root-deleted (`Scope::SystemTree`) and
+/// verified now. Empty unless the package database was read completely
+/// and `tmpfiles.d` is readable. Sorted by path.
+pub fn find_system_orphans(env: &Env, cfg: &Config, idx: &LeftoverIndex) -> Vec<Finding> {
+    let inv = idx.inventory();
+    let owned = &inv.owned;
+    if owned.is_empty() || !owned.is_complete() {
+        return Vec::new();
+    }
+    let Ok(declared) = tmpfiles_declared(env) else {
+        return Vec::new();
+    };
+    let Ok(rd) = std::fs::read_dir(env.sys("/opt")) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = rd
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    let mut claimants: Option<Vec<Claimant>> = None;
+    let mut out = Vec::new();
+    for name in names {
+        let path = Path::new("/opt").join(&name);
+        let is_real_dir = std::fs::symlink_metadata(env.sys_path(&path)).is_ok_and(|m| m.is_dir());
+        if !is_real_dir
+            || !safety::is_system_leftover_name(std::ffi::OsStr::new(&name))
+            || owned.owns_at_or_below(&path)
+            || declared
+                .range::<Path, _>((
+                    std::ops::Bound::Included(path.as_path()),
+                    std::ops::Bound::Unbounded,
+                ))
+                .next()
+                .is_some_and(|first| first.starts_with(&path))
+            || inv.apps.iter().any(|a| {
+                [&a.program, &a.location]
+                    .into_iter()
+                    .flatten()
+                    .any(|p| p.starts_with(&path))
+            })
+        {
+            continue;
+        }
+        let claimants = claimants
+            .get_or_insert_with(|| inv.apps.iter().map(|a| Claimant::of(idx, a)).collect());
+        if claimants.iter().any(|c| c.claim(&path, &name).is_some()) {
+            continue;
+        }
+        let Ok(fingerprint) = safety::verify_now(env, cfg, Scope::SystemTree, &path) else {
+            continue;
+        };
+        out.push(Finding {
+            size: disk_usage(env, &path),
+            path,
+            kind: FindingKind::SystemData,
+            confidence: Confidence::Low,
+            shared: false,
+            reason: "not owned by any package and matched by no app".into(),
+            preselected: false,
+            scope: Scope::SystemTree,
+            fingerprint,
+            mime_lines: Vec::new(),
+        });
+    }
     out
 }
 

@@ -1300,4 +1300,60 @@ mod system {
         assert_eq!(names.len(), keys.len());
         assert!(keys.iter().any(|k| k.norm == "inkyapp"));
     }
+
+    fn sys_orphans(s: &Sys) -> Vec<Finding> {
+        crate::leftovers::find_system_orphans(&s.env, &Config::default(), &s.idx)
+    }
+
+    #[test]
+    fn system_orphan_is_unowned_unclaimed_opt_dir_only() {
+        let t = FixtureTree::new();
+        t.write("opt/old-app/bin", b"x");
+        t.write("etc/old-app/conf", b"x");
+        t.write("opt/plain-file", b"x");
+        t.write("opt/owned-dir/f", b"x");
+        t.write("opt/inky/bin", b"x");
+        t.write("opt/vendor/bin", b"x");
+        let mut inky = pacman("inky", &[]);
+        inky.program = Some(PathBuf::from("/opt/vendor/bin"));
+        let s = sys(
+            &t,
+            vec![inky],
+            owned(&["/usr/bin/true", "/opt/owned-dir/f"]),
+            &[],
+        );
+        let fs = sys_orphans(&s);
+        let paths: Vec<&Path> = fs.iter().map(|f| f.path.as_path()).collect();
+        assert_eq!(paths, [Path::new("/opt/old-app")], "{fs:#?}");
+        let f = &fs[0];
+        assert_eq!(f.kind, FindingKind::SystemData);
+        assert_eq!(f.confidence, Confidence::Low);
+        assert!(!f.preselected);
+        assert_eq!(f.scope, Scope::SystemTree);
+        assert_eq!(f.reason, "not owned by any package and matched by no app");
+        assert_eq!(f.size.files, 1);
+    }
+
+    #[test]
+    fn system_orphan_skips_weak_claims_and_tmpfiles_and_incomplete_index() {
+        let t = FixtureTree::new();
+        t.write("opt/weak/bin", b"x");
+        t.write("opt/runtime/bin", b"x");
+        t.write("opt/old-app/bin", b"x");
+        t.write(
+            "usr/lib/tmpfiles.d/x.conf",
+            b"d /opt/runtime 0755 root root -\n",
+        );
+        // `weak` is only an Exec basename of the app.
+        let s = sys(
+            &t,
+            vec![pacman("something", &["weak"])],
+            owned(&["/usr/bin/true"]),
+            &[],
+        );
+        let paths: Vec<_> = sys_orphans(&s).into_iter().map(|f| f.path).collect();
+        assert_eq!(paths, [PathBuf::from("/opt/old-app")]);
+        let s = sys(&t, Vec::new(), OwnedIndex::default(), &[]);
+        assert!(sys_orphans(&s).is_empty());
+    }
 }

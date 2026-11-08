@@ -16,7 +16,7 @@ use crate::safety::{Fingerprint, Scope};
 use crate::size::DiskUsage;
 
 pub use matcher::{LeftoverIndex, find_leftovers};
-pub use orphans::find_orphans;
+pub use orphans::{find_orphans, find_system_orphans};
 pub use system::find_system_leftovers;
 
 /// How sure the matcher is that a finding belongs to the app. Ordered

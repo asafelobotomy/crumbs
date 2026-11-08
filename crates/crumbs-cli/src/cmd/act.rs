@@ -22,7 +22,7 @@ use serde_json::json;
 use super::context::print_notes;
 use super::manual::{is_privileged, manual_commands};
 use super::render;
-use crate::output::{ErrorEntry, finding_kind, fmt_size, print_json_entries};
+use crate::output::{ErrorEntry, finding_kind, print_json_entries};
 use crate::prompt;
 
 /// Flags shared by the commands that change files.
@@ -227,7 +227,7 @@ pub fn choose(
             format!(
                 "{:<12} {:>10}  {}{shared}",
                 finding_kind(f.kind),
-                fmt_size(f.size.bytes),
+                render::finding_size(&f.size),
                 render::shown_path(env, &f.path)
             )
         })

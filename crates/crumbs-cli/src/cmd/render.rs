@@ -5,7 +5,9 @@ use std::io::Write;
 use crumbs_core::Env;
 use crumbs_core::env::display_path;
 use crumbs_core::executor::ExecReport;
-use crumbs_core::plan::{Action, Plan};
+use crumbs_core::plan::{Action, Plan, PlannedAction};
+use crumbs_core::safety::Scope;
+use crumbs_core::size::DiskUsage;
 
 use super::manual::{is_privileged, root_command};
 use crate::output::{fmt_size, print_table_with_details};
@@ -17,6 +19,24 @@ fn verb(a: &Action) -> &'static str {
         Action::EditFile { .. } => "edit",
         Action::UserCommand { .. } | Action::PrivilegedCommand { .. } => "run",
         Action::PackageRemove { .. } => "remove",
+    }
+}
+
+/// The action column of a preview row: a root delete says so.
+fn row_verb(a: &PlannedAction) -> &'static str {
+    match (&a.action, a.scope) {
+        (Action::Delete { .. }, Scope::SystemTree) => "delete (as root)",
+        (action, _) => verb(action),
+    }
+}
+
+/// A finding's size; `-` when part of it could not be read and nothing
+/// was counted.
+pub fn finding_size(size: &DiskUsage) -> String {
+    if size.errors > 0 && size.bytes == 0 {
+        "-".into()
+    } else {
+        fmt_size(size.bytes)
     }
 }
 
@@ -135,7 +155,7 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
                         _ => fmt_size(a.size),
                     };
                     vec![
-                        verb(&a.action).to_string(),
+                        row_verb(a).to_string(),
                         size,
                         preview_target(env, &a.action),
                         sanitise(&a.reason),

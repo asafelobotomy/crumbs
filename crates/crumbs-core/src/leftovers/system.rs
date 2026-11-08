@@ -69,7 +69,7 @@ pub(crate) fn strong_name_sets(app: &App) -> (Vec<String>, Vec<NameKey>) {
 }
 
 /// What one app claims in `/etc` and `/opt`, computed once per app.
-struct Claimant {
+pub(crate) struct Claimant {
     /// `(path, reason)` of rule paths.
     rule_paths: Vec<(PathBuf, String)>,
     /// Names from the app name, desktop-id stems and reverse-DNS id.
@@ -80,7 +80,7 @@ struct Claimant {
 }
 
 impl Claimant {
-    fn of(idx: &LeftoverIndex, app: &App) -> Claimant {
+    pub(crate) fn of(idx: &LeftoverIndex, app: &App) -> Claimant {
         let mut rule_paths = Vec::new();
         for rule in rules_for(idx.rules(), app) {
             let reason = match &rule.origin {
@@ -109,7 +109,7 @@ impl Claimant {
     /// How the app claims the entry `name` at `path`, if it does: Medium
     /// for an exact name or a rule path, Low for a normalised match or a
     /// match on an `Exec` basename alone.
-    fn claim(&self, path: &Path, name: &str) -> Option<(Confidence, String)> {
+    pub(crate) fn claim(&self, path: &Path, name: &str) -> Option<(Confidence, String)> {
         if let Some((_, reason)) = self.rule_paths.iter().find(|(p, _)| p == path) {
             return Some((Confidence::Medium, reason.clone()));
         }

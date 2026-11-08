@@ -8,9 +8,11 @@ use clap::Args;
 use crumbs_core::command::SystemRunner;
 use crumbs_core::desktop::parse_desktop;
 use crumbs_core::inventory::{Inventory, Resolved, find_app, find_app_exact};
-use crumbs_core::leftovers::{Finding, FindingKind, find_leftovers};
-use crumbs_core::plan::{NOTE_APP_STAYS, Plan, PlanOptions, PlannedAction, build_plan};
-use crumbs_core::removal::{RemovalError, RemovalPlan, plan_removal};
+use crumbs_core::leftovers::{Finding, FindingKind, find_leftovers, find_system_leftovers};
+use crumbs_core::plan::{NOTE_APP_STAYS, Plan, PlanOptions, PlannedAction, build_plan_unmanaged};
+use crumbs_core::removal::{
+    RemovalError, RemovalPlan, UnmanagedTarget, plan_removal, plan_unmanaged,
+};
 use crumbs_core::safety::{self, Fingerprint, Scope};
 use crumbs_core::{App, Env, SourceKind};
 
@@ -60,16 +62,24 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
         }
     }
     // How each app itself goes, in `apps` order; none with --leftovers-only.
+    // An unmanaged app goes by its path (`plan_unmanaged`), the rest by
+    // their package manager.
     let mut removals: Vec<Option<RemovalPlan>> = Vec::new();
+    let mut unmanaged: Vec<Option<UnmanagedTarget>> = Vec::new();
     for app in &apps {
-        if args.leftovers_only {
-            removals.push(None);
-            continue;
+        let (mut removal, mut target) = (None, None);
+        if !args.leftovers_only {
+            let planned = if app.source == SourceKind::Unmanaged {
+                plan_unmanaged(env, &cx.cfg, &cx.inv, app).map(|t| target = Some(t))
+            } else {
+                plan_removal(env, &SystemRunner::new(), app).map(|r| removal = Some(r))
+            };
+            if let Err(e) = planned {
+                return refuse_removal(out, app, &e);
+            }
         }
-        match plan_removal(env, &SystemRunner::new(), app) {
-            Ok(r) => removals.push(Some(r)),
-            Err(e) => return refuse_removal(out, app, &e),
-        }
+        removals.push(removal);
+        unmanaged.push(target);
     }
     if !args.leftovers_only {
         for app in &apps {
@@ -92,8 +102,16 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
         leftovers_only: args.leftovers_only,
     };
     let mut targets = Vec::new();
-    for (app, removal) in apps.into_iter().zip(removals) {
+    for ((app, removal), target) in apps.into_iter().zip(removals).zip(unmanaged) {
         let mut found = plannable(find_leftovers(&cx.idx, app, args.show_low));
+        // Offered, never pre-selected: root deletes only on an explicit pick.
+        found.extend(find_system_leftovers(
+            env,
+            &cx.cfg,
+            &cx.idx,
+            app,
+            args.show_low,
+        ));
         found.retain(|f| keeps(env, app, f, args));
         let prompt_text = format!("Leftovers of {} to remove", sanitise(&app.display_name));
         let Some(chosen) = choose(env, &prompt_text, found, args.act.interactive, |f| {
@@ -102,7 +120,7 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
         else {
             return out.aborted();
         };
-        let mut plan = build_plan(env, Some(app), &chosen, &opts)?;
+        let mut plan = build_plan_unmanaged(env, Some(app), target.as_ref(), &chosen, &opts)?;
         if let Some(removal) = removal {
             attach_removal(&mut plan, removal);
         }
@@ -291,7 +309,7 @@ fn resolve<'a>(
 mod tests {
     use super::*;
     use crumbs_core::leftovers::Confidence;
-    use crumbs_core::plan::Action;
+    use crumbs_core::plan::{Action, build_plan};
     use crumbs_core::safety::{Fingerprint, Scope};
     use crumbs_core::size::DiskUsage;
     use crumbs_core::testing::FixtureTree;
