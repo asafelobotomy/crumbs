@@ -1,7 +1,7 @@
 //! Orphans: leftovers that no installed app claims.
 
 use std::cmp::Reverse;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::command::TRUSTED_DIRS;
 use crate::env::Env;
@@ -105,8 +105,8 @@ pub fn find_orphans(idx: &LeftoverIndex, show_low: bool) -> Vec<Finding> {
     let apps = &idx.inventory().apps;
 
     // Resolved paths of every rule, split by whether an installed app uses it.
-    let mut live: Vec<std::path::PathBuf> = Vec::new();
-    let mut gone: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut live: Vec<PathBuf> = Vec::new();
+    let mut gone: Vec<(PathBuf, String)> = Vec::new();
     for rule in idx.rules() {
         let installed = apps.iter().any(|a| rule_matches(rule, a));
         let paths = resolve_rule_paths(env, rule)
@@ -125,12 +125,12 @@ pub fn find_orphans(idx: &LeftoverIndex, show_low: bool) -> Vec<Finding> {
 
     // Paths an installed app owns: a candidate holding one of them (a shared
     // parent such as `~/.mozilla`) must stay, or trashing it takes them too.
-    let claimed: Vec<&Path> = idx
+    let claimed: Vec<PathBuf> = idx
         .candidates()
         .iter()
         .enumerate()
         .filter(|(i, _)| idx.matched_by_any(*i))
-        .map(|(_, c)| c.path.as_path())
+        .map(|(_, c)| c.path.clone())
         .collect();
 
     let mut out: Vec<Finding> = Vec::new();
@@ -150,10 +150,7 @@ pub fn find_orphans(idx: &LeftoverIndex, show_low: bool) -> Vec<Finding> {
         if !eligible
             || idx.matched_by_any(i)
             || is_ignored(env, c)
-            || live
-                .iter()
-                .any(|p| c.path.starts_with(p) || p.starts_with(&c.path))
-            || claimed.iter().any(|p| p.starts_with(&c.path))
+            || shadowed_by_live(&c.path, &live, &claimed)
         {
             continue;
         }
@@ -181,11 +178,7 @@ pub fn find_orphans(idx: &LeftoverIndex, show_low: bool) -> Vec<Finding> {
     out
 }
 
-fn classify(
-    env: &Env,
-    c: &Candidate,
-    gone: &[(std::path::PathBuf, String)],
-) -> (Confidence, String) {
+fn classify(env: &Env, c: &Candidate, gone: &[(PathBuf, String)]) -> (Confidence, String) {
     if let Some((_, reason)) = gone.iter().find(|(p, _)| c.path.starts_with(p)) {
         return (Confidence::High, reason.clone());
     }
@@ -205,5 +198,38 @@ fn classify(
             Confidence::Low,
             "does not match any installed app".to_string(),
         ),
+    }
+}
+
+/// Whether trashing `candidate` would touch something an installed app owns:
+/// it is equal to or inside a `live` rule path, or it holds (is an ancestor
+/// of) a `live` rule path or a path in `claimed`.
+fn shadowed_by_live(candidate: &Path, live: &[PathBuf], claimed: &[PathBuf]) -> bool {
+    live.iter()
+        .any(|p| candidate.starts_with(p) || p.starts_with(candidate))
+        || claimed.iter().any(|p| p.starts_with(candidate))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shadowed_by_live_table() {
+        let p = |s: &str| PathBuf::from(s);
+        let live = [p("/h/.mozilla/firefox")];
+        assert!(shadowed_by_live(Path::new("/h/.mozilla"), &live, &[]));
+        assert!(shadowed_by_live(
+            Path::new("/h/.mozilla/firefox/x"),
+            &live,
+            &[]
+        ));
+        assert!(!shadowed_by_live(Path::new("/h/.mozillax"), &live, &[]));
+        assert!(shadowed_by_live(
+            Path::new("/h/.mozilla"),
+            &[],
+            &[p("/h/.mozilla/firefox")]
+        ));
+        assert!(!shadowed_by_live(Path::new("/h/.mozilla"), &[], &[]));
     }
 }

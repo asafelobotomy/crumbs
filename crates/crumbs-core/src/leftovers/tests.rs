@@ -781,7 +781,7 @@ fn orphans_never_preselected() {
 }
 
 #[test]
-fn parent_of_live_rule_path_not_orphan() {
+fn regression_parent_of_live_rule_path_not_orphan() {
     let t = FixtureTree::new();
     t.mkdir("/home/user/.mozilla/firefox/profile");
     let fs = orphans(&t, vec![pacman("firefox", &["firefox"])], true);
@@ -789,7 +789,7 @@ fn parent_of_live_rule_path_not_orphan() {
 }
 
 #[test]
-fn live_rule_path_unclaimed_by_name_not_orphan() {
+fn regression_equal_live_rule_path_not_orphan() {
     let t = FixtureTree::new();
     t.mkdir("/home/user/.config/BraveSoftware/Brave-Browser");
     let fs = orphans(&t, vec![pacman("brave-bin", &["brave"])], true);
@@ -797,7 +797,7 @@ fn live_rule_path_unclaimed_by_name_not_orphan() {
 }
 
 #[test]
-fn path_live_for_one_rule_and_gone_for_another_not_orphan() {
+fn regression_path_live_for_one_rule_gone_for_another_not_orphan() {
     let t = FixtureTree::new();
     t.mkdir("/home/user/.vscode-oss/extensions");
     let fs = orphans(&t, vec![pacman("vscodium", &["codium"])], true);
