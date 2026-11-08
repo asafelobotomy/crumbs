@@ -1,0 +1,11 @@
+[package]
+name = "crumbs-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "crumbs"
+path = "src/main.rs"
+
+[dependencies]
