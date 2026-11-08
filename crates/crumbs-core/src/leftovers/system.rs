@@ -4,11 +4,13 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::ops::Bound;
+use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::env::Env;
 use crate::model::{App, SourceKind};
+use crate::ownership::tmpfiles_declared;
 use crate::rules::{RuleOrigin, expand_system_rule_path, rules_for};
 use crate::safety::{self, Scope};
 use crate::size::disk_usage;
@@ -50,39 +52,71 @@ pub(crate) fn app_name_sets(app: &App) -> (Vec<String>, Vec<NameKey>) {
     (names, keys)
 }
 
-/// How `app` claims the entry `name` at `path`, if it does: Medium for an
-/// exact name or a rule path, Low for a normalised match.
-fn claim(idx: &LeftoverIndex, app: &App, path: &Path, name: &str) -> Option<(Confidence, String)> {
-    for rule in rules_for(idx.rules(), app) {
-        if rule
-            .paths
-            .iter()
-            .filter_map(|p| expand_system_rule_path(p))
-            .any(|p| p == path)
-        {
+/// What one app claims in `/etc` and `/opt`, computed once per app.
+struct Claimant {
+    /// `(path, reason)` of rule paths.
+    rule_paths: Vec<(PathBuf, String)>,
+    /// Names from the app name, desktop-id stems and reverse-DNS id.
+    strong: Vec<String>,
+    /// Every exact name, `Exec` basenames included.
+    all: Vec<String>,
+    keys: Vec<NameKey>,
+}
+
+impl Claimant {
+    fn of(idx: &LeftoverIndex, app: &App) -> Claimant {
+        let mut rule_paths = Vec::new();
+        for rule in rules_for(idx.rules(), app) {
             let reason = match &rule.origin {
                 RuleOrigin::Builtin => "listed in a curated rule".to_string(),
                 RuleOrigin::User(f) => format!("listed in rule file {}", f.display()),
             };
-            return Some((Confidence::Medium, reason));
+            rule_paths.extend(
+                rule.paths
+                    .iter()
+                    .filter_map(|p| expand_system_rule_path(p))
+                    .map(|p| (p, reason.clone())),
+            );
+        }
+        let (all, keys) = app_name_sets(app);
+        let mut no_exec = app.clone();
+        no_exec.exec_names.clear();
+        let (strong, _) = app_name_sets(&no_exec);
+        Claimant {
+            rule_paths,
+            strong,
+            all,
+            keys,
         }
     }
-    let (names, keys) = app_name_sets(app);
-    if names.iter().any(|n| n == name) {
-        return Some((
-            Confidence::Medium,
-            format!("named after the app ('{name}')"),
-        ));
+
+    /// How the app claims the entry `name` at `path`, if it does: Medium
+    /// for an exact name or a rule path, Low for a normalised match or a
+    /// match on an `Exec` basename alone.
+    fn claim(&self, path: &Path, name: &str) -> Option<(Confidence, String)> {
+        if let Some((_, reason)) = self.rule_paths.iter().find(|(p, _)| p == path) {
+            return Some((Confidence::Medium, reason.clone()));
+        }
+        if self.strong.iter().any(|n| n == name) {
+            return Some((
+                Confidence::Medium,
+                format!("named after the app ('{name}')"),
+            ));
+        }
+        if self.all.iter().any(|n| n == name) {
+            return Some((Confidence::Low, format!("named after the program '{name}'")));
+        }
+        let entry = NameKey::new(name);
+        self.keys
+            .iter()
+            .find(|k| k.norm == entry.norm || k.norm == entry.unversioned)
+            .map(|k| {
+                (
+                    Confidence::Low,
+                    format!("name resembles the app name '{}'", k.raw),
+                )
+            })
     }
-    let entry = NameKey::new(name);
-    keys.iter()
-        .find(|k| k.norm == entry.norm || k.norm == entry.unversioned)
-        .map(|k| {
-            (
-                Confidence::Low,
-                format!("name resembles the app name '{}'", k.raw),
-            )
-        })
 }
 
 /// Unowned direct children of `/etc` and `/opt` that `app` claims, for the
@@ -106,6 +140,18 @@ pub fn find_system_leftovers(
     let Some(ai) = inv.apps.iter().position(|a| a.id == app.id) else {
         return Vec::new();
     };
+    // A package's runtime directories (tmpfiles.d) are never leftovers.
+    let Ok(declared) = tmpfiles_declared(env) else {
+        return Vec::new();
+    };
+    let mine = Claimant::of(idx, &inv.apps[ai]);
+    let others: Vec<(&App, Claimant)> = inv
+        .apps
+        .iter()
+        .enumerate()
+        .filter(|&(o, _)| o != ai)
+        .map(|(_, a)| (a, Claimant::of(idx, a)))
+        .collect();
     let mut out: Vec<Finding> = Vec::new();
     for (dir, kind) in [
         ("/etc", FindingKind::SystemConfig),
@@ -123,22 +169,21 @@ pub fn find_system_leftovers(
             let path = Path::new(dir).join(&name);
             if !safety::is_system_leftover_name(std::ffi::OsStr::new(&name))
                 || owned.owns_at_or_below(&path)
+                || declared
+                    .range::<Path, _>((Bound::Included(path.as_path()), Bound::Unbounded))
+                    .next()
+                    .is_some_and(|first| first.starts_with(&path))
             {
                 continue;
             }
-            let Some((mut confidence, mut reason)) = claim(idx, &inv.apps[ai], &path, &name) else {
+            let Some((mut confidence, mut reason)) = mine.claim(&path, &name) else {
                 continue;
             };
-            // Another installed app with an equally firm claim shares it.
-            let others: HashSet<&str> = inv
-                .apps
+            // Any claim by another installed app shares it.
+            let others: HashSet<&str> = others
                 .iter()
-                .enumerate()
-                .filter(|&(o, _)| o != ai)
-                .filter(|(_, a)| {
-                    claim(idx, a, &path, &name).is_some_and(|(c, _)| c >= Confidence::Medium)
-                })
-                .map(|(_, a)| a.display_name.as_str())
+                .filter(|(_, c)| c.claim(&path, &name).is_some())
+                .map(|(a, _)| a.display_name.as_str())
                 .collect();
             let shared = !others.is_empty();
             if shared {

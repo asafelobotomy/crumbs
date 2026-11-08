@@ -1222,6 +1222,54 @@ mod system {
     }
 
     #[test]
+    fn tmpfiles_declared_directory_is_not_offered() {
+        let t = FixtureTree::new();
+        t.mkdir("etc/openvpn");
+        t.write(
+            "usr/lib/tmpfiles.d/openvpn.conf",
+            b"d /etc/openvpn/client 0750 openvpn network -\n",
+        );
+        let s = sys(
+            &t,
+            vec![pacman("openvpn", &[])],
+            owned(&["/usr/bin/true"]),
+            &[],
+        );
+        assert!(s.find(0, true).is_empty());
+    }
+
+    #[test]
+    fn exec_basename_alone_is_low() {
+        let t = FixtureTree::new();
+        t.mkdir("etc/wine");
+        let s = sys(
+            &t,
+            vec![pacman("wine-staging", &["wine"])],
+            owned(&["/usr/bin/true"]),
+            &[],
+        );
+        assert!(s.find(0, false).is_empty());
+        let fs = s.find(0, true);
+        assert_eq!(fs.len(), 1, "{fs:#?}");
+        assert_eq!(fs[0].confidence, Confidence::Low);
+    }
+
+    #[test]
+    fn another_apps_low_claim_marks_shared() {
+        let t = FixtureTree::new();
+        t.mkdir("etc/brave");
+        let s = sys(
+            &t,
+            vec![pacman("brave", &[]), pacman("Brave", &["x-brave"])],
+            owned(&["/usr/bin/true"]),
+            &[],
+        );
+        let fs = s.find(0, true);
+        assert_eq!(fs.len(), 1, "{fs:#?}");
+        assert!(fs[0].shared);
+    }
+
+    #[test]
     fn app_name_sets_lists_exact_names_and_keys() {
         let mut app = pacman("inky-app", &["inky"]);
         app.desktop_ids = vec!["org.inky.Inky.desktop".into()];

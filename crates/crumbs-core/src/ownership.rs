@@ -97,10 +97,74 @@ pub fn load_pacman(env: &Env) -> Result<Option<OwnedIndex>, CoreError> {
     Ok(Some(OwnedIndex::new(files, dirs, true)))
 }
 
+/// Paths that `tmpfiles.d` declares (`/usr/lib/tmpfiles.d` and
+/// `/etc/tmpfiles.d`, every `*.conf`): runtime directories a package creates
+/// without listing them. The second field of each line is the path; lines
+/// with `%` specifiers are ignored. A missing directory is fine; an
+/// unreadable one is an error.
+pub fn tmpfiles_declared(env: &Env) -> Result<BTreeSet<PathBuf>, CoreError> {
+    let io_err = |path: &Path, source| CoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let mut out = BTreeSet::new();
+    for dir in ["/usr/lib/tmpfiles.d", "/etc/tmpfiles.d"] {
+        let dir = env.sys(dir);
+        let rd = match fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(io_err(&dir, e)),
+        };
+        for entry in rd {
+            let path = entry.map_err(|e| io_err(&dir, e))?.path();
+            if path.extension().is_none_or(|x| x != "conf") {
+                continue;
+            }
+            let text = fs::read_to_string(&path).map_err(|e| io_err(&path, e))?;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let Some(p) = line.split_whitespace().nth(1) else {
+                    continue;
+                };
+                if p.contains('%') || !p.starts_with('/') {
+                    continue;
+                }
+                out.insert(PathBuf::from(p.trim_end_matches('/')));
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testing::FixtureTree;
+
+    #[test]
+    fn tmpfiles_paths_are_parsed() {
+        let t = FixtureTree::new();
+        t.write(
+            "usr/lib/tmpfiles.d/a.conf",
+            b"# c\n\nd /etc/openvpn/client 0750 o n -\nd /run/%u 0700\nz /opt/x - - -\n",
+        );
+        t.write("etc/tmpfiles.d/b.conf", b"f /etc/y 0644\n");
+        t.write("etc/tmpfiles.d/b.txt", b"f /etc/ignored 0644\n");
+        let got = tmpfiles_declared(&t.env()).unwrap();
+        let want: BTreeSet<PathBuf> = ["/etc/openvpn/client", "/opt/x", "/etc/y"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        assert_eq!(got, want);
+        assert!(
+            tmpfiles_declared(&FixtureTree::new().env())
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn dirs_from_files_section_are_owned() {

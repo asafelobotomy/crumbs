@@ -103,6 +103,16 @@ fn parse_rules(text: &str, what: &str, origin: &RuleOrigin) -> (Vec<Rule>, Vec<C
             ));
             continue;
         }
+        for path in raw.paths.iter().filter(|p| p.starts_with('/')) {
+            if expand_system_rule_path(path).is_none() {
+                errors.push(parse_error(
+                    what,
+                    format!(
+                        "rule path {path} ignored: only /etc/<name> or /opt/<name> are allowed outside home"
+                    ),
+                ));
+            }
+        }
         rules.push(Rule {
             packages: m.package,
             flatpaks: m.flatpak,
@@ -303,6 +313,28 @@ fn glob_siblings(env: &Env, pattern: &Path, prefix: &str) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use crate::model::SourceKind;
+
+    #[test]
+    fn invalid_absolute_rule_path_warns_but_keeps_rule() {
+        let t = FixtureTree::new();
+        user_rule_file(
+            &t,
+            "sys.toml",
+            "[[app]]\nmatch = { package = [\"x\"] }\npaths = [\"/etc/x\", \"/etc/x/y\", \"/usr/bin/x\", \"~/.x\"]\n",
+        );
+        let (rules, errors) = load_rules(&t.env());
+        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+        assert_eq!(msgs.len(), 2, "{msgs:?}");
+        for p in ["/etc/x/y", "/usr/bin/x"] {
+            assert!(
+                msgs.iter().any(|m| m.contains(&format!(
+                    "rule path {p} ignored: only /etc/<name> or /opt/<name> are allowed outside home"
+                ))),
+                "{p}: {msgs:?}"
+            );
+        }
+        assert!(rules.iter().any(|r| r.paths.len() == 4));
+    }
 
     #[test]
     fn system_rule_paths_are_etc_or_opt_children_only() {
