@@ -230,13 +230,7 @@ pub fn find_system_orphans(env: &Env, cfg: &Config, idx: &LeftoverIndex) -> Vec<
         if !is_real_dir
             || !safety::is_system_leftover_name(std::ffi::OsStr::new(&name))
             || owned.owns_at_or_below(&path)
-            || declared
-                .range::<Path, _>((
-                    std::ops::Bound::Included(path.as_path()),
-                    std::ops::Bound::Unbounded,
-                ))
-                .next()
-                .is_some_and(|first| first.starts_with(&path))
+            || declared.covers(&path)
             || inv.apps.iter().any(|a| {
                 [&a.program, &a.location]
                     .into_iter()

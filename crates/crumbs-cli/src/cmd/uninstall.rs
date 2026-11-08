@@ -9,7 +9,9 @@ use crumbs_core::command::SystemRunner;
 use crumbs_core::desktop::parse_desktop;
 use crumbs_core::inventory::{Inventory, Resolved, find_app, find_app_exact};
 use crumbs_core::leftovers::{Finding, FindingKind, find_leftovers, find_system_leftovers};
-use crumbs_core::plan::{NOTE_APP_STAYS, Plan, PlanOptions, PlannedAction, build_plan_unmanaged};
+use crumbs_core::plan::{
+    NOTE_APP_STAYS, Plan, PlanOptions, PlannedAction, build_plan_unmanaged, is_system_leftover,
+};
 use crumbs_core::removal::{
     RemovalError, RemovalPlan, UnmanagedTarget, plan_removal, plan_unmanaged,
 };
@@ -167,7 +169,9 @@ const REASON_APP: &str = "the app itself";
 
 /// Puts the actions that remove the app itself first in `plan`, each
 /// depending on the one before; every leftover then depends on the last of
-/// them, so nothing of the app's goes unless all of the app did. Nothing
+/// them, so nothing of the app's goes unless all of the app did. A system
+/// leftover depends on nothing: it was picked by hand and no package owns
+/// it (as with `--leftovers-only`), and the root batch cannot wait. Nothing
 /// changes when there are none (an AppImage's file is already in the
 /// plan).
 fn attach_removal(plan: &mut Plan, removal: RemovalPlan) {
@@ -177,6 +181,9 @@ fn attach_removal(plan: &mut Plan, removal: RemovalPlan) {
     }
     plan.notes.retain(|note| note != NOTE_APP_STAYS);
     for pa in &mut plan.actions {
+        if is_system_leftover(pa) {
+            continue;
+        }
         pa.depends_on = Some(pa.depends_on.map_or(n - 1, |d| d + n));
     }
     let first: Vec<PlannedAction> = removal
@@ -196,6 +203,7 @@ fn attach_removal(plan: &mut Plan, removal: RemovalPlan) {
             scope: Scope::Home,
             depends_on: k.checked_sub(1),
             depends_on_plan: None,
+            size_known: true,
             reason: REASON_APP.into(),
         })
         .collect();
@@ -393,6 +401,87 @@ mod tests {
         assert_eq!(deps, [None, Some(0), Some(1), Some(1)]);
         assert!(!plan.notes.iter().any(|n| n == NOTE_APP_STAYS));
         assert!(plan.notes.iter().any(|n| n == NOTE_NO_UNDO));
+    }
+
+    #[test]
+    fn pacman_removal_with_picked_etc_leftover_runs_in_one_batch() {
+        use crumbs_core::config::Config;
+        use crumbs_core::executor::execute_full;
+        use crumbs_core::privilege::{Escalation, EscalationKind};
+        use crumbs_core::size::disk_usage;
+        use crumbs_core::testing::{FakePrivilegedRunner, FakeRunner};
+        use std::os::unix::fs::PermissionsExt;
+
+        let t = FixtureTree::new();
+        t.pacman_pkg("inky", "1.0-1", Some(1), &["usr/bin/inky"]);
+        t.write_exec("usr/bin/pacman", b"#!/bin/sh\nexit 0\n");
+        t.write_exec("usr/bin/rm", b"#!/bin/sh\nexec /usr/bin/rm \"$@\"\n");
+        t.write_exec("usr/bin/sh", b"#!/bin/sh\nexec /bin/sh \"$@\"\n");
+        t.write_exec(
+            "usr/bin/readlink",
+            b"#!/bin/sh\nexec /usr/bin/readlink \"$@\"\n",
+        );
+        t.write(
+            "proc/self/mountinfo",
+            b"36 35 98:0 /mnt1 / rw,noatime master:1 - ext3 /dev/root rw\n",
+        );
+        t.write("etc/inky/inky.conf", b"x");
+        t.write("home/user/.cache/inky/blob", b"b");
+        for rel in ["", "etc"] {
+            std::fs::set_permissions(t.dir.path().join(rel), PermissionsExt::from_mode(0o755))
+                .unwrap();
+        }
+        let mut env = t.env();
+        env.set_system_owner_uid(env.uid);
+        let scanned = |path: &str, kind, scope| {
+            let mut f = finding(path, kind);
+            f.scope = scope;
+            f.size = disk_usage(&env, Path::new(path));
+            f.fingerprint = safety::fingerprint(&env, Path::new(path)).unwrap();
+            f
+        };
+        let app = App::new(SourceKind::Pacman, "pacman:inky");
+        let findings = [
+            scanned("/home/user/.cache/inky", FindingKind::Cache, Scope::Home),
+            scanned("/etc/inky", FindingKind::SystemConfig, Scope::SystemTree),
+        ];
+        let mut plan = build_plan(&env, Some(&app), &findings, &PlanOptions::default()).unwrap();
+        let removal = RemovalPlan {
+            actions: vec![Action::PackageRemove {
+                source: SourceKind::Pacman,
+                names: vec!["inky".into()],
+                versions: vec!["1.0-1".into()],
+                program: "pacman".into(),
+                args: vec!["-Rns".into(), "--noconfirm".into(), "inky".into()],
+            }],
+            ..RemovalPlan::default()
+        };
+        attach_removal(&mut plan, removal);
+        let deps: Vec<Option<usize>> = plan.actions.iter().map(|a| a.depends_on).collect();
+        // The home leftover waits for the package; the picked system
+        // leftover for nothing.
+        assert_eq!(deps, [None, Some(0), None]);
+        let pr = FakePrivilegedRunner::default();
+        let esc = Escalation {
+            kind: EscalationKind::Pkexec,
+            program: "/usr/bin/pkexec".into(),
+            requires_tty: false,
+        };
+        let report = execute_full(
+            &env,
+            &Config::default(),
+            &plan,
+            &FakeRunner::new(),
+            &pr,
+            Some(&esc),
+            &|_, _, _| Ok(Vec::new()),
+        );
+        for r in &report.results {
+            assert!(r.ok, "{r:?}");
+        }
+        assert_eq!(pr.calls.lock().unwrap().len(), 1, "one batch");
+        assert!(!env.sys("/etc/inky").exists());
+        assert!(!env.sys("/home/user/.cache/inky").exists());
     }
 
     #[test]

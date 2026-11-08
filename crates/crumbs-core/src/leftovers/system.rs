@@ -5,7 +5,6 @@
 use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::fs;
-use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
@@ -180,10 +179,7 @@ pub fn find_system_leftovers(
             let path = Path::new(dir).join(&name);
             if !safety::is_system_leftover_name(std::ffi::OsStr::new(&name))
                 || owned.owns_at_or_below(&path)
-                || declared
-                    .range::<Path, _>((Bound::Included(path.as_path()), Bound::Unbounded))
-                    .next()
-                    .is_some_and(|first| first.starts_with(&path))
+                || declared.covers(&path)
             {
                 continue;
             }

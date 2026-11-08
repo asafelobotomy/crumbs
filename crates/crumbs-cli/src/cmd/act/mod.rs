@@ -63,6 +63,12 @@ pub const BATCH_STOPPED: &str = "the privileged run stopped before it finished; 
      the step it was in may have partly run, and the steps after it did not run";
 /// Exit code when administrator rights were needed but not available.
 const EXIT_NO_RIGHTS: u8 = 5;
+/// How a tree delete's manual command reads (see `manual::root_command`).
+const TREE_RM_WORDS: &str = "'-rf' '--one-file-system'";
+/// After manual commands with a tree delete (human output only): the
+/// batch's own mount checks do not run by hand.
+pub const NOTE_CHECK_MOUNTS: &str =
+    "check that nothing is mounted inside these paths before running the rm commands";
 
 /// Where a command's refusals go: always stderr, and under `--json` also
 /// an envelope on stdout with a `cli` error entry.
@@ -115,6 +121,9 @@ impl Out<'_> {
         }
         for m in manual {
             writeln!(err, "  {m}")?;
+        }
+        if manual.iter().any(|m| m.contains(TREE_RM_WORDS)) {
+            writeln!(err, "{NOTE_CHECK_MOUNTS}")?;
         }
         drop(err);
         if self.json {
@@ -584,6 +593,7 @@ mod tests {
             scope: Scope::Home,
             depends_on: None,
             depends_on_plan: None,
+            size_known: true,
             reason: String::new(),
         }
     }

@@ -94,6 +94,7 @@ mod tests {
             scope,
             depends_on: None,
             depends_on_plan: None,
+            size_known: true,
             reason: String::new(),
         }
     }

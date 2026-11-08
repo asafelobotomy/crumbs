@@ -2754,6 +2754,11 @@ fn clean_system_escalation_denied_exit_5() {
     );
     assert!(real(&t, CORE).exists());
     assert!(recorded(&t, "/paccache-args").is_none());
+    // No tree delete among them: no mount note.
+    assert!(
+        !stderr.contains("check that nothing is mounted"),
+        "{stderr}"
+    );
     // No fake runner at all: nothing to escalate with.
     let (code, stdout, stderr) = run_out(crumbs(&t).args(["clean", "--system", "--yes"]));
     assert_eq!(code, 5, "{stdout}{stderr}");
@@ -3012,6 +3017,11 @@ fn sys_ready(t: &FixtureTree) {
         b"#!/bin/sh\necho \"$@\" >> \"$(dirname \"$0\")/../../rm-args\"\nexec /usr/bin/rm \"$@\"\n",
     );
     t.write_exec("/usr/bin/sh", b"#!/bin/sh\nexec /bin/sh \"$@\"\n");
+    // The guard compares mount namespaces with the trusted `readlink`.
+    t.write_exec(
+        "/usr/bin/readlink",
+        b"#!/bin/sh\nexec /usr/bin/readlink \"$@\"\n",
+    );
     // The root batch refuses a tree with a mount point inside.
     t.write(
         "/proc/self/mountinfo",
@@ -3255,7 +3265,10 @@ fn system_delete_denied_exit_5_lists_rm_rf() {
     assert_eq!(code, 5, "{stdout}{stderr}");
     assert!(real(&t, "/opt/inky/inky").exists());
     assert!(
-        stderr.contains("sudo '/usr/bin/rm' '-rf' '--one-file-system' '--' '/opt/inky'"),
+        stderr.contains(
+            "  sudo '/usr/bin/rm' '-rf' '--one-file-system' '--' '/opt/inky'\n\
+             check that nothing is mounted inside these paths before running the rm commands\n"
+        ),
         "{stderr}"
     );
     let v = json_error(
@@ -3268,4 +3281,32 @@ fn system_delete_denied_exit_5_lists_rm_rf() {
         serde_json::json!(["sudo '/usr/bin/rm' '-rf' '--one-file-system' '--' '/opt/inky'"]),
         "{v}"
     );
+}
+
+#[test]
+fn apps_show_lists_system_leftovers() {
+    let t = inky_pkg_fixture();
+    // Resembles the app's name only: low.
+    t.write("/etc/Inky-2/x", b"x");
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["apps", "show", "inky"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let row = |kind: &str, path: &str| {
+        stdout.lines().any(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            w.ends_with(&[kind, path, "root"])
+        })
+    };
+    assert!(row("system-config", "/etc/inky"), "{stdout}");
+    assert!(row("system-data", "/opt/inky"), "{stdout}");
+    assert!(!stdout.contains("/etc/Inky-2"), "{stdout}");
+    let (_, stdout, _) = run_out(crumbs(&t).args(["apps", "show", "inky", "--show-low"]));
+    assert!(stdout.contains("/etc/Inky-2"), "{stdout}");
+    let v = stdout_json(crumbs(&t).args(["apps", "show", "inky", "--json"]));
+    let l = v["data"]["leftovers"].as_array().unwrap();
+    let sys: Vec<&serde_json::Value> = l.iter().filter(|f| f["scope"] == "system-tree").collect();
+    assert_eq!(sys.len(), 2, "{v}");
+    assert!(sys.iter().all(|f| f["preselected"] == false), "{v}");
+    assert!(sys.iter().any(|f| f["path"] == "/etc/inky"), "{v}");
+    let v = stdout_json(crumbs(&t).args(["apps", "show", "inky", "--json", "--show-low"]));
+    assert!(v.to_string().contains("/etc/Inky-2"), "{v}");
 }

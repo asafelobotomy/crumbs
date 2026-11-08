@@ -5,13 +5,14 @@ use std::process::ExitCode;
 use clap::{Subcommand, ValueEnum};
 use crumbs_core::command::SystemRunner;
 use crumbs_core::inventory::{Resolved, discover, find_app};
-use crumbs_core::leftovers::{Finding, find_leftovers};
+use crumbs_core::leftovers::{Finding, find_leftovers, find_system_leftovers};
+use crumbs_core::safety::Scope;
 use crumbs_core::sources::ListOptions;
 use crumbs_core::{App, Env, SourceKind};
 use serde_json::json;
 
 use super::context::{Context, load_cfg, print_notes};
-use super::render::{sanitise, shown_path};
+use super::render::{finding_size, sanitise, shown_path};
 use crate::output::{
     ErrorEntry, confidence, finding_kind, fmt_size, partial_failure, print_json_entries,
     print_table, source_exit_code,
@@ -138,7 +139,9 @@ fn show(env: &Env, query: &str, show_low: bool, json: bool) -> anyhow::Result<Ex
     let mut err = anstream::stderr().lock();
     match find_app(inv, query) {
         Resolved::Found(app) => {
-            let leftovers = find_leftovers(&cx.idx, app, show_low);
+            // System leftovers too, as `uninstall` offers them.
+            let mut leftovers = find_leftovers(&cx.idx, app, show_low);
+            leftovers.extend(find_system_leftovers(env, &cx.cfg, &cx.idx, app, show_low));
             if json {
                 let data = json!({ "app": app, "leftovers": leftovers });
                 print_json_entries("apps show", &data, &errors)?;
@@ -185,10 +188,16 @@ fn print_leftovers(env: &Env, leftovers: &[Finding]) -> anyhow::Result<()> {
         .map(|f| {
             vec![
                 confidence(f.confidence),
-                fmt_size(f.size.bytes),
+                finding_size(&f.size),
                 finding_kind(f.kind),
                 shown_path(env, &f.path),
-                if f.shared { "shared" } else { "" }.to_string(),
+                match (f.shared, f.scope == Scope::SystemTree) {
+                    (true, true) => "shared, root",
+                    (true, false) => "shared",
+                    (false, true) => "root",
+                    (false, false) => "",
+                }
+                .to_string(),
             ]
         })
         .collect();

@@ -93,6 +93,14 @@ pub const ETC_NEVER: &[&str] = &[
     "profile",
     "profile.d",
     "environment",
+    "subuid",
+    "subgid",
+    "kernel",
+    "cmdline.d",
+    "secureboot",
+    "crypttab.initramfs",
+    "machine-info",
+    "resolv.conf",
 ];
 
 /// Whether `name` may be a [`Scope::SystemTree`] target: not in
@@ -1366,6 +1374,18 @@ mod tests {
     #[test]
     fn system_leftover_names() {
         for n in ETC_NEVER {
+            assert!(!is_system_leftover_name(OsStr::new(n)), "{n}");
+        }
+        for n in [
+            "subuid",
+            "subgid",
+            "kernel",
+            "cmdline.d",
+            "secureboot",
+            "crypttab.initramfs",
+            "machine-info",
+            "resolv.conf",
+        ] {
             assert!(!is_system_leftover_name(OsStr::new(n)), "{n}");
         }
         assert!(!is_system_leftover_name(OsStr::new("")));

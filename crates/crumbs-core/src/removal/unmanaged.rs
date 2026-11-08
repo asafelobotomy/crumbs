@@ -1,6 +1,5 @@
 //! Path-based removal of an unmanaged app's own files.
 
-use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
@@ -84,11 +83,7 @@ pub fn plan_unmanaged(
         }
         let declared = tmpfiles_declared(env)
             .map_err(|_| refuse("package ownership is unknown (tmpfiles.d unreadable)".into()))?;
-        let declared_below = declared
-            .range::<Path, _>((Bound::Included(path.as_path()), Bound::Unbounded))
-            .next()
-            .is_some_and(|first| first.starts_with(&path));
-        if inv.owned.owns_at_or_below(&path) || declared_below {
+        if inv.owned.owns_at_or_below(&path) || declared.covers(&path) {
             return Err(refuse(format!("{shown} belongs to a package")));
         }
     } else if inv.owned.owns_at_or_below(&path) {

@@ -22,7 +22,7 @@ use crate::env::{Env, display_path};
 use crate::history::{self, HistoryAction, HistoryEntry};
 use crate::model::{App, SourceKind};
 use crate::mounts::mounts_at_or_below;
-use crate::ownership::{OwnedIndex, load_pacman};
+use crate::ownership::{OwnedIndex, TmpfilesDeclared, load_pacman, tmpfiles_declared};
 use crate::plan::{Action, Plan};
 use crate::privilege::Escalation;
 use crate::privilege::batch::{
@@ -340,21 +340,39 @@ fn verify_path(
         .and_then(|()| recheck_scope(env, cfg, checks, pa.scope, path))
 }
 
-/// State the re-checks share across one run: the package database is
-/// read at most once, however many targets need it.
+/// State the re-checks share across one run: the package database and
+/// `tmpfiles.d` are each read at most once, however many targets need them.
 #[derive(Default)]
 struct Rechecks {
     /// The owned index, or `None` when it could not be read completely.
     owned: OnceCell<Option<OwnedIndex>>,
+    /// The `tmpfiles.d` declarations, or `None` when they could not be read.
+    declared: OnceCell<Option<TmpfilesDeclared>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread read the pacman database for a re-check.
+    pub(crate) static PACMAN_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl Rechecks {
     fn owned(&self, env: &Env) -> Option<&OwnedIndex> {
         self.owned
-            .get_or_init(|| match load_pacman(env) {
-                Ok(Some(idx)) if idx.is_complete() => Some(idx),
-                _ => None,
+            .get_or_init(|| {
+                #[cfg(test)]
+                PACMAN_LOADS.with(|n| n.set(n.get() + 1));
+                match load_pacman(env) {
+                    Ok(Some(idx)) if idx.is_complete() => Some(idx),
+                    _ => None,
+                }
             })
+            .as_ref()
+    }
+
+    fn declared(&self, env: &Env) -> Option<&TmpfilesDeclared> {
+        self.declared
+            .get_or_init(|| tmpfiles_declared(env).ok())
             .as_ref()
     }
 }
@@ -374,8 +392,10 @@ pub const NS_DIFFERS_STATUS: i32 = 97;
 /// The re-checks for a [`Scope::SystemTree`] target, after
 /// `safety::verify`: pacman holds no lock, no mount point lies at or
 /// below it, no package owns anything at or below it (the database read
-/// once per run, and fully), and this process's mount namespace can be
-/// read. Returns that namespace, which the root step must match.
+/// once per run, and fully), `tmpfiles.d` declares nothing it covers (read
+/// once per run; unreadable fails as [`TREE_DB_UNREADABLE`]), and this
+/// process's mount namespace can be read. Returns that namespace, which
+/// the root step must match.
 fn recheck_system_tree(env: &Env, checks: &Rechecks, path: &Path) -> Result<OsString, String> {
     match fs::symlink_metadata(lock_path(env)) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -390,20 +410,37 @@ fn recheck_system_tree(env: &Env, checks: &Rechecks, path: &Path) -> Result<OsSt
     if owned.owns_at_or_below(path) {
         return Err(TREE_OWNED.into());
     }
+    let declared = checks.declared(env).ok_or(TREE_DB_UNREADABLE)?;
+    if declared.covers(path) {
+        return Err(TREE_OWNED.into());
+    }
     env.user_mount_ns()
         .ok_or_else(|| TREE_NS_UNREADABLE.to_string())
 }
 
-/// The `sh -c` script of a tree step: it deletes `$2` only when the root
-/// shell's mount namespace is `$1` (the user's), so the user-side mount
-/// check describes the tree root sees; otherwise it exits
-/// [`NS_DIFFERS_STATUS`]. `rm` is the trusted program path.
-fn tree_script(rm: &Path) -> OsString {
-    let mut script = format!(
-        "test \"$(readlink /proc/self/ns/mnt)\" = \"$1\" || {{ echo \"mount namespace \
-         differs; not deleting\" >&2; exit {NS_DIFFERS_STATUS}; }}; exec "
-    )
-    .into_bytes();
+/// The `sh -c` script of a tree step. It deletes `$2` only when pacman's
+/// database lock `lock` (root-joined, so a fixture stays inside its root)
+/// is absent and the root shell's mount namespace is `$1` (the user's), so
+/// the user-side checks describe what root sees; otherwise it exits
+/// [`NS_DIFFERS_STATUS`]. `readlink` and `rm` are trusted program paths.
+pub(crate) fn tree_script(lock: &Path, readlink: &Path, rm: &Path) -> OsString {
+    let mut script = b"[ ! -e ".to_vec();
+    script.extend(sh_quote(lock.as_os_str()));
+    script.extend_from_slice(
+        format!(
+            " ] || {{ echo \"pacman is busy (database lock present); not deleting\" >&2; \
+             exit {NS_DIFFERS_STATUS}; }}; test \"$("
+        )
+        .as_bytes(),
+    );
+    script.extend(sh_quote(readlink.as_os_str()));
+    script.extend_from_slice(
+        format!(
+            " /proc/self/ns/mnt)\" = \"$1\" || {{ echo \"mount namespace differs; not \
+             deleting\" >&2; exit {NS_DIFFERS_STATUS}; }}; exec "
+        )
+        .as_bytes(),
+    );
     script.extend(sh_quote(rm.as_os_str()));
     script.extend_from_slice(b" -rf --one-file-system -- \"$2\"");
     OsString::from_vec(script)
@@ -645,7 +682,8 @@ fn check_packages(
 ///
 /// A SystemTree `Delete` becomes `sh -c <tree_script> crumbs-rm <user mount
 /// namespace> <path>`, which runs `rm -rf --one-file-system -- <path>` only
-/// in the user's mount namespace.
+/// while pacman holds no lock and only in the user's mount namespace; a
+/// missing trusted `readlink` refuses it ([`TREE_NS_UNREADABLE`]).
 fn privileged_step(
     env: &Env,
     cfg: &Config,
@@ -660,11 +698,14 @@ fn privileged_step(
         Action::Delete { path } if pa.scope == Scope::SystemTree => {
             safety::verify(env, cfg, pa.scope, path, &pa.fingerprint).map_err(|e| e.to_string())?;
             let ns = recheck_system_tree(env, checks, path)?;
+            // Without it the guard cannot compare namespaces.
+            let readlink =
+                resolve_trusted(env, "readlink").ok_or_else(|| TREE_NS_UNREADABLE.to_string())?;
             let sh = resolve("sh")?;
             let rm = resolve("rm")?;
             let args = vec![
                 OsString::from("-c"),
-                tree_script(&rm),
+                tree_script(&lock_path(env), &readlink, &rm),
                 OsString::from("crumbs-rm"),
                 ns,
                 env.sys_path(path).into_os_string(),
@@ -746,7 +787,10 @@ fn record(env: &Env, plan: &Plan, batch: &str, i: usize, attempt: Attempt) -> Ac
         packages: attempt.packages,
         kind: plan.kind.clone(),
         scope: match pa.action {
-            Action::Delete { .. } if !pa.scope.is_home() => Some(pa.scope),
+            // Only root deletes say where they ran (docs/json-schema.md).
+            Action::Delete { .. } if matches!(pa.scope, Scope::System | Scope::SystemTree) => {
+                Some(pa.scope)
+            }
             _ => None,
         },
     };
@@ -830,6 +874,9 @@ fn recheck_scope(
     match scope {
         Scope::UserTemp => crate::bloat::temp::still_stale(env, cfg, path, env.now())
             .map_err(|reason| format!("refusing: {} {reason}", display_path(env, path))),
+        // Unreachable in practice: a SystemTree `Delete` is privileged and
+        // re-checked in `privileged_step`, and no other action has this
+        // scope. Kept so the rule holds whoever calls this.
         Scope::SystemTree => recheck_system_tree(env, checks, path).map(drop),
         Scope::Home | Scope::HomeTrash | Scope::System => Ok(()),
     }

@@ -97,18 +97,69 @@ pub fn load_pacman(env: &Env) -> Result<Option<OwnedIndex>, CoreError> {
     Ok(Some(OwnedIndex::new(files, dirs, true)))
 }
 
-/// Paths that `tmpfiles.d` declares (`/usr/lib/tmpfiles.d` and
-/// `/etc/tmpfiles.d`, every `*.conf`): runtime directories a package creates
-/// without listing them. The second field of each line is the path; lines
-/// with `%` specifiers are ignored. A missing directory is fine; an
-/// unreadable one is an error.
-pub fn tmpfiles_declared(env: &Env) -> Result<BTreeSet<PathBuf>, CoreError> {
+/// The `tmpfiles.d` directories read, in-system.
+pub const TMPFILES_DIRS: [&str; 4] = [
+    "/usr/lib/tmpfiles.d",
+    "/usr/local/lib/tmpfiles.d",
+    "/run/tmpfiles.d",
+    "/etc/tmpfiles.d",
+];
+
+/// Paths that `tmpfiles.d` declares: runtime directories a package creates
+/// without listing them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TmpfilesDeclared {
+    /// Literal paths.
+    paths: BTreeSet<PathBuf>,
+    /// For a path with glob characters or `%` specifiers, its literal
+    /// directory prefix: anything at, below, or (by the pattern) inside it
+    /// may be declared.
+    patterns: BTreeSet<PathBuf>,
+}
+
+impl TmpfilesDeclared {
+    /// True when a declared path lies at or below `p`, or a pattern's
+    /// directory lies at, below or above it (the pattern may match `p`).
+    /// Components are compared whole.
+    pub fn covers(&self, p: &Path) -> bool {
+        let at_or_below = |set: &BTreeSet<PathBuf>| {
+            set.range::<Path, _>((Bound::Included(p), Bound::Unbounded))
+                .next()
+                .is_some_and(|first| first.starts_with(p))
+        };
+        at_or_below(&self.paths)
+            || at_or_below(&self.patterns)
+            || self.patterns.iter().any(|d| p.starts_with(d))
+    }
+
+    /// Every literal path and pattern directory, sorted.
+    pub fn all(&self) -> BTreeSet<PathBuf> {
+        self.paths.union(&self.patterns).cloned().collect()
+    }
+}
+
+/// The literal directory prefix of a tmpfiles path with a glob character
+/// (`*?[`) or a `%` specifier: everything up to the last `/` before the
+/// first such character (`/` when that is the first one). `None` for a
+/// literal path.
+fn pattern_dir(p: &str) -> Option<PathBuf> {
+    let first = p.find(['*', '?', '[', '%'])?;
+    let dir = p[..first].rfind('/').map_or("", |slash| &p[..slash]);
+    Some(PathBuf::from(if dir.is_empty() { "/" } else { dir }))
+}
+
+/// Reads [`TMPFILES_DIRS`], every `*.conf`. The second field of each line
+/// is the path; a path with glob characters or `%` specifiers counts by its
+/// literal directory prefix ([`TmpfilesDeclared::covers`]), conservatively.
+/// A path not starting with `/` (a leading specifier) is skipped. A missing
+/// directory is fine; an unreadable one is an error.
+pub fn tmpfiles_declared(env: &Env) -> Result<TmpfilesDeclared, CoreError> {
     let io_err = |path: &Path, source| CoreError::Io {
         path: path.to_path_buf(),
         source,
     };
-    let mut out = BTreeSet::new();
-    for dir in ["/usr/lib/tmpfiles.d", "/etc/tmpfiles.d"] {
+    let mut out = TmpfilesDeclared::default();
+    for dir in TMPFILES_DIRS {
         let dir = env.sys(dir);
         let rd = match fs::read_dir(&dir) {
             Ok(rd) => rd,
@@ -129,10 +180,13 @@ pub fn tmpfiles_declared(env: &Env) -> Result<BTreeSet<PathBuf>, CoreError> {
                 let Some(p) = line.split_whitespace().nth(1) else {
                     continue;
                 };
-                if p.contains('%') || !p.starts_with('/') {
+                if !p.starts_with('/') {
                     continue;
                 }
-                out.insert(PathBuf::from(p.trim_end_matches('/')));
+                match pattern_dir(p) {
+                    Some(d) => out.patterns.insert(d),
+                    None => out.paths.insert(PathBuf::from(p.trim_end_matches('/'))),
+                };
             }
         }
     }
@@ -153,17 +207,59 @@ mod tests {
         );
         t.write("etc/tmpfiles.d/b.conf", b"f /etc/y 0644\n");
         t.write("etc/tmpfiles.d/b.txt", b"f /etc/ignored 0644\n");
+        t.write("usr/local/lib/tmpfiles.d/c.conf", b"d /opt/local-dir\n");
+        t.write("run/tmpfiles.d/d.conf", b"d /etc/runtime-dir\nd %S/state\n");
         let got = tmpfiles_declared(&t.env()).unwrap();
-        let want: BTreeSet<PathBuf> = ["/etc/openvpn/client", "/opt/x", "/etc/y"]
-            .iter()
-            .map(PathBuf::from)
-            .collect();
-        assert_eq!(got, want);
-        assert!(
-            tmpfiles_declared(&FixtureTree::new().env())
-                .unwrap()
-                .is_empty()
+        let want: BTreeSet<PathBuf> = [
+            "/etc/openvpn/client",
+            "/opt/x",
+            "/etc/y",
+            "/opt/local-dir",
+            "/etc/runtime-dir",
+            // `/run/%u`: its literal directory.
+            "/run",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        assert_eq!(got.all(), want);
+        assert!(got.covers(Path::new("/opt/local-dir")));
+        assert!(got.covers(Path::new("/etc/runtime-dir")));
+        assert!(got.covers(Path::new("/etc/openvpn")));
+        assert!(!got.covers(Path::new("/etc/ignored")));
+        assert!(!got.covers(Path::new("/opt/xy")));
+        assert_eq!(
+            tmpfiles_declared(&FixtureTree::new().env()).unwrap(),
+            TmpfilesDeclared::default()
         );
+    }
+
+    #[test]
+    fn tmpfiles_globs_and_specifiers_count_by_literal_prefix() {
+        assert_eq!(pattern_dir("/opt/x"), None);
+        assert_eq!(pattern_dir("/etc/foo/*.json"), Some("/etc/foo".into()));
+        assert_eq!(pattern_dir("/opt/foo*"), Some("/opt".into()));
+        assert_eq!(pattern_dir("/opt/a/b?/c"), Some("/opt/a".into()));
+        assert_eq!(pattern_dir("/opt/tpm[0-9]/x"), Some("/opt".into()));
+        assert_eq!(
+            pattern_dir("/var/log/journal/%m"),
+            Some("/var/log/journal".into())
+        );
+        assert_eq!(pattern_dir("/*"), Some("/".into()));
+
+        let t = FixtureTree::new();
+        t.write(
+            "usr/lib/tmpfiles.d/g.conf",
+            b"d /etc/tpm2-tss/fapi-profiles/*.json\nd /opt/inky%b/run\nd /var/tmp/x-*\n",
+        );
+        let got = tmpfiles_declared(&t.env()).unwrap();
+        // The prefix is declared: a target at or above it is covered.
+        assert!(got.covers(Path::new("/etc/tpm2-tss")));
+        // The pattern lives in `/opt` and may match any child of it.
+        assert!(got.covers(Path::new("/opt/inky")));
+        assert!(got.covers(Path::new("/opt/other")));
+        assert!(!got.covers(Path::new("/etc/inky")));
+        assert!(!got.covers(Path::new("/etc/tpm2")));
     }
 
     #[test]

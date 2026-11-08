@@ -84,6 +84,10 @@ pub struct PlannedAction {
     /// `drop_overlaps`); [`execute_many`](crate::executor::execute_many)
     /// skips this action unless that action succeeded. Not part of the JSON.
     pub depends_on_plan: Option<(usize, usize)>,
+    /// False when part of the size could not be read and nothing was
+    /// counted (a tree with `size.errors > 0` and 0 bytes): the preview
+    /// shows `-` and its total `+ unknown`. Not part of the JSON.
+    pub size_known: bool,
     pub reason: String,
 }
 
@@ -134,6 +138,18 @@ pub const REASON_APPIMAGE: &str = "AppImage file";
 pub const REASON_UNMANAGED_LINK: &str = "link to the app's program";
 pub const REASON_UNMANAGED: &str = "the app's own files";
 
+/// Whether a size was read: false when part of it could not be read and
+/// nothing was counted.
+pub fn size_known(size: &crate::size::DiskUsage) -> bool {
+    !(size.errors > 0 && size.bytes == 0)
+}
+
+/// A root delete of a picked `/etc` or `/opt` leftover: planned with no
+/// dependency, whatever else the plan removes (see [`build_plan_unmanaged`]).
+pub fn is_system_leftover(pa: &PlannedAction) -> bool {
+    pa.scope == Scope::SystemTree && matches!(pa.action, Action::Delete { .. })
+}
+
 fn remove(path: PathBuf, opts: &PlanOptions) -> Action {
     if opts.permanent {
         Action::Delete { path }
@@ -156,8 +172,9 @@ pub fn build_plan(
 
 /// Like [`build_plan`], and for an unmanaged app with a `target` (from
 /// `plan_unmanaged`) the target's removal comes first, every leftover
-/// depending on it. A system target is a root delete whatever `--permanent`
-/// says. With `leftovers_only`, or no target, the app stays.
+/// depending on it except system leftovers (`Scope::SystemTree`), which
+/// depend on nothing. A system target is a root delete whatever
+/// `--permanent` says. With `leftovers_only`, or no target, the app stays.
 pub fn build_plan_unmanaged(
     env: &Env,
     app: Option<&App>,
@@ -185,6 +202,7 @@ pub fn build_plan_unmanaged(
                 scope: t.scope,
                 depends_on: None,
                 depends_on_plan: None,
+                size_known: size_known(&t.size),
                 reason: REASON_UNMANAGED.into(),
             });
             if let Some((link, fingerprint)) = &t.home_link {
@@ -195,6 +213,7 @@ pub fn build_plan_unmanaged(
                     scope: Scope::Home,
                     depends_on: None,
                     depends_on_plan: None,
+                    size_known: true,
                     reason: REASON_UNMANAGED_LINK.into(),
                 });
             }
@@ -223,6 +242,7 @@ pub fn build_plan_unmanaged(
                 scope: Scope::Home,
                 depends_on: None,
                 depends_on_plan: None,
+                size_known: true,
                 reason: REASON_APPIMAGE.into(),
             });
             skip_path = Some(location);
@@ -251,6 +271,7 @@ pub fn build_plan_unmanaged(
                 scope: Scope::SystemTree,
                 depends_on: None,
                 depends_on_plan: None,
+                size_known: size_known(&f.size),
                 reason: f.reason.clone(),
             });
             continue;
@@ -272,13 +293,20 @@ pub fn build_plan_unmanaged(
             scope: Scope::Home,
             depends_on: None,
             depends_on_plan: None,
+            size_known: true,
             reason: f.reason.clone(),
         });
     }
     if skip_path.is_some() {
-        // A full AppImage uninstall: nothing else goes unless the file did.
+        // A full AppImage or unmanaged uninstall: nothing else goes unless
+        // the app's own file or directory did. A system leftover is the
+        // exception: it was picked by hand and no package owns it (the same
+        // as `--leftovers-only`), and a privileged action cannot wait for
+        // another one.
         for a in actions.iter_mut().skip(1) {
-            a.depends_on = Some(0);
+            if !is_system_leftover(a) {
+                a.depends_on = Some(0);
+            }
         }
     }
     let total_size = actions.iter().map(|a| a.size).sum();
@@ -344,6 +372,7 @@ pub fn build_clean_plan(
                 scope: item.scope,
                 depends_on: None,
                 depends_on_plan: None,
+                size_known: true,
                 reason,
             });
             continue;
@@ -367,6 +396,7 @@ pub fn build_clean_plan(
             scope: item.scope,
             depends_on: None,
             depends_on_plan: None,
+            size_known: true,
             reason: reason.clone(),
         });
         for (extra, fp) in &item.extra_paths {
@@ -379,6 +409,7 @@ pub fn build_clean_plan(
                 scope: item.scope,
                 depends_on: Some(main),
                 depends_on_plan: None,
+                size_known: true,
                 reason: reason.clone(),
             });
         }
@@ -555,6 +586,21 @@ mod tests {
         // Without a system finding the note is absent.
         let plan = build_plan(&env, Some(&app), &fs[..1], &PlanOptions::default()).unwrap();
         assert!(!plan.notes.iter().any(|n| n == NOTE_SYSTEM_DELETE));
+        // A size that could not be read is carried as unknown.
+        assert!(plan.actions.iter().all(|a| a.size_known));
+        let mut unread = sys.clone();
+        unread.size = crate::size::DiskUsage {
+            bytes: 0,
+            errors: 1,
+            ..Default::default()
+        };
+        let plan = build_plan(&env, Some(&app), &[unread], &PlanOptions::default()).unwrap();
+        assert!(!plan.actions[0].size_known);
+        assert!(size_known(&crate::size::DiskUsage {
+            bytes: 4096,
+            errors: 1,
+            ..Default::default()
+        }));
     }
 
     #[test]
@@ -984,6 +1030,7 @@ mod tests {
             scope,
             depends_on: Some(0),
             depends_on_plan: None,
+            size_known: true,
             reason: "r".into(),
         };
         let cmd = pa(

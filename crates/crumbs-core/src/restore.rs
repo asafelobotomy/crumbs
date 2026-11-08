@@ -216,6 +216,10 @@ fn restore_one(
     if e.action == HistoryAction::PackageRemove {
         return Err(reinstall_hint(e));
     }
+    // Said whether or not the delete ran: nothing deleted as root comes back.
+    if e.action == HistoryAction::Delete && e.scope == Some(Scope::SystemTree) {
+        return Err(MSG_SYSTEM_TREE.into());
+    }
     if !e.ok {
         return Err("the original action failed; nothing to restore".into());
     }
@@ -505,6 +509,7 @@ mod tests {
                 scope: crate::safety::Scope::Home,
                 depends_on: None,
                 depends_on_plan: None,
+                size_known: true,
                 reason: "test".into(),
                 action,
             })
@@ -1029,6 +1034,7 @@ mod tests {
                 scope: crate::safety::Scope::Home,
                 depends_on: None,
                 depends_on_plan: None,
+                size_known: true,
                 reason: "test".into(),
             }],
             total_size: 0,
@@ -1068,6 +1074,7 @@ mod tests {
             scope: crate::safety::Scope::Home,
             depends_on: None,
             depends_on_plan: None,
+            size_known: true,
             reason: "test".into(),
         };
         let plan = Plan {
