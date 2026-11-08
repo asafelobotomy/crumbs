@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -31,7 +32,16 @@ pub enum Scope {
     /// A direct child of `{data_home}/Trash/files` or `{data_home}/Trash/info`,
     /// with `Trash`, `files` and `info` private to the user.
     HomeTrash,
+    /// A root-owned system file, deleted with root rights (coredumps only
+    /// in M4): a direct child regular file of `/var/lib/systemd/coredump`
+    /// named `core.*`, with every directory from `/` down to that one a
+    /// real directory owned by [`Env::system_owner_uid`] and writable by
+    /// no one else.
+    System,
 }
+
+/// In-system directory whose `core.*` files [`Scope::System`] allows.
+const COREDUMP_DIR: &str = "/var/lib/systemd/coredump";
 
 impl Scope {
     pub fn is_home(&self) -> bool {
@@ -182,6 +192,15 @@ pub fn is_allowed_target(env: &Env, cfg: &Config, scope: Scope, in_system: &Path
                 && (scope == Scope::HomeTrash || !path.starts_with(&home));
             in_root && !is_protected_by(&protected, &path) && !is_excluded(cfg, &path)
         }
+        Scope::System => {
+            let is_core = path
+                .file_name()
+                .is_some_and(|n| n.as_bytes().len() > 5 && n.as_bytes().starts_with(b"core."));
+            is_core
+                && path.parent() == Some(Path::new(COREDUMP_DIR))
+                && !is_protected_by(&protected, &path)
+                && !is_excluded(cfg, &path)
+        }
     }
 }
 
@@ -195,6 +214,7 @@ fn scope_roots(env: &Env, scope: Scope) -> Vec<PathBuf> {
             let trash = env.unsys(&env.data_home).join("Trash");
             vec![trash.join("files"), trash.join("info")]
         }
+        Scope::System => vec![PathBuf::from(COREDUMP_DIR)],
     }
 }
 
@@ -337,6 +357,15 @@ pub fn verify_now(
             return Err(SafetyError::Ineligible(shown, "is not owned by you"));
         }
     }
+    if scope == Scope::System {
+        let ft = meta.file_type();
+        if ft.is_symlink() {
+            return Err(SafetyError::Ineligible(shown, "is a symlink"));
+        }
+        if !ft.is_file() {
+            return Err(SafetyError::Ineligible(shown, "is not a regular file"));
+        }
+    }
     Ok(fingerprint_of(&meta))
 }
 
@@ -392,15 +421,52 @@ fn check_location(
                 }
             }
         }
+        Scope::System => check_system_chain(env, parent, &shown)?,
     }
     Ok(path)
 }
 
+/// Every directory from `/` down to and including `parent` is a real
+/// directory (no symlink) owned by [`Env::system_owner_uid`] and not
+/// writable by group or others: nobody but root can swap anything on the
+/// way to a root-privileged delete. Fails closed on any error.
+fn check_system_chain(env: &Env, parent: &Path, shown: &str) -> Result<(), SafetyError> {
+    let mut dir = PathBuf::from("/");
+    let comps = std::iter::once(None).chain(
+        parent
+            .components()
+            .filter(|c| matches!(c, Component::Normal(_)))
+            .map(Some),
+    );
+    for comp in comps {
+        if let Some(c) = comp {
+            dir.push(c.as_os_str());
+        }
+        check_real_dir(env, &dir, shown)?;
+        let Ok(m) = fs::symlink_metadata(real_path(env, &dir)) else {
+            return Err(SafetyError::Changed(shown.to_string()));
+        };
+        if m.uid() != env.system_owner_uid {
+            return Err(SafetyError::Ineligible(
+                display_path(env, &dir),
+                "is not owned by root",
+            ));
+        }
+        if m.mode() & 0o022 != 0 {
+            return Err(SafetyError::Ineligible(
+                display_path(env, &dir),
+                "is writable by group or others",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Whether in-system `/tmp` (its lstat data) is safe to act in: owned by
-/// [`Env::tmp_owner_uid`] (root on the real system) and sticky, so nobody
+/// [`Env::system_owner_uid`] (root on the real system) and sticky, so nobody
 /// else can rename or replace the user's entries in it.
 pub(crate) fn is_safe_tmp(env: &Env, m: &fs::Metadata) -> bool {
-    m.uid() == env.tmp_owner_uid && m.mode() & 0o1000 != 0
+    m.uid() == env.system_owner_uid && m.mode() & 0o1000 != 0
 }
 
 /// No directory strictly below `root`, down to and including `parent`, is
@@ -988,6 +1054,161 @@ mod tests {
             verify_now(&env, &cfg, Scope::UserTemp, &excluded),
             Err(SafetyError::OutsideAllowedRoots(_))
         ));
+    }
+
+    /// A fixture `/var/lib/systemd/coredump` with every directory from the
+    /// root down set to 0755, so the root-owned chain check passes (the
+    /// fixture user stands in for root, see `Env::system_owner_uid`).
+    fn coredump_dir(t: &FixtureTree) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = t.mkdir("var/lib/systemd/coredump");
+        let mut cur = t.dir.path().to_path_buf();
+        fs::set_permissions(&cur, fs::Permissions::from_mode(0o755)).unwrap();
+        for c in ["var", "lib", "systemd", "coredump"] {
+            cur.push(c);
+            fs::set_permissions(&cur, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn system_scope_allows_core_files_only() {
+        let (t, env, cfg) = setup();
+        coredump_dir(&t);
+        t.write("var/lib/systemd/coredump/core.a.1", b"x");
+        t.write("var/lib/systemd/coredump/other", b"x");
+        t.write("var/lib/systemd/coredump/sub/core.deep", b"x");
+        t.write("var/lib/systemd/coredump/core.dir/inner", b"x");
+        t.write("var/lib/systemd/other/core.x", b"x");
+        let sys = Scope::System;
+        let good = p("/var/lib/systemd/coredump/core.a.1");
+        assert!(is_allowed_target(&env, &cfg, sys, &good));
+        let fp = verify_now(&env, &cfg, sys, &good).unwrap();
+        verify(&env, &cfg, sys, &good, &fp).unwrap();
+        for s in [
+            "/var/lib/systemd/coredump/other",
+            "/var/lib/systemd/coredump/core.",
+            "/var/lib/systemd/coredump",
+            "/var/lib/systemd/coredump/sub/core.deep",
+            "/var/lib/systemd/other/core.x",
+            "/tmp/core.x",
+            "/var/lib/systemd/coredump/../coredump/core.a.1",
+            "/",
+        ] {
+            assert!(!is_allowed_target(&env, &cfg, sys, &p(s)), "{s}");
+        }
+        // A directory named core.* is not a regular file.
+        let dir = p("/var/lib/systemd/coredump/core.dir");
+        assert!(is_allowed_target(&env, &cfg, sys, &dir));
+        assert!(matches!(
+            verify_now(&env, &cfg, sys, &dir),
+            Err(SafetyError::Ineligible(_, _))
+        ));
+        // Protected and excluded paths stay refused.
+        let mut cfg = cfg;
+        cfg.exclude.push("/var/lib/systemd/coredump/core.a*".into());
+        assert!(!is_allowed_target(&env, &cfg, sys, &good));
+        let mut cfg2 = Config::default();
+        cfg2.protect.push(good.clone());
+        assert!(!is_allowed_target(&env, &cfg2, sys, &good));
+        // Changed since scanned.
+        let cfg3 = Config::default();
+        t.write("var/lib/systemd/coredump/core.a.1", b"y");
+        std::fs::remove_file(t.dir.path().join("var/lib/systemd/coredump/core.a.1")).unwrap();
+        t.write("var/lib/systemd/coredump/core.a.1", b"z");
+        assert!(matches!(
+            verify(&env, &cfg3, sys, &good, &fp),
+            Err(SafetyError::Changed(_))
+        ));
+    }
+
+    #[test]
+    fn system_scope_refuses_symlink_target() {
+        let (t, env, cfg) = setup();
+        coredump_dir(&t);
+        t.write("var/lib/systemd/other", b"secret");
+        t.symlink(
+            "var/lib/systemd/coredump/core.link",
+            "/var/lib/systemd/other",
+        );
+        let link = p("/var/lib/systemd/coredump/core.link");
+        assert!(matches!(
+            verify_now(&env, &cfg, Scope::System, &link),
+            Err(SafetyError::Ineligible(_, _))
+        ));
+    }
+
+    #[test]
+    fn system_scope_refuses_symlinked_chain_dir() {
+        let (t, env, cfg) = setup();
+        let real = t.mkdir("elsewhere/coredump");
+        t.mkdir("var/lib/systemd");
+        coredump_dir(&t);
+        fs::remove_dir(t.dir.path().join("var/lib/systemd/coredump")).unwrap();
+        std::os::unix::fs::symlink(&real, t.dir.path().join("var/lib/systemd/coredump")).unwrap();
+        fs::write(real.join("core.x"), b"x").unwrap();
+        assert!(matches!(
+            verify_now(
+                &env,
+                &cfg,
+                Scope::System,
+                &p("/var/lib/systemd/coredump/core.x")
+            ),
+            Err(SafetyError::SymlinkedParent(_))
+        ));
+    }
+
+    #[test]
+    fn system_scope_refuses_writable_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        let (t, env, cfg) = setup();
+        coredump_dir(&t);
+        t.write("var/lib/systemd/coredump/core.x", b"x");
+        let target = p("/var/lib/systemd/coredump/core.x");
+        verify_now(&env, &cfg, Scope::System, &target).unwrap();
+        // Any directory in the chain, the root included, group- or
+        // other-writable refuses.
+        for rel in [
+            "",
+            "var",
+            "var/lib",
+            "var/lib/systemd",
+            "var/lib/systemd/coredump",
+        ] {
+            for bad in [0o775, 0o757] {
+                let d = t.dir.path().join(rel);
+                fs::set_permissions(&d, fs::Permissions::from_mode(bad)).unwrap();
+                assert!(
+                    matches!(
+                        verify_now(&env, &cfg, Scope::System, &target),
+                        Err(SafetyError::Ineligible(_, why)) if why.contains("writable")
+                    ),
+                    "{rel} {bad:o}"
+                );
+                fs::set_permissions(&d, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        verify_now(&env, &cfg, Scope::System, &target).unwrap();
+    }
+
+    #[test]
+    fn system_scope_refuses_non_root_parent() {
+        let (t, mut env, cfg) = setup();
+        coredump_dir(&t);
+        t.write("var/lib/systemd/coredump/core.x", b"x");
+        let target = p("/var/lib/systemd/coredump/core.x");
+        verify_now(&env, &cfg, Scope::System, &target).unwrap();
+        // The directories belong to the test user, not the expected owner.
+        env.system_owner_uid = env.uid.wrapping_add(1);
+        assert!(matches!(
+            verify_now(&env, &cfg, Scope::System, &target),
+            Err(SafetyError::Ineligible(_, why)) if why.contains("not owned by root")
+        ));
+    }
+
+    #[test]
+    fn system_scope_serde_is_kebab_case() {
+        assert_eq!(serde_json::to_string(&Scope::System).unwrap(), "\"system\"");
     }
 
     #[test]

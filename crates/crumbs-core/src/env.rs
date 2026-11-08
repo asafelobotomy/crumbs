@@ -59,11 +59,12 @@ pub struct Env {
     /// system; a fake root reads it from `CRUMBS_TEST_CLOCK_SHIFT_DAYS`, so
     /// tests can make files look old by their ctime, which cannot be set.
     pub clock_shift: Duration,
-    /// Who must own in-system `/tmp` before anything in it is touched:
-    /// root (0) on the real system. A fake root's `/tmp` is made by the
+    /// Who must own in-system `/tmp` and every directory on the way to a
+    /// [`Scope::System`](crate::safety::Scope::System) target before anything
+    /// there is touched: root (0) on the real system. A fake root's `/tmp` is made by the
     /// test user, so [`Env::fake`] expects that user instead. The sticky
     /// bit is required either way.
-    pub tmp_owner_uid: u32,
+    pub system_owner_uid: u32,
 }
 
 /// Days from `CRUMBS_TEST_CLOCK_SHIFT_DAYS`; only ever read for a fake root.
@@ -131,7 +132,7 @@ impl Env {
             uid: rustix::process::getuid().as_raw(),
             distro,
             clock_shift: Duration::ZERO,
-            tmp_owner_uid: 0,
+            system_owner_uid: 0,
         })
     }
 
@@ -151,7 +152,7 @@ impl Env {
             state_home: home.join(".local/state"),
             data_dirs: vec![canon.join("usr/local/share"), canon.join("usr/share")],
             uid,
-            tmp_owner_uid: uid,
+            system_owner_uid: uid,
             home,
             root: canon,
             distro,

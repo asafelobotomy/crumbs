@@ -1088,7 +1088,7 @@ fn cache_skips_sockets_fifos_and_devices() {
 }
 
 /// `/tmp` must be owned by root (on the real system; the fixture user in
-/// a fake root, see `Env::tmp_owner_uid`) and carry the sticky bit.
+/// a fake root, see `Env::system_owner_uid`) and carry the sticky bit.
 #[test]
 fn temp_refuses_unsafe_tmp() {
     use std::os::unix::fs::PermissionsExt;
@@ -1117,7 +1117,7 @@ fn temp_refuses_unsafe_tmp() {
     // Sticky, but owned by someone other than expected.
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o1777)).unwrap();
     let mut env = t.env();
-    env.tmp_owner_uid = env.uid.wrapping_add(1);
+    env.system_owner_uid = env.uid.wrapping_add(1);
     let i = inv(vec![]);
     let cx = ScanContext {
         env: &env,
@@ -1134,10 +1134,10 @@ fn temp_refuses_unsafe_tmp() {
 #[test]
 fn real_system_tmp_must_be_root_owned() {
     if let Ok(env) = crate::env::Env::from_system() {
-        assert_eq!(env.tmp_owner_uid, 0);
+        assert_eq!(env.system_owner_uid, 0);
     }
     // A fake root's `/tmp` is the fixture user's.
     let t = FixtureTree::new();
     let env = t.env();
-    assert_eq!(env.tmp_owner_uid, env.uid);
+    assert_eq!(env.system_owner_uid, env.uid);
 }
