@@ -213,35 +213,59 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(4));
     }
 
+    /// Whether a live (not zombie) process is in process group `pgid`.
+    fn group_alive(pgid: i32) -> bool {
+        let Ok(dir) = std::fs::read_dir("/proc") else {
+            return false;
+        };
+        dir.flatten().any(|e| {
+            let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else {
+                return false;
+            };
+            // `<pid> (<comm>) <state> <ppid> <pgrp> …`; comm may hold spaces.
+            let Some((_, rest)) = stat.rsplit_once(") ") else {
+                return false;
+            };
+            let mut fields = rest.split(' ');
+            let state = fields.next();
+            let pgrp = fields.nth(1).and_then(|p| p.parse::<i32>().ok());
+            pgrp == Some(pgid) && state != Some("Z")
+        })
+    }
+
     #[test]
     fn system_runner_timeout_kills_the_process_group() {
         let t = FixtureTree::new();
         let pidfile = t.dir.path().join("pgid");
-        // The shell backgrounds a sleep that inherits the pipes, then waits
-        // on another; killing only the shell would leave both running.
+        // The shell records its pid (its process group) first, then
+        // backgrounds a sleep that inherits the pipes and waits on another;
+        // killing only the shell would leave both running.
         let script = format!(
-            "#!/bin/sh\nsleep 5 &\necho $$ > {}\nsleep 5\n",
+            "#!/bin/sh\necho $$ > {}\nsleep 10 &\nsleep 10\n",
             pidfile.display()
         );
         let prog = t.write_exec("/usr/bin/grandkids", script.as_bytes());
         let started = std::time::Instant::now();
-        let out = SystemRunner::with_timeout(Duration::from_millis(200))
+        let out = SystemRunner::with_timeout(Duration::from_secs(1))
             .run(&prog, &[])
             .unwrap();
         assert!(out.timed_out);
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(4));
         let pgid: i32 = std::fs::read_to_string(&pidfile)
             .unwrap()
             .trim()
             .parse()
             .unwrap();
-        // Signal 0 to the group: fails with ESRCH once nothing is left.
-        let alive = Command::new("/bin/kill")
-            .args(["-0", "--", &format!("-{pgid}")])
-            .status()
-            .unwrap()
-            .success();
-        assert!(!alive, "process group {pgid} survived");
+        // SIGKILL is asynchronous and the killed processes linger as
+        // zombies until reaped: wait for every live member to go.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while group_alive(pgid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "process group {pgid} survived"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
