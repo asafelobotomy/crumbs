@@ -7,6 +7,7 @@ use crumbs_core::env::display_path;
 use crumbs_core::executor::ExecReport;
 use crumbs_core::plan::{Action, Plan};
 
+use super::manual::is_privileged;
 use crate::output::{fmt_size, print_table_with_details};
 
 fn verb(a: &Action) -> &'static str {
@@ -51,10 +52,54 @@ fn target(env: &Env, a: &Action) -> String {
             }
             sanitise(&line)
         }
-        Action::PackageRemove { names, .. } => sanitise(&names.join(" ")),
+        Action::PackageRemove { source, names, .. } => sanitise(&format!(
+            "{}: {}",
+            source.as_str(),
+            names.first().map_or("", String::as_str)
+        )),
         _ => a.path().map(|p| shown_path(env, p)).unwrap_or_default(),
     }
 }
+
+/// [`target`] as the preview shows it: a package removal also names the
+/// version of the app's own package.
+fn preview_target(env: &Env, a: &Action) -> String {
+    match a {
+        Action::PackageRemove {
+            source,
+            names,
+            versions,
+            ..
+        } => sanitise(&format!(
+            "{}: {} {}",
+            source.as_str(),
+            names.first().map_or("", String::as_str),
+            versions.first().map_or("", String::as_str)
+        )),
+        _ => target(env, a),
+    }
+}
+
+/// `also removed: <name> <version>, …` for the packages a removal takes
+/// besides the app's own, or `None`.
+fn also_removed(a: &Action) -> Option<String> {
+    let Action::PackageRemove {
+        names, versions, ..
+    } = a
+    else {
+        return None;
+    };
+    let others: Vec<String> = names
+        .iter()
+        .zip(versions)
+        .skip(1)
+        .map(|(n, v)| format!("{n} {v}"))
+        .collect();
+    (!others.is_empty()).then(|| sanitise(&format!("also removed: {}", others.join(", "))))
+}
+
+pub const NOTE_PRIVILEGED: &str =
+    "packages are removed with administrator rights; you will be asked once";
 
 fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
@@ -79,16 +124,16 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
                 .iter()
                 .map(|a| {
                     let size = match a.action {
-                        // Flatpak decides what goes; the size is unknown.
-                        Action::UserCommand { .. } | Action::PrivilegedCommand { .. } => {
-                            "—".to_string()
-                        }
+                        // The program decides what goes; the size is unknown.
+                        Action::UserCommand { .. }
+                        | Action::PrivilegedCommand { .. }
+                        | Action::PackageRemove { .. } => "—".to_string(),
                         _ => fmt_size(a.size),
                     };
                     vec![
                         verb(&a.action).to_string(),
                         size,
-                        target(env, &a.action),
+                        preview_target(env, &a.action),
                         sanitise(&a.reason),
                     ]
                 })
@@ -107,11 +152,17 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
             print_table_with_details(&["ACTION", "SIZE", "PATH", "REASON"], &rows, &details)?;
         }
         let mut out = anstream::stdout().lock();
+        for line in plan.actions.iter().filter_map(|a| also_removed(&a.action)) {
+            writeln!(out, "{line}")?;
+        }
         for n in &plan.notes {
             writeln!(out, "note: {}", sanitise(n))?;
         }
     }
     let all = || plans.iter().flat_map(|(_, p)| &p.actions);
+    if all().any(is_privileged) {
+        writeln!(anstream::stdout().lock(), "note: {NOTE_PRIVILEGED}")?;
+    }
     let tally = |want: fn(&Action) -> bool| {
         all()
             .filter(|a| want(&a.action))

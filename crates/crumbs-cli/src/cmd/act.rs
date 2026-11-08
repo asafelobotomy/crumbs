@@ -2,20 +2,25 @@
 //! `orphans --clean`, `clean`): usage checks, choosing findings, then
 //! preview, running-app check, confirmation, execution and report.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Args;
+use crumbs_core::command::{SystemRunner, USER_COMMAND_TIMEOUT};
 use crumbs_core::config::Config;
-use crumbs_core::executor::{ExecReport, execute, running_processes};
+use crumbs_core::executor::{ExecReport, execute_full, running_processes};
 use crumbs_core::inventory::Inventory;
 use crumbs_core::leftovers::{Finding, FindingKind};
 use crumbs_core::plan::{Action, Plan, PlannedAction};
-use crumbs_core::{App, Env};
+use crumbs_core::privilege::batch::{PrivilegedRunner, SystemPrivilegedRunner};
+use crumbs_core::privilege::{Escalation, detect_escalation};
+use crumbs_core::removal::still_installed;
+use crumbs_core::{App, Env, SourceKind};
 use serde_json::json;
 
 use super::context::print_notes;
+use super::manual::{is_privileged, manual_commands};
 use super::render;
 use crate::output::{ErrorEntry, finding_kind, fmt_size, print_json_entries};
 use crate::prompt;
@@ -44,6 +49,11 @@ pub struct ActFlags {
 }
 
 pub const NON_INTERACTIVE: &str = "refusing to act without --yes in a non-interactive session";
+pub const NO_RIGHTS: &str = "no way to get administrator rights";
+pub const NOT_GRANTED: &str =
+    "administrator rights were not granted; nothing that needs them was changed";
+/// Exit code when administrator rights were needed but not available.
+const EXIT_NO_RIGHTS: u8 = 5;
 
 /// Where a command's refusals go: always stderr, and under `--json` also
 /// an envelope on stdout with a `cli` error entry.
@@ -77,6 +87,34 @@ impl Out<'_> {
         drop(err);
         self.envelope(msg, details, causes)?;
         Ok(ExitCode::from(code))
+    }
+
+    /// Prints `error: <msg>` and the commands to run by hand, one per
+    /// line; under `--json` the envelope's `data` also holds them as
+    /// `manual_commands`. Returns exit 5.
+    fn no_rights(
+        &self,
+        msg: &str,
+        manual: &[String],
+        mut data: serde_json::Value,
+        warnings: &[ErrorEntry],
+    ) -> anyhow::Result<ExitCode> {
+        let mut err = anstream::stderr().lock();
+        writeln!(err, "error: {msg}")?;
+        if !manual.is_empty() {
+            writeln!(err, "to do it yourself, run:")?;
+        }
+        for m in manual {
+            writeln!(err, "  {m}")?;
+        }
+        drop(err);
+        if self.json {
+            data["manual_commands"] = json!(manual);
+            let mut errors = warnings.to_vec();
+            errors.push(ErrorEntry::new("cli", msg.to_string()));
+            print_json_entries(self.command, &data, &errors)?;
+        }
+        Ok(ExitCode::from(EXIT_NO_RIGHTS))
     }
 
     pub fn fail(&self, code: u8, msg: &str) -> anyhow::Result<ExitCode> {
@@ -310,6 +348,14 @@ pub fn apply(
         return Ok(ExitCode::SUCCESS);
     }
 
+    let needs_rights = plans.iter().flat_map(|p| &p.actions).any(is_privileged);
+    let privilege = Privilege::for_run(env, needs_rights);
+    if needs_rights && privilege.esc.is_none() {
+        let manual = manual_commands(env, plans.iter().flat_map(|p| &p.actions));
+        let data = json!({ "plans": plans, "report": null });
+        return out.no_rights(NO_RIGHTS, &manual, data, errors);
+    }
+
     let interactive = prompt::is_interactive();
     for app in targets.iter().filter_map(|t| t.app) {
         let pids = running_processes(env, app);
@@ -345,16 +391,18 @@ pub fn apply(
         }
     }
 
-    let reports: Vec<Option<ExecReport>> = plans
-        .iter()
-        .map(|p| (!p.actions.is_empty()).then(|| execute(env, cfg, p)))
-        .collect();
+    let reports = run_plans(env, cfg, &plans, &privilege);
     let all_ok = reports
         .iter()
         .flatten()
         .all(|r| r.results.iter().all(|x| x.ok));
+    let not_granted = reports.iter().flatten().any(|r| r.escalation_failed);
     if act.json {
         let data = json!({ "plans": plans, "report": reports });
+        if not_granted {
+            let manual = failed_privileged(env, &plans, &reports);
+            return out.no_rights(NOT_GRANTED, &manual, data, errors);
+        }
         print_json_entries(out.command, &data, errors)?;
     } else {
         writeln!(anstream::stdout().lock())?;
@@ -364,8 +412,245 @@ pub fn apply(
             .filter_map(|(p, r)| r.as_ref().map(|r| (*p, r)))
             .collect();
         render::report(env, &runs)?;
+        if not_granted {
+            let manual = failed_privileged(env, &plans, &reports);
+            return out.no_rights(NOT_GRANTED, &manual, serde_json::Value::Null, errors);
+        }
     }
     Ok(ExitCode::from(if all_ok { 0 } else { 3 }))
+}
+
+/// Runs each non-empty plan; `None` for an empty one. Once an escalation
+/// has failed, later plans are not asked for rights again: their
+/// privileged actions fail as if there were no way to get them.
+fn run_plans(
+    env: &Env,
+    cfg: &Config,
+    plans: &[&Plan],
+    privilege: &Privilege,
+) -> Vec<Option<ExecReport>> {
+    let user_runner = SystemRunner::with_timeout(USER_COMMAND_TIMEOUT);
+    // Re-reads what is still installed after a package removal claimed
+    // success, with the query runner.
+    let post_check = |env: &Env, source: SourceKind, names: &[String]| {
+        still_installed(env, &SystemRunner::new(), source, names)
+    };
+    let mut refused = false;
+    plans
+        .iter()
+        .map(|p| {
+            if p.actions.is_empty() {
+                return None;
+            }
+            let esc = privilege.esc.as_ref().filter(|_| !refused);
+            // The escalation program shares the terminal: Ctrl-C must not
+            // end crumbs before it has read the markers and written the
+            // history.
+            let _held = p.actions.iter().any(is_privileged).then(signals::hold);
+            let r = execute_full(
+                env,
+                cfg,
+                p,
+                &user_runner,
+                privilege.runner.as_ref(),
+                esc,
+                &post_check,
+            );
+            refused |= r.escalation_failed;
+            Some(r)
+        })
+        .collect()
+}
+
+/// The manual commands for the privileged actions that did not succeed.
+fn failed_privileged(env: &Env, plans: &[&Plan], reports: &[Option<ExecReport>]) -> Vec<String> {
+    let failed = plans
+        .iter()
+        .zip(reports)
+        .filter_map(|(p, r)| r.as_ref().map(|r| (p, r)))
+        .flat_map(|(p, r)| {
+            p.actions
+                .iter()
+                .zip(&r.results)
+                .filter(|(_, res)| !res.ok)
+                .map(|(pa, _)| pa)
+        });
+    manual_commands(env, failed)
+}
+
+/// How this run gets administrator rights: the escalation program (if
+/// any) and the runner of the privileged batch.
+struct Privilege {
+    esc: Option<Escalation>,
+    runner: Box<dyn PrivilegedRunner>,
+}
+
+impl Privilege {
+    /// Detects the escalation program when `needed`. One that needs a
+    /// terminal counts only when stdin is one.
+    ///
+    /// Debug builds never escalate for real unless
+    /// `CRUMBS_ALLOW_REAL_ESCALATION=1`; with `CRUMBS_TEST_PRIV_RUNNER=sh`
+    /// the batch runs with `/bin/sh` as the current user (`deny`: nothing
+    /// runs, as when the prompt is dismissed). Release builds ignore both.
+    fn for_run(env: &Env, needed: bool) -> Privilege {
+        let system =
+            || -> Box<dyn PrivilegedRunner> { Box::new(SystemPrivilegedRunner::new(&env.root)) };
+        if !needed {
+            return Privilege {
+                esc: None,
+                runner: system(),
+            };
+        }
+        #[cfg(debug_assertions)]
+        {
+            if let Some(runner) = test_runner::from_env() {
+                return Privilege {
+                    esc: Some(test_runner::escalation()),
+                    runner,
+                };
+            }
+            if std::env::var_os("CRUMBS_ALLOW_REAL_ESCALATION").is_none_or(|v| v != "1") {
+                return Privilege {
+                    esc: None,
+                    runner: system(),
+                };
+            }
+        }
+        let esc = detect_escalation(env, &SystemRunner::new())
+            .filter(|e| !e.requires_tty || std::io::stdin().is_terminal());
+        Privilege {
+            esc,
+            runner: system(),
+        }
+    }
+}
+
+/// Debug-only stand-ins for the escalation, selected with
+/// `CRUMBS_TEST_PRIV_RUNNER`.
+#[cfg(debug_assertions)]
+mod test_runner {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+
+    use crumbs_core::CoreError;
+    use crumbs_core::privilege::batch::PrivilegedRunner;
+    use crumbs_core::privilege::{Escalation, EscalationKind};
+
+    /// Runs the script with `/bin/sh` as the current user.
+    struct Sh;
+
+    impl PrivilegedRunner for Sh {
+        fn run(&self, _esc: &Escalation, script: &[u8]) -> Result<Vec<u8>, CoreError> {
+            let out = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(OsStr::from_bytes(script))
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .map_err(|e| CoreError::Command {
+                    program: "/bin/sh".into(),
+                    message: e.to_string(),
+                })?;
+            Ok(out.stdout)
+        }
+    }
+
+    /// Runs nothing and prints nothing, like a dismissed prompt.
+    struct Deny;
+
+    impl PrivilegedRunner for Deny {
+        fn run(&self, _esc: &Escalation, _script: &[u8]) -> Result<Vec<u8>, CoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    pub(super) fn from_env() -> Option<Box<dyn PrivilegedRunner>> {
+        match std::env::var("CRUMBS_TEST_PRIV_RUNNER").ok()?.as_str() {
+            "sh" => Some(Box::new(Sh)),
+            "deny" => Some(Box::new(Deny)),
+            _ => None,
+        }
+    }
+
+    pub(super) fn escalation() -> Escalation {
+        Escalation {
+            kind: EscalationKind::Run0,
+            program: PathBuf::from("/usr/bin/run0"),
+            requires_tty: false,
+        }
+    }
+}
+
+/// Keeps SIGINT and SIGQUIT from ending crumbs while the privileged batch
+/// runs. std has no signal API and rustix offers only its experimental
+/// `runtime` one, so this declares libc's `signal` (std already links
+/// libc). A no-op handler is installed rather than `SIG_IGN`: a caught
+/// signal is reset to its default across `exec`, so the escalation program
+/// and the steps still see Ctrl-C, while an ignored one would be inherited.
+/// glibc's `signal` sets `SA_RESTART`, and std retries on `EINTR` anyway.
+mod signals {
+    use std::os::raw::c_int;
+
+    const SIGINT: c_int = 2;
+    const SIGQUIT: c_int = 3;
+    const SIG_ERR: usize = usize::MAX;
+
+    unsafe extern "C" {
+        fn signal(signum: c_int, handler: usize) -> usize;
+    }
+
+    extern "C" fn ignore(_: c_int) {}
+
+    /// Restores the previous handlers when dropped.
+    pub(super) struct Held(Vec<(c_int, usize)>);
+
+    pub(super) fn hold() -> Held {
+        let handler = ignore as extern "C" fn(c_int) as usize;
+        let mut previous = Vec::new();
+        for sig in [SIGINT, SIGQUIT] {
+            // SAFETY: `ignore` does nothing, so it is async-signal-safe.
+            let old = unsafe { signal(sig, handler) };
+            if old != SIG_ERR {
+                previous.push((sig, old));
+            }
+        }
+        Held(previous)
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            for &(sig, old) in &self.0 {
+                // SAFETY: `old` is the handler `signal` returned for `sig`.
+                unsafe { signal(sig, old) };
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        unsafe extern "C" {
+            fn raise(sig: c_int) -> c_int;
+        }
+
+        #[test]
+        fn held_signals_do_not_end_the_process() {
+            let held = hold();
+            // SAFETY: SIGINT and SIGQUIT have the no-op handler now.
+            assert_eq!(unsafe { raise(SIGINT) }, 0);
+            assert_eq!(unsafe { raise(SIGQUIT) }, 0);
+            drop(held);
+            // Restored: the previous handler (the default) is back.
+            // SAFETY: only reads the disposition, then puts it back.
+            let current = unsafe { signal(SIGINT, 0) };
+            unsafe { signal(SIGINT, current) };
+            assert_eq!(current, 0);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -41,6 +41,9 @@ fn crumbs(t: &FixtureTree) -> Command {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("crumbs");
     cmd.env("CRUMBS_ROOT", t.dir.path());
     cmd.env_remove("NO_COLOR");
+    // Only a test that asks for the fake privileged runner gets one.
+    cmd.env_remove("CRUMBS_TEST_PRIV_RUNNER");
+    cmd.env_remove("CRUMBS_ALLOW_REAL_ESCALATION");
     cmd
 }
 
@@ -175,9 +178,8 @@ fn doctor_human() {
         .assert()
         .code(0)
         .stdout(predicate::str::contains("✓ pacman"))
-        .stdout(predicate::str::contains(
-            "none (privileged cleanup unavailable)",
-        ));
+        .stdout(predicate::str::contains("Escalation: none\n"))
+        .stdout(predicate::str::contains("privileged cleanup: unavailable"));
 }
 
 #[test]
@@ -456,17 +458,17 @@ fn uninstall_dry_run_changes_nothing() {
 }
 
 #[test]
-fn uninstall_pacman_requires_leftovers_only_exit_2() {
+fn uninstall_unmanaged_requires_leftovers_only_exit_2() {
     let t = fixture(FLATPAK_OK);
-    t.write("/home/user/.cache/firefox/blob", b"x");
+    t.write("/home/user/.cache/foo/blob", b"x");
     crumbs(&t)
-        .args(["uninstall", "firefox", "--yes"])
+        .args(["uninstall", "Zed Foo", "--yes"])
         .assert()
         .code(2)
         .stderr(predicate::str::contains(
-            "removing pacman apps needs privileged support (coming in a later version); use --leftovers-only",
+            "removing unmanaged apps needs M4b; use --leftovers-only",
         ));
-    assert!(real(&t, "/home/user/.cache/firefox/blob").exists());
+    assert!(real(&t, "/home/user/.cache/foo/blob").exists());
 }
 
 #[test]
@@ -2087,4 +2089,298 @@ fn history_sanitises_label() {
     assert_eq!(out.status.code(), Some(0));
     assert_clean(&out);
     assert_shows_replacement(&out);
+}
+
+// ---- full uninstall with one privileged batch (only ever inside the fixture) ----
+
+/// A fake `pacman`: the simulation (`-Rs --print ...`) prints firefox and
+/// two dependencies; the removal (`-Rn --noconfirm <names>`) logs its
+/// arguments to `<root>/pacman-args` and deletes those packages' database
+/// entries. It runs as the test user, inside the fixture.
+const PACMAN_OK: &str = "#!/bin/sh\nroot=\"$(dirname \"$0\")/../..\"\ncase \"$1\" in\n-Rs) printf 'firefox 159.0.1-1\\ngn 0.2385.1-1\\nlibjuice 1.7.3-1\\n' ;;\n-Rn) echo \"$@\" >> \"$root/pacman-args\"; shift 2; for p in \"$@\"; do rm -rf \"$root\"/var/lib/pacman/local/\"$p\"-*; done ;;\n*) exit 9 ;;\nesac\n";
+/// The simulation refuses, with an escape byte in its message.
+const PACMAN_REFUSE: &str = "#!/bin/sh\nprintf ':: removing firefox breaks dependency \\033[1mfirefox\\033[0m required by foo\\n'\necho 'error: failed to prepare transaction (could not satisfy dependencies)' >&2\nexit 1\n";
+/// Lists the fixture's Flatpak apps; `uninstall` logs its arguments to
+/// `<root>/flatpak-args` instead of removing anything.
+const FLATPAK_APPS_RECORD: &str = "#!/bin/sh\nif [ \"$1\" = uninstall ]; then echo \"$@\" >> \"$(dirname \"$0\")/../../flatpak-args\"; exit 0; fi\nprintf 'app.xemu.xemu\\txemu\\t0.8.136\\tuser\\t34.4 MB\\ncom.dosbox_x.DOSBox-X\\tDOSBox-X\\t2026.10.01\\tsystem\\t51.4 MB\\n'\n";
+
+fn pacman_fixture(pacman: &str) -> FixtureTree {
+    let t = fixture(FLATPAK_OK);
+    t.pacman_pkg("gn", "0.2385.1-1", Some(1_000), &["usr/bin/gn"]);
+    t.pacman_pkg("libjuice", "1.7.3-1", Some(1_000), &["usr/lib/libjuice.so"]);
+    t.write_exec("/usr/bin/pacman", pacman.as_bytes());
+    t.write("/home/user/.cache/firefox/blob", &[b'x'; 4000]);
+    t
+}
+
+fn run_out(cmd: &mut Command) -> (i32, String, String) {
+    let out = cmd.output().unwrap();
+    (
+        out.status.code().unwrap(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+fn pkg_present(t: &FixtureTree, dir: &str) -> bool {
+    real(t, &format!("/var/lib/pacman/local/{dir}/desc")).exists()
+}
+
+const MANUAL_PACMAN: &str = "sudo '/usr/bin/pacman' '-Rn' '--noconfirm' 'firefox' 'gn' 'libjuice'";
+
+#[test]
+fn uninstall_pacman_dry_run_shows_also_removed() {
+    let t = pacman_fixture(PACMAN_OK);
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["uninstall", "firefox", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("remove"))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert!(
+        row.contains("—") && row.contains("pacman: firefox 159.0.1-1"),
+        "{row}"
+    );
+    assert!(
+        stdout.contains("also removed: gn 0.2385.1-1, libjuice 1.7.3-1"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("~/.cache/firefox"), "{stdout}");
+    assert!(
+        stdout.contains(
+            "note: packages are removed with administrator rights; you will be asked once"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("note: this cannot be undone by crumbs"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("leftovers only"), "{stdout}");
+    assert!(pkg_present(&t, "firefox-159.0.1-1"));
+    assert!(real(&t, "/home/user/.cache/firefox/blob").exists());
+    assert!(!real(&t, "/pacman-args").exists());
+    // JSON: the package action leads the plan; leftovers depend on it.
+    let v = stdout_json(crumbs(&t).args(["uninstall", "firefox", "--dry-run", "--json"]));
+    let actions = v["data"]["plans"][0]["actions"].as_array().unwrap();
+    assert_eq!(actions[0]["action"]["type"], "package-remove", "{v}");
+    assert_eq!(
+        actions[0]["action"]["args"],
+        serde_json::json!(["-Rn", "--noconfirm", "firefox", "gn", "libjuice"])
+    );
+    assert!(actions.len() > 1, "{v}");
+    assert!(actions[1..].iter().all(|a| a["depends_on"] == 0), "{v}");
+}
+
+#[test]
+fn uninstall_pacman_executes_batch_and_trashes_leftovers() {
+    let t = pacman_fixture(PACMAN_OK);
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "sh").args([
+        "uninstall",
+        "firefox",
+        "--yes",
+    ]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(real(&t, "/pacman-args")).unwrap(),
+        "-Rn --noconfirm firefox gn libjuice\n"
+    );
+    assert!(!pkg_present(&t, "firefox-159.0.1-1"));
+    assert!(!pkg_present(&t, "gn-0.2385.1-1"));
+    assert!(pkg_present(&t, "coreutils-9.5-1"));
+    assert!(stdout.contains("✓ removed pacman: firefox"), "{stdout}");
+    assert!(stdout.contains("✓ trashed ~/.cache/firefox"), "{stdout}");
+    assert!(trash_files(&t).contains(&"firefox".to_string()));
+    let h = history_json(&t);
+    let text = h.to_string();
+    assert!(text.contains("package-remove"), "{h}");
+}
+
+#[test]
+fn uninstall_pacman_refused_by_simulation_exit_1() {
+    let t = pacman_fixture(PACMAN_REFUSE);
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "sh").args([
+        "uninstall",
+        "firefox",
+        "--yes",
+    ]));
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(stderr.contains("breaks dependency"), "{stderr}");
+    assert!(stderr.contains("failed to prepare transaction"), "{stderr}");
+    assert!(!stderr.contains('\u{1b}'), "{stderr:?}");
+    assert!(pkg_present(&t, "firefox-159.0.1-1"));
+    assert!(real(&t, "/home/user/.cache/firefox/blob").exists());
+    let v = json_error(&t, &["uninstall", "firefox", "--json", "--yes"], 1);
+    let msg = v["errors"].as_array().unwrap().last().unwrap()["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(msg.contains("breaks dependency"), "{msg}");
+}
+
+#[test]
+fn uninstall_pacman_busy_exit_1() {
+    let t = pacman_fixture(PACMAN_OK);
+    t.write("/var/lib/pacman/db.lck", b"");
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "sh").args([
+        "uninstall",
+        "firefox",
+        "--yes",
+    ]));
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("pacman is busy (database lock present)"),
+        "{stderr}"
+    );
+    assert!(!real(&t, "/pacman-args").exists());
+    assert!(real(&t, "/home/user/.cache/firefox/blob").exists());
+    json_error(&t, &["uninstall", "firefox", "--json", "--yes"], 1);
+}
+
+#[test]
+fn uninstall_without_escalation_exit_5_prints_manual_commands() {
+    let t = pacman_fixture(PACMAN_OK);
+    // No fake runner: a debug build never escalates for real.
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["uninstall", "firefox", "--yes"]));
+    assert_eq!(code, 5, "{stdout}{stderr}");
+    assert!(stdout.contains("pacman: firefox 159.0.1-1"), "{stdout}");
+    assert!(
+        stderr.contains("no way to get administrator rights"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(MANUAL_PACMAN), "{stderr}");
+    assert!(!real(&t, "/pacman-args").exists());
+    assert!(pkg_present(&t, "firefox-159.0.1-1"));
+    assert!(real(&t, "/home/user/.cache/firefox/blob").exists());
+    assert!(!real(&t, "/home/user/.local/state/crumbs/history.jsonl").exists());
+    // A preview needs no escalation.
+    crumbs(&t)
+        .args(["uninstall", "firefox", "--dry-run"])
+        .assert()
+        .code(0);
+    let v = json_error(&t, &["uninstall", "firefox", "--json", "--yes"], 5);
+    assert_eq!(
+        v["data"]["manual_commands"],
+        serde_json::json!([MANUAL_PACMAN]),
+        "{v}"
+    );
+}
+
+#[test]
+fn uninstall_escalation_denied_exit_5_leftovers_untouched() {
+    let t = pacman_fixture(PACMAN_OK);
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "deny").args([
+        "uninstall",
+        "firefox",
+        "--yes",
+    ]));
+    assert_eq!(code, 5, "{stdout}{stderr}");
+    assert!(
+        stderr
+            .contains("administrator rights were not granted; nothing that needs them was changed"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(MANUAL_PACMAN), "{stderr}");
+    assert!(stdout.contains("✗ pacman: firefox"), "{stdout}");
+    assert!(pkg_present(&t, "firefox-159.0.1-1"));
+    assert!(real(&t, "/home/user/.cache/firefox/blob").exists());
+    assert!(trash_files(&t).is_empty());
+    // The attempt is recorded.
+    let h = history_json(&t);
+    assert!(h.to_string().contains("package-remove"), "{h}");
+    let out = crumbs(&t)
+        .env("CRUMBS_TEST_PRIV_RUNNER", "deny")
+        .args(["uninstall", "firefox", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(5));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["data"]["manual_commands"],
+        serde_json::json!([MANUAL_PACMAN]),
+        "{v}"
+    );
+    assert_eq!(v["data"]["report"][0]["escalation_failed"], true, "{v}");
+    assert!(
+        v["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["source"] == "cli"),
+        "{v}"
+    );
+}
+
+#[test]
+fn uninstall_flatpak_user_runs_command() {
+    let t = fixture(FLATPAK_APPS_RECORD);
+    t.write("/home/user/.var/app/app.xemu.xemu/config/x", b"x");
+    let (code, stdout, stderr) =
+        run_out(crumbs(&t).args(["uninstall", "app.xemu.xemu", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("flatpak uninstall --user -y --noninteractive app.xemu.xemu"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("administrator rights"), "{stdout}");
+    // No privileged action: no escalation is needed.
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["uninstall", "app.xemu.xemu", "--yes"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(real(&t, "/flatpak-args")).unwrap(),
+        "uninstall --user -y --noninteractive app.xemu.xemu\n"
+    );
+    assert!(!real(&t, "/home/user/.var/app/app.xemu.xemu").exists());
+    assert!(trash_files(&t).contains(&"app.xemu.xemu".to_string()));
+}
+
+#[test]
+fn uninstall_flatpak_system_uses_batch() {
+    let t = fixture(FLATPAK_APPS_RECORD);
+    t.write("/home/user/.var/app/com.dosbox_x.DOSBox-X/config/x", b"x");
+    let manual = "sudo '/usr/bin/flatpak' 'uninstall' '--system' '-y' '--noninteractive' 'com.dosbox_x.DOSBox-X'";
+    let (code, _, stderr) = run_out(crumbs(&t).args(["uninstall", "DOSBox-X", "--yes"]));
+    assert_eq!(code, 5, "{stderr}");
+    assert!(stderr.contains(manual), "{stderr}");
+    assert!(!real(&t, "/flatpak-args").exists());
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "sh").args([
+        "uninstall",
+        "DOSBox-X",
+        "--yes",
+    ]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains(
+            "note: packages are removed with administrator rights; you will be asked once"
+        ),
+        "{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(real(&t, "/flatpak-args")).unwrap(),
+        "uninstall --system -y --noninteractive com.dosbox_x.DOSBox-X\n"
+    );
+    assert!(!real(&t, "/home/user/.var/app/com.dosbox_x.DOSBox-X").exists());
+}
+
+#[test]
+fn doctor_shows_privileged_availability() {
+    let t = fixture(FLATPAK_OK);
+    crumbs(&t)
+        .arg("doctor")
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("privileged cleanup: unavailable"));
+    // Only detected: doctor never runs the escalation program.
+    t.write_exec("/usr/bin/run0", b"#!/bin/sh\nexit 99\n");
+    t.write_exec(
+        "/usr/bin/systemctl",
+        b"#!/bin/sh\necho 'systemd 261 (261.3-1-manjaro)'\n",
+    );
+    crumbs(&t)
+        .arg("doctor")
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains(
+            "privileged cleanup: available via run0",
+        ));
 }

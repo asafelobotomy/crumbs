@@ -5,11 +5,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Args;
+use crumbs_core::command::SystemRunner;
 use crumbs_core::desktop::parse_desktop;
 use crumbs_core::inventory::{Inventory, Resolved, find_app, find_app_exact};
 use crumbs_core::leftovers::{Finding, FindingKind, find_leftovers};
-use crumbs_core::plan::{PlanOptions, build_plan};
-use crumbs_core::safety;
+use crumbs_core::plan::{NOTE_APP_STAYS, Plan, PlanOptions, PlannedAction, build_plan};
+use crumbs_core::removal::{RemovalError, RemovalPlan, plan_removal};
+use crumbs_core::safety::{self, Fingerprint, Scope};
 use crumbs_core::{App, Env, SourceKind};
 
 use super::act::{
@@ -57,14 +59,17 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
             Err(code) => return Ok(code),
         }
     }
-    if !args.leftovers_only
-        && let Some(app) = apps.iter().find(|a| a.source != SourceKind::AppImage)
-    {
-        let msg = format!(
-            "removing {} apps needs privileged support (coming in a later version); use --leftovers-only",
-            app.source.as_str()
-        );
-        return out.fail(2, &msg);
+    // How each app itself goes, in `apps` order; none with --leftovers-only.
+    let mut removals: Vec<Option<RemovalPlan>> = Vec::new();
+    for app in &apps {
+        if args.leftovers_only {
+            removals.push(None);
+            continue;
+        }
+        match plan_removal(env, &SystemRunner::new(), app) {
+            Ok(r) => removals.push(Some(r)),
+            Err(e) => return refuse_removal(out, app, &e),
+        }
     }
     if !args.leftovers_only {
         for app in &apps {
@@ -87,7 +92,7 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
         leftovers_only: args.leftovers_only,
     };
     let mut targets = Vec::new();
-    for app in apps {
+    for (app, removal) in apps.into_iter().zip(removals) {
         let mut found = plannable(find_leftovers(&cx.idx, app, args.show_low));
         found.retain(|f| keeps(env, app, f, args));
         let prompt_text = format!("Leftovers of {} to remove", sanitise(&app.display_name));
@@ -97,14 +102,76 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
         else {
             return out.aborted();
         };
+        let mut plan = build_plan(env, Some(app), &chosen, &opts)?;
+        if let Some(removal) = removal {
+            attach_removal(&mut plan, removal);
+        }
         targets.push(Target {
             heading: format!("{}  {}", sanitise(&app.display_name), sanitise(&app.id)),
             app: Some(app),
-            plan: build_plan(env, Some(app), &chosen, &opts)?,
+            plan,
         });
     }
     drop_overlaps(&mut targets);
     apply(env, &cx.cfg, &cx.errors(), out, &targets, &args.act)
+}
+
+pub const NOTE_NO_UNDO: &str = "this cannot be undone by crumbs";
+const REASON_APP: &str = "the app itself";
+
+/// Puts the actions that remove the app itself first in `plan`; every
+/// leftover then depends on the last of them, so nothing of the app's
+/// goes unless the app did. Nothing changes when there are none (an
+/// AppImage's file is already in the plan).
+fn attach_removal(plan: &mut Plan, removal: RemovalPlan) {
+    let n = removal.actions.len();
+    if n == 0 {
+        return;
+    }
+    plan.notes.retain(|note| note != NOTE_APP_STAYS);
+    for pa in &mut plan.actions {
+        pa.depends_on = Some(pa.depends_on.map_or(n - 1, |d| d + n));
+    }
+    let first: Vec<PlannedAction> = removal
+        .actions
+        .into_iter()
+        .map(|action| PlannedAction {
+            action,
+            size: 0,
+            fingerprint: Fingerprint {
+                dev: 0,
+                ino: 0,
+                is_symlink: false,
+                ctime: 0,
+                ctime_nsec: 0,
+            },
+            scope: Scope::Home,
+            depends_on: None,
+            reason: REASON_APP.into(),
+        })
+        .collect();
+    plan.actions.splice(0..0, first);
+    plan.notes.extend(removal.notes);
+    plan.notes.push(NOTE_NO_UNDO.into());
+}
+
+/// Explains why the app itself cannot be removed: exit 2 when crumbs does
+/// not support it, else 1. Text from the package manager may span lines;
+/// the first goes into the error line, the rest below it (sanitised).
+fn refuse_removal(out: Out, app: &App, e: &RemovalError) -> anyhow::Result<ExitCode> {
+    match e {
+        RemovalError::Unsupported(msg) => out.fail(2, msg),
+        RemovalError::Busy(msg) => out.fail(1, msg),
+        RemovalError::Refused(text) | RemovalError::InvalidName(text) => {
+            let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+            // pacman starts its summary with its own `error: `.
+            let first = lines
+                .next()
+                .map_or("refused", |l| l.strip_prefix("error: ").unwrap_or(l));
+            let rest: Vec<String> = lines.map(str::to_string).collect();
+            out.fail_with(1, &format!("cannot remove {}: {first}", app.id), &rest)
+        }
+    }
 }
 
 /// Whether a finding may be planned. The launchers and icons stay with an

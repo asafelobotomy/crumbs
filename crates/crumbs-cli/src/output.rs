@@ -24,6 +24,18 @@ pub fn partial_failure_parts(statuses: &[SourceStatus], errors: &[SourceError]) 
         })
 }
 
+/// The exit code a listing's source failures give: 1 when every available
+/// source failed, 3 when only some did, else 0.
+pub fn source_exit_code(statuses: &[SourceStatus], errors: &[SourceError]) -> u8 {
+    if errors.is_empty() {
+        0
+    } else if partial_failure_parts(statuses, errors) {
+        3
+    } else {
+        1
+    }
+}
+
 /// Formats a byte count in IEC units with one decimal place.
 pub fn fmt_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["KiB", "MiB", "GiB", "TiB", "PiB"];
@@ -152,6 +164,7 @@ pub fn print_table_with_details(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crumbs_core::SourceKind;
 
     #[test]
     fn fmt_size_iec() {
@@ -159,5 +172,41 @@ mod tests {
         assert_eq!(fmt_size(1023), "1023 B");
         assert_eq!(fmt_size(1024), "1.0 KiB");
         assert_eq!(fmt_size(1_572_864), "1.5 MiB");
+    }
+
+    fn status(source: SourceKind, available: bool) -> SourceStatus {
+        SourceStatus {
+            source,
+            available,
+            app_count: 0,
+            skipped_reason: (!available).then(|| "not installed".to_string()),
+        }
+    }
+
+    fn failed(source: SourceKind) -> SourceError {
+        SourceError {
+            source,
+            message: "boom".into(),
+        }
+    }
+
+    /// Unreachable through the CLI today (the AppImage source cannot
+    /// fail), so pinned here.
+    #[test]
+    fn all_sources_failed_exit_1() {
+        let statuses = [
+            status(SourceKind::Pacman, true),
+            status(SourceKind::Flatpak, true),
+            status(SourceKind::Unmanaged, false),
+        ];
+        let both = [failed(SourceKind::Pacman), failed(SourceKind::Flatpak)];
+        assert_eq!(source_exit_code(&statuses, &both), 1);
+        assert_eq!(source_exit_code(&statuses, &both[..1]), 3);
+        assert_eq!(source_exit_code(&statuses, &[]), 0);
+        // Nothing available and nothing failed is no failure.
+        assert_eq!(
+            source_exit_code(&[status(SourceKind::Pacman, false)], &[]),
+            0
+        );
     }
 }
