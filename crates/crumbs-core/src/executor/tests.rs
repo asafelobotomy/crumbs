@@ -351,3 +351,32 @@ fn running_processes_without_proc_is_empty() {
     let env = t.env();
     assert!(running_processes(&env, &appimage_app()).is_empty());
 }
+
+/// `--permanent` never descends into another filesystem: a tree holding a
+/// mount point is refused untouched. Mounts can't be made in tests, so
+/// the device lookup is faked for one subdirectory.
+#[test]
+fn delete_refuses_tree_with_another_filesystem() {
+    use std::os::unix::fs::MetadataExt;
+    let t = FixtureTree::new();
+    t.write("home/user/.config/foo/a", b"a");
+    t.write("home/user/.config/foo/mnt/inner", b"on another fs");
+    let env = t.env();
+    let mnt = env.sys("/home/user/.config/foo/mnt");
+    let fake_dev = |p: &Path, m: &fs::Metadata| {
+        if p.starts_with(&mnt) {
+            m.dev() + 1
+        } else {
+            m.dev()
+        }
+    };
+    let err = delete_with(&env, Path::new("/home/user/.config/foo"), &fake_dev).unwrap_err();
+    assert_eq!(err, "refusing: ~/.config/foo contains another filesystem");
+    assert!(env.sys("/home/user/.config/foo/a").exists());
+    assert!(env.sys("/home/user/.config/foo/mnt/inner").exists());
+
+    // Same device everywhere: deleted as before.
+    let same = |_: &Path, m: &fs::Metadata| m.dev();
+    delete_with(&env, Path::new("/home/user/.config/foo"), &same).unwrap();
+    assert!(!env.sys("/home/user/.config/foo").exists());
+}

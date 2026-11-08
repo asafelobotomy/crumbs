@@ -21,6 +21,7 @@ use crate::history::{self, HistoryAction, HistoryEntry};
 use crate::model::App;
 use crate::plan::{Action, Plan};
 use crate::safety::{self, Fingerprint};
+use crate::size;
 use crate::trash::{self, Trashed};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -135,12 +136,38 @@ fn act(env: &Env, action: &Action, fp: &Fingerprint, batch: &str) -> Result<Done
 
 /// Removes the entry itself: a symlink or file is unlinked, a real
 /// directory is removed recursively (std's `remove_dir_all` does not follow
-/// symlinks inside the tree).
+/// symlinks inside the tree). A directory holding another filesystem's
+/// mount point is refused untouched.
 fn delete(env: &Env, path: &Path) -> Result<(), String> {
+    delete_with(env, path, &|_, m| m.dev())
+}
+
+/// [`delete`] with the device lookup injected (tests fake a mount point).
+fn delete_with(
+    env: &Env,
+    path: &Path,
+    dev_of: &dyn Fn(&Path, &fs::Metadata) -> u64,
+) -> Result<(), String> {
     let real = env.sys_path(path);
     let meta = fs::symlink_metadata(&real).map_err(|e| io_msg(env, path, &e))?;
     if !meta.file_type().is_dir() {
         return fs::remove_file(&real).map_err(|e| io_msg(env, path, &e));
+    }
+    // `remove_dir_all` would empty a filesystem mounted inside the tree.
+    match size::crosses_device(&real, dev_of) {
+        Ok(false) => {}
+        Ok(true) => {
+            return Err(format!(
+                "refusing: {} contains another filesystem",
+                display_path(env, path)
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "refusing: cannot check {} for other filesystems: {e}",
+                display_path(env, path)
+            ));
+        }
     }
     fs::remove_dir_all(&real).map_err(|e| {
         let msg = io_msg(env, path, &e);

@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -52,6 +53,36 @@ pub fn disk_usage(env: &Env, in_system: &Path) -> DiskUsage {
         }
     }
     usage
+}
+
+/// Whether any entry in the tree at the real path `real` lies on another
+/// device than `real` itself (a mount point inside it). Does not follow
+/// symlinks and stops at the first such entry. `dev_of` gives an entry's
+/// device (`Metadata::dev` outside tests). Any read error is returned, so
+/// callers can fail closed.
+pub(crate) fn crosses_device(
+    real: &Path,
+    dev_of: &dyn Fn(&Path, &fs::Metadata) -> u64,
+) -> io::Result<bool> {
+    let meta = fs::symlink_metadata(real)?;
+    let root = dev_of(real, &meta);
+    if !meta.is_dir() {
+        return Ok(false);
+    }
+    let mut stack = vec![real.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            let m = fs::symlink_metadata(&path)?;
+            if dev_of(&path, &m) != root {
+                return Ok(true);
+            }
+            if m.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Accounts for one entry; queues it when it is a directory.
@@ -132,6 +163,26 @@ mod tests {
         assert_eq!(u.errors, 1);
         assert_eq!(u.files, 1);
         assert!(u.bytes >= 5000);
+    }
+
+    #[test]
+    fn crosses_device_finds_nested_mount() {
+        let t = FixtureTree::new();
+        t.write("/data/a/b/deep/file", b"x");
+        t.symlink("/data/link", "/elsewhere");
+        let root = t.dir.path().join("data");
+        let same = |_: &Path, m: &fs::Metadata| m.dev();
+        assert!(!crosses_device(&root, &same).unwrap());
+        let deep = root.join("a/b/deep");
+        let other = |p: &Path, m: &fs::Metadata| {
+            if p.starts_with(&deep) {
+                m.dev() + 1
+            } else {
+                m.dev()
+            }
+        };
+        assert!(crosses_device(&root, &other).unwrap());
+        assert!(crosses_device(&root.join("nope"), &same).is_err());
     }
 
     #[test]
