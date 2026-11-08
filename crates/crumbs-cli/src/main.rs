@@ -1,12 +1,12 @@
 mod cmd;
 mod output;
 
+#[cfg(debug_assertions)]
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use crumbs_core::inventory::{Inventory, SourceStatus};
-use crumbs_core::{Env, SourceError};
+use crumbs_core::Env;
 
 #[derive(Parser)]
 #[command(
@@ -15,7 +15,8 @@ use crumbs_core::{Env, SourceError};
     about = "Uninstall Linux apps and their leftovers"
 )]
 struct Cli {
-    /// Treat this directory as the filesystem root (testing only)
+    /// Treat this directory as the filesystem root (debug builds only)
+    #[cfg(debug_assertions)]
     #[arg(long, env = "CRUMBS_ROOT", hide = true, global = true)]
     root: Option<PathBuf>,
     #[command(subcommand)]
@@ -35,25 +36,14 @@ enum Command {
     },
 }
 
-/// Some source failed while at least one other source worked.
-pub fn partial_failure(inv: &Inventory) -> bool {
-    partial_failure_parts(&inv.statuses, &inv.errors)
-}
-
-pub fn partial_failure_parts(statuses: &[SourceStatus], errors: &[SourceError]) -> bool {
-    !errors.is_empty()
-        && statuses.iter().any(|s| {
-            s.available
-                && s.skipped_reason.is_none()
-                && !errors.iter().any(|e| e.source == s.source)
-        })
-}
-
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+    #[cfg(debug_assertions)]
     let env = match &cli.root {
         Some(root) => Env::fake(root)?,
         None => Env::from_system()?,
     };
+    #[cfg(not(debug_assertions))]
+    let env = Env::from_system()?;
     match cli.command {
         Command::Apps(c) => cmd::apps::run(c, &env),
         Command::Doctor { json } => cmd::doctor::run(&env, json),
@@ -64,6 +54,13 @@ fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(code) => code,
         Err(e) => {
+            let broken_pipe = e.chain().any(|c| {
+                c.downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+            });
+            if broken_pipe {
+                return ExitCode::SUCCESS;
+            }
             eprintln!("error: {e:#}");
             ExitCode::from(1)
         }

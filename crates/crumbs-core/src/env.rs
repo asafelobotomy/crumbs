@@ -115,13 +115,10 @@ impl Env {
 
     pub fn fake(root: &Path) -> Result<Env, CoreError> {
         let unsafe_root = || CoreError::UnsafeRoot(root.to_path_buf());
-        let canon = root.canonicalize().map_err(|_| unsafe_root())?;
         let tmp = std::env::temp_dir()
             .canonicalize()
             .map_err(|_| unsafe_root())?;
-        if canon == tmp || !canon.starts_with(&tmp) {
-            return Err(unsafe_root());
-        }
+        let canon = check_fake_root(root, &tmp)?;
         let home = canon.join("home/user");
         let distro = load_distro(&canon);
         Ok(Env {
@@ -151,6 +148,17 @@ impl Env {
     }
 }
 
+/// Canonicalises `root` and requires it to be strictly inside `temp`, where
+/// `temp` itself must be a real directory (not `/`, at least 2 components).
+pub(crate) fn check_fake_root(root: &Path, temp: &Path) -> Result<PathBuf, CoreError> {
+    let unsafe_root = || CoreError::UnsafeRoot(root.to_path_buf());
+    let canon = root.canonicalize().map_err(|_| unsafe_root())?;
+    if temp.components().count() < 2 || canon == temp || !canon.starts_with(temp) {
+        return Err(unsafe_root());
+    }
+    Ok(canon)
+}
+
 /// Display form of an in-system path: `~/<rest>` under the in-system home
 /// (`~` for the home itself), otherwise the absolute path.
 pub fn display_path(env: &Env, in_system: &Path) -> String {
@@ -170,6 +178,15 @@ mod tests {
     fn fake_rejects_non_temp_root() {
         assert!(matches!(
             Env::fake(Path::new("/")),
+            Err(CoreError::UnsafeRoot(_))
+        ));
+    }
+
+    #[test]
+    fn fake_rejects_root_temp_dir() {
+        let t = FixtureTree::new();
+        assert!(matches!(
+            check_fake_root(t.dir.path(), Path::new("/")),
             Err(CoreError::UnsafeRoot(_))
         ));
     }

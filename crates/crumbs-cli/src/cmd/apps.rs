@@ -9,8 +9,7 @@ use crumbs_core::sources::ListOptions;
 use crumbs_core::{App, Env, SourceKind};
 use serde_json::json;
 
-use crate::output::{fmt_size, print_json, print_table};
-use crate::partial_failure;
+use crate::output::{fmt_size, partial_failure, print_json, print_table};
 
 #[derive(Subcommand)]
 pub enum AppsCmd {
@@ -116,7 +115,7 @@ fn show(env: &Env, query: &str, json: bool) -> anyhow::Result<ExitCode> {
             } else {
                 print_app(app)?;
             }
-            Ok(ExitCode::SUCCESS)
+            Ok(ExitCode::from(if partial_failure(&inv) { 3 } else { 0 }))
         }
         Resolved::NotFound => {
             writeln!(err, "error: no installed app matches '{query}'")?;
@@ -155,7 +154,10 @@ fn print_app(a: &App) -> anyhow::Result<()> {
         ("Version", a.version.clone().unwrap_or_else(|| "-".into())),
         (
             "Installation",
-            format!("{:?}", a.installation).to_lowercase(),
+            serde_json::to_value(a.installation)?
+                .as_str()
+                .unwrap_or("-")
+                .to_string(),
         ),
         ("Size", a.install_size.map_or_else(|| "-".into(), fmt_size)),
         (

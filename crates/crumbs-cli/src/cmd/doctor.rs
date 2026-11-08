@@ -10,7 +10,7 @@ use crate::output::print_json;
 
 pub fn run(env: &Env, json: bool) -> anyhow::Result<ExitCode> {
     let report = doctor(env, &SystemRunner);
-    let code = if crate::partial_failure_parts(&report.sources, &report.errors) {
+    let code = if crate::output::partial_failure_parts(&report.sources, &report.errors) {
         3
     } else {
         0

@@ -237,3 +237,43 @@ fn apps_show_ambiguous_json_envelope() {
     assert!(v["data"]["app"].is_null());
     assert_eq!(v["data"]["candidates"].as_array().unwrap().len(), 3);
 }
+
+#[test]
+fn apps_list_pipe_closed_exit_0() {
+    let t = fixture(FLATPAK_OK);
+    let bin = assert_cmd::cargo::cargo_bin!("crumbs");
+    let mut child = std::process::Command::new(bin)
+        .env("CRUMBS_ROOT", t.dir.path())
+        .args(["apps", "list"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn apps_show_partial_failure_exit_3() {
+    let t = fixture(FLATPAK_FAIL);
+    crumbs(&t)
+        .args(["apps", "show", "firefox"])
+        .assert()
+        .code(3)
+        .stdout(predicate::str::contains("pacman:firefox"));
+}
+
+#[test]
+fn apps_show_installation_uses_serde_name() {
+    let t = fixture(FLATPAK_OK);
+    crumbs(&t)
+        .args(["apps", "show", "firefox"])
+        .assert()
+        .stdout(predicate::str::is_match(r"Installation:\s+system\n").unwrap());
+}

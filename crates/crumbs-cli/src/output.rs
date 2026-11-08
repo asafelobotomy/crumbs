@@ -4,9 +4,24 @@ use std::io::{self, Write};
 
 use anstyle::Style;
 use crumbs_core::SourceError;
+use crumbs_core::inventory::{Inventory, SourceStatus};
 use serde::Serialize;
 
 const SCHEMA_VERSION: u32 = 1;
+
+/// Some source failed while at least one other source worked.
+pub fn partial_failure(inv: &Inventory) -> bool {
+    partial_failure_parts(&inv.statuses, &inv.errors)
+}
+
+pub fn partial_failure_parts(statuses: &[SourceStatus], errors: &[SourceError]) -> bool {
+    !errors.is_empty()
+        && statuses.iter().any(|s| {
+            s.available
+                && s.skipped_reason.is_none()
+                && !errors.iter().any(|e| e.source == s.source)
+        })
+}
 
 /// Formats a byte count in IEC units with one decimal place.
 pub fn fmt_size(bytes: u64) -> String {
