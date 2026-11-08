@@ -116,7 +116,7 @@ fn appimage_removable(env: &Env, cx: &Context, app: &App) -> Result<(), String> 
     let Some(location) = &app.location else {
         return Err("its file location is unknown".into());
     };
-    safety::verify_now(env, &cx.cfg, location)
+    safety::verify_now(env, &cx.cfg, safety::Scope::Home, location)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }

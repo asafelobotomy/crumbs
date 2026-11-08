@@ -15,6 +15,29 @@ use serde::{Deserialize, Serialize};
 use crate::config::{Config, could_match_below, glob_match};
 use crate::env::{Env, display_path};
 use crate::error::CoreError;
+use crate::trash::validate_private_dir;
+
+/// Where a target may lie, and so which root its parent chain is checked
+/// from. Every scope also applies the protected paths and `exclude`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Scope {
+    /// Strictly under the home directory.
+    #[default]
+    Home,
+    /// A direct child of `/tmp`: owned by the user, a regular file or a
+    /// directory, not a symlink.
+    UserTemp,
+    /// A direct child of `{data_home}/Trash/files` or `{data_home}/Trash/info`,
+    /// with `Trash`, `files` and `info` private to the user.
+    HomeTrash,
+}
+
+impl Scope {
+    pub fn is_home(&self) -> bool {
+        *self == Scope::Home
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protection {
@@ -32,10 +55,15 @@ pub enum SafetyError {
     OutsideAllowedRoots(String),
     #[error("refusing: {0} changed since it was scanned")]
     Changed(String),
-    /// A directory between home and the target is a symlink. Holds the
-    /// display form of that directory (`~/…` under home).
+    /// A directory between the scope's root and the target, or the root
+    /// itself outside `Home`, is a symlink. Holds the display form of that
+    /// directory (`~/…` under home).
     #[error("refusing: {} is a symlink", .0.display())]
     SymlinkedParent(PathBuf),
+    /// The scope's rules reject the target or its root directory: the
+    /// display path and why (`is not owned by you`, …).
+    #[error("refusing: {0} {1}")]
+    Ineligible(String, &'static str),
     #[error("refusing: {0} is not a canonical path")]
     NonCanonical(String),
     #[error("{0} no longer exists")]
@@ -136,6 +164,41 @@ pub(crate) fn is_protected_by(protected: &[(PathBuf, Protection)], in_system: &P
     })
 }
 
+/// Whether `in_system` lies where `scope` allows and is neither protected
+/// nor excluded. Purely lexical; [`verify`] adds the on-disk checks.
+pub fn is_allowed_target(env: &Env, cfg: &Config, scope: Scope, in_system: &Path) -> bool {
+    let protected = protected_paths(env, cfg);
+    let Some(path) = normalise(in_system) else {
+        return false;
+    };
+    match scope {
+        Scope::Home => is_allowed_user_target_by(env, cfg, &protected, &path),
+        Scope::UserTemp | Scope::HomeTrash => {
+            let home = env.unsys(&env.home);
+            // `/tmp` children never reach into home, whatever `HOME` is.
+            let in_root = path
+                .parent()
+                .is_some_and(|parent| scope_roots(env, scope).iter().any(|root| parent == root))
+                && (scope == Scope::HomeTrash || !path.starts_with(&home));
+            in_root && !is_protected_by(&protected, &path) && !is_excluded(cfg, &path)
+        }
+    }
+}
+
+/// The in-system directories whose direct children `scope` allows. Empty
+/// for `Home`, whose targets may lie anywhere below home.
+fn scope_roots(env: &Env, scope: Scope) -> Vec<PathBuf> {
+    match scope {
+        Scope::Home => Vec::new(),
+        Scope::UserTemp => vec![PathBuf::from("/tmp")],
+        Scope::HomeTrash => {
+            let trash = env.unsys(&env.data_home).join("Trash");
+            vec![trash.join("files"), trash.join("info")]
+        }
+    }
+}
+
+/// The [`Scope::Home`] case of [`is_allowed_target`].
 pub fn is_allowed_user_target(env: &Env, cfg: &Config, in_system: &Path) -> bool {
     is_allowed_user_target_by(env, cfg, &protected_paths(env, cfg), in_system)
 }
@@ -154,14 +217,16 @@ pub(crate) fn is_allowed_user_target_by(
     if path == home || !path.starts_with(&home) {
         return false;
     }
-    if is_protected_by(protected, &path) {
-        return false;
-    }
+    !is_protected_by(protected, &path) && !is_excluded(cfg, &path)
+}
+
+/// Whether an `exclude` pattern matches `path` or could match below it.
+fn is_excluded(cfg: &Config, path: &Path) -> bool {
     let text = path.to_string_lossy();
     // Like a protected path, an exclude also shields every ancestor that
     // could contain a match: trashing `~/.config/Foo` would take an
     // excluded `~/.config/Foo/keep` (or `~/.config/*/keep`) with it.
-    !cfg.exclude
+    cfg.exclude
         .iter()
         .any(|pat| glob_match(pat, &text) || could_match_below(pat, &text))
 }
@@ -186,12 +251,15 @@ fn real_path(env: &Env, in_system: &Path) -> PathBuf {
 }
 
 fn lstat(env: &Env, in_system: &Path) -> io::Result<Fingerprint> {
-    let m = fs::symlink_metadata(real_path(env, in_system))?;
-    Ok(Fingerprint {
+    fs::symlink_metadata(real_path(env, in_system)).map(|m| fingerprint_of(&m))
+}
+
+fn fingerprint_of(m: &fs::Metadata) -> Fingerprint {
+    Fingerprint {
         dev: m.dev(),
         ino: m.ino(),
         is_symlink: m.file_type().is_symlink(),
-    })
+    }
 }
 
 /// Fails with `CoreError::Io` (`InvalidInput`) for non-canonical paths.
@@ -208,42 +276,65 @@ pub fn fingerprint(env: &Env, in_system: &Path) -> Result<Fingerprint, CoreError
     })
 }
 
-/// Re-checks `in_system` immediately before an action. Order: allowed target,
-/// parent chain (no symlinks between home and the path), then the target's own
-/// `(dev, ino, is_symlink)` against `expected`.
+/// Re-checks `in_system` immediately before an action. Order: allowed
+/// target for `scope`, parent chain (no symlinks from the scope's root down
+/// to the path's parent), the scope's own rules for the target, then the
+/// target's `(dev, ino, is_symlink)` against `expected`.
 pub fn verify(
     env: &Env,
     cfg: &Config,
+    scope: Scope,
     in_system: &Path,
     expected: &Fingerprint,
 ) -> Result<(), SafetyError> {
-    let path = check_location(env, cfg, in_system)?;
-    let shown = display_path(env, in_system);
-    match lstat(env, &path) {
-        Ok(fp) if fp == *expected => Ok(()),
-        Ok(_) => Err(SafetyError::Changed(shown)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(SafetyError::Missing(shown)),
-        Err(_) => Err(SafetyError::Changed(shown)),
+    let fp = verify_now(env, cfg, scope, in_system)?;
+    if fp == *expected {
+        Ok(())
+    } else {
+        Err(SafetyError::Changed(display_path(env, in_system)))
     }
 }
 
 /// The checks of [`verify`] for a path that has no scan-time fingerprint
 /// yet: whether it could be acted on right now. Returns its current
 /// fingerprint.
-pub fn verify_now(env: &Env, cfg: &Config, in_system: &Path) -> Result<Fingerprint, SafetyError> {
-    let path = check_location(env, cfg, in_system)?;
+pub fn verify_now(
+    env: &Env,
+    cfg: &Config,
+    scope: Scope,
+    in_system: &Path,
+) -> Result<Fingerprint, SafetyError> {
+    let path = check_location(env, cfg, scope, in_system)?;
     let shown = display_path(env, in_system);
-    match lstat(env, &path) {
-        Ok(fp) => Ok(fp),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(SafetyError::Missing(shown)),
-        Err(_) => Err(SafetyError::Changed(shown)),
+    let meta = match fs::symlink_metadata(real_path(env, &path)) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(SafetyError::Missing(shown)),
+        Err(_) => return Err(SafetyError::Changed(shown)),
+    };
+    if scope == Scope::UserTemp {
+        let ft = meta.file_type();
+        if !(ft.is_file() || ft.is_dir()) {
+            return Err(SafetyError::Ineligible(
+                shown,
+                "is not a regular file or directory",
+            ));
+        }
+        if meta.uid() != env.uid {
+            return Err(SafetyError::Ineligible(shown, "is not owned by you"));
+        }
     }
+    Ok(fingerprint_of(&meta))
 }
 
-/// Everything [`verify`] checks except the target itself: canonical,
-/// allowed, and no symlinked directory between home and the target.
+/// Everything [`verify`] checks before looking at the target itself:
+/// canonical, allowed for `scope`, and its root and parent chain intact.
 /// Returns the normalised path.
-fn check_location(env: &Env, cfg: &Config, in_system: &Path) -> Result<PathBuf, SafetyError> {
+fn check_location(
+    env: &Env,
+    cfg: &Config,
+    scope: Scope,
+    in_system: &Path,
+) -> Result<PathBuf, SafetyError> {
     let shown = display_path(env, in_system);
     if !is_canonical(in_system) {
         return Err(SafetyError::NonCanonical(shown));
@@ -251,34 +342,69 @@ fn check_location(env: &Env, cfg: &Config, in_system: &Path) -> Result<PathBuf, 
     if is_protected(env, cfg, in_system) {
         return Err(SafetyError::Protected(shown));
     }
-    if !is_allowed_user_target(env, cfg, in_system) {
+    if !is_allowed_target(env, cfg, scope, in_system) {
         return Err(SafetyError::OutsideAllowedRoots(shown));
     }
-    // Allowed implies normalisable and strictly under home.
-    let (Some(path), home) = (normalise(in_system), env.unsys(&env.home)) else {
+    // Allowed implies normalisable with a parent.
+    let Some(path) = normalise(in_system) else {
         return Err(SafetyError::OutsideAllowedRoots(shown));
     };
     let Some(parent) = path.parent() else {
         return Err(SafetyError::OutsideAllowedRoots(shown));
     };
-    // Every directory strictly below home, down to the parent of the target.
-    let mut dir = home.clone();
-    let rel_parent = parent.strip_prefix(&home).unwrap_or(Path::new(""));
-    for comp in rel_parent.components() {
-        dir.push(comp.as_os_str());
-        match lstat(env, &dir) {
-            Ok(fp) if !fp.is_symlink => {}
-            Ok(_) => {
-                let parent = PathBuf::from(display_path(env, &dir));
-                return Err(SafetyError::SymlinkedParent(parent));
+    match scope {
+        Scope::Home => check_parent_chain(env, &env.unsys(&env.home), parent, &shown)?,
+        Scope::UserTemp => {
+            // `/tmp` itself may be a mount, but never a symlink.
+            check_real_dir(env, parent, &shown)?;
+        }
+        Scope::HomeTrash => {
+            let trash = env.unsys(&env.data_home).join("Trash");
+            for dir in [trash.clone(), trash.join("files"), trash.join("info")] {
+                check_real_dir(env, &dir, &shown)?;
+                if validate_private_dir(env, &real_path(env, &dir)).is_err() {
+                    return Err(SafetyError::Ineligible(
+                        display_path(env, &dir),
+                        "is not a private directory owned by you",
+                    ));
+                }
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Err(SafetyError::Missing(shown));
-            }
-            Err(_) => return Err(SafetyError::Changed(shown)),
         }
     }
     Ok(path)
+}
+
+/// No directory strictly below `root`, down to and including `parent`, is
+/// a symlink. `shown` names the target in errors.
+fn check_parent_chain(
+    env: &Env,
+    root: &Path,
+    parent: &Path,
+    shown: &str,
+) -> Result<(), SafetyError> {
+    let mut dir = root.to_path_buf();
+    let rel_parent = parent.strip_prefix(root).unwrap_or(Path::new(""));
+    for comp in rel_parent.components() {
+        dir.push(comp.as_os_str());
+        check_real_dir(env, &dir, shown)?;
+    }
+    Ok(())
+}
+
+/// `dir` exists and is a real directory, not a symlink. `shown` names the
+/// target in errors.
+fn check_real_dir(env: &Env, dir: &Path, shown: &str) -> Result<(), SafetyError> {
+    match fs::symlink_metadata(real_path(env, dir)) {
+        Ok(m) if m.file_type().is_symlink() => Err(SafetyError::SymlinkedParent(PathBuf::from(
+            display_path(env, dir),
+        ))),
+        Ok(m) if m.is_dir() => Ok(()),
+        Ok(_) => Err(SafetyError::Changed(shown.to_string())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Err(SafetyError::Missing(shown.to_string()))
+        }
+        Err(_) => Err(SafetyError::Changed(shown.to_string())),
+    }
 }
 
 #[cfg(test)]
@@ -478,7 +604,7 @@ mod tests {
         let target = p("/home/user/.config/foo");
         let fp = fingerprint(&env, &target).unwrap();
         assert!(!fp.is_symlink);
-        assert_eq!(verify(&env, &cfg, &target, &fp), Ok(()));
+        assert_eq!(verify(&env, &cfg, Scope::Home, &target, &fp), Ok(()));
     }
 
     #[test]
@@ -491,7 +617,7 @@ mod tests {
         std::fs::remove_dir(t.dir.path().join("home/user/.config/foo")).unwrap();
         t.symlink("home/user/.config/foo", "/home/user/Documents");
         assert!(matches!(
-            verify(&env, &cfg, &target, &fp),
+            verify(&env, &cfg, Scope::Home, &target, &fp),
             Err(SafetyError::Changed(_))
         ));
     }
@@ -505,7 +631,7 @@ mod tests {
         let fp = fingerprint(&env, &target).unwrap();
         std::fs::remove_dir_all(t.dir.path().join("home/user/.config")).unwrap();
         t.symlink("home/user/.config", "/home/user/elsewhere");
-        let err = verify(&env, &cfg, &target, &fp).unwrap_err();
+        let err = verify(&env, &cfg, Scope::Home, &target, &fp).unwrap_err();
         assert_eq!(
             err,
             SafetyError::SymlinkedParent(PathBuf::from("~/.config"))
@@ -520,15 +646,20 @@ mod tests {
         t.write("opt/apps/Y.AppImage", b"y");
         let ok = p("/home/user/Applications/X.AppImage");
         assert_eq!(
-            verify_now(&env, &cfg, &ok),
+            verify_now(&env, &cfg, Scope::Home, &ok),
             Ok(fingerprint(&env, &ok).unwrap())
         );
         assert!(matches!(
-            verify_now(&env, &cfg, &p("/opt/apps/Y.AppImage")),
+            verify_now(&env, &cfg, Scope::Home, &p("/opt/apps/Y.AppImage")),
             Err(SafetyError::OutsideAllowedRoots(_))
         ));
         assert!(matches!(
-            verify_now(&env, &cfg, &p("/home/user/Applications/Z.AppImage")),
+            verify_now(
+                &env,
+                &cfg,
+                Scope::Home,
+                &p("/home/user/Applications/Z.AppImage")
+            ),
             Err(SafetyError::Missing(_))
         ));
         std::fs::rename(
@@ -538,7 +669,7 @@ mod tests {
         .unwrap();
         t.symlink("home/user/Applications", "real");
         assert_eq!(
-            verify_now(&env, &cfg, &ok),
+            verify_now(&env, &cfg, Scope::Home, &ok),
             Err(SafetyError::SymlinkedParent(p("~/Applications")))
         );
     }
@@ -551,7 +682,7 @@ mod tests {
         let fp = fingerprint(&env, &target).unwrap();
         std::fs::remove_file(t.dir.path().join("home/user/.config/foo/bar")).unwrap();
         assert!(matches!(
-            verify(&env, &cfg, &target, &fp),
+            verify(&env, &cfg, Scope::Home, &target, &fp),
             Err(SafetyError::Missing(_))
         ));
     }
@@ -564,14 +695,14 @@ mod tests {
         let ssh = p("/home/user/.ssh/id");
         let fp = fingerprint(&env, &ssh).unwrap();
         assert!(matches!(
-            verify(&env, &cfg, &ssh, &fp),
+            verify(&env, &cfg, Scope::Home, &ssh, &fp),
             Err(SafetyError::Protected(_))
         ));
         let out = p("/tmp/x");
         t.write("tmp/x", b"x");
         let fp = fingerprint(&env, &out).unwrap();
         assert!(matches!(
-            verify(&env, &cfg, &out, &fp),
+            verify(&env, &cfg, Scope::Home, &out, &fp),
             Err(SafetyError::OutsideAllowedRoots(_))
         ));
     }
@@ -584,7 +715,7 @@ mod tests {
         let link = p("/home/user/.config/foo");
         let fp = fingerprint(&env, &link).unwrap();
         assert!(fp.is_symlink);
-        assert_eq!(verify(&env, &cfg, &link, &fp), Ok(()));
+        assert_eq!(verify(&env, &cfg, Scope::Home, &link, &fp), Ok(()));
         for s in [
             "/home/user/.config/foo/",
             "/home/user/.config/foo/.",
@@ -592,7 +723,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    verify(&env, &cfg, &p(s), &fp),
+                    verify(&env, &cfg, Scope::Home, &p(s), &fp),
                     Err(SafetyError::NonCanonical(_))
                 ),
                 "{s}"
@@ -612,5 +743,251 @@ mod tests {
             assert!(fingerprint(&env, &p(s)).is_err(), "{s}");
         }
         assert!(fingerprint(&env, &p("/home/user/.config/foo")).is_ok());
+    }
+
+    fn mkfifo(t: &FixtureTree, rel: &str) {
+        use rustix::fs::{CWD, FileType, Mode, mknodat};
+        mknodat(
+            CWD,
+            t.dir.path().join(rel),
+            FileType::Fifo,
+            Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn user_temp_scope_rules() {
+        let (t, env, cfg) = setup();
+        t.write("tmp/x", b"x");
+        t.write("tmp/d/y", b"y");
+        t.write("home/user/.cache/z", b"z");
+        t.symlink("tmp/link", "/tmp/x");
+        mkfifo(&t, "tmp/fifo");
+        let ut = Scope::UserTemp;
+        for s in ["/tmp/x", "/tmp/d"] {
+            let target = p(s);
+            assert!(is_allowed_target(&env, &cfg, ut, &target), "{s}");
+            let fp = fingerprint(&env, &target).unwrap();
+            assert_eq!(verify_now(&env, &cfg, ut, &target), Ok(fp), "{s}");
+            assert_eq!(verify(&env, &cfg, ut, &target, &fp), Ok(()), "{s}");
+            // Home rules don't reach /tmp.
+            assert!(!is_allowed_target(&env, &cfg, Scope::Home, &target), "{s}");
+        }
+        for s in [
+            "/tmp",
+            "/tmp/d/y",
+            "/home/user/.cache/z",
+            "/var/tmp/x",
+            "tmp/x",
+        ] {
+            assert!(!is_allowed_target(&env, &cfg, ut, &p(s)), "{s}");
+        }
+        assert!(matches!(
+            verify_now(&env, &cfg, ut, &p("/tmp/d/y")),
+            Err(SafetyError::OutsideAllowedRoots(_))
+        ));
+        assert!(matches!(
+            verify_now(&env, &cfg, ut, &p("/home/user/.cache/z")),
+            Err(SafetyError::OutsideAllowedRoots(_))
+        ));
+        // Symlinks and fifos are refused even with a matching fingerprint.
+        for s in ["/tmp/link", "/tmp/fifo"] {
+            let target = p(s);
+            let fp = fingerprint(&env, &target).unwrap();
+            assert!(
+                matches!(
+                    verify_now(&env, &cfg, ut, &target),
+                    Err(SafetyError::Ineligible(..))
+                ),
+                "{s}"
+            );
+            assert!(
+                matches!(
+                    verify(&env, &cfg, ut, &target, &fp),
+                    Err(SafetyError::Ineligible(..))
+                ),
+                "{s}"
+            );
+        }
+        // Someone else's file.
+        let mut other = env.clone();
+        other.uid = env.uid.wrapping_add(1);
+        let err = verify_now(&other, &cfg, ut, &p("/tmp/x")).unwrap_err();
+        assert_eq!(err.to_string(), "refusing: /tmp/x is not owned by you");
+        assert!(matches!(
+            verify_now(&env, &cfg, ut, &p("/tmp/gone")),
+            Err(SafetyError::Missing(_))
+        ));
+    }
+
+    #[test]
+    fn user_temp_refuses_symlinked_tmp() {
+        let (t, env, cfg) = setup();
+        t.write("elsewhere/x", b"x");
+        t.symlink("tmp", "elsewhere");
+        let target = p("/tmp/x");
+        let fp = fingerprint(&env, &target).unwrap();
+        assert_eq!(
+            verify(&env, &cfg, Scope::UserTemp, &target, &fp),
+            Err(SafetyError::SymlinkedParent(p("/tmp")))
+        );
+    }
+
+    #[test]
+    fn home_trash_scope_rules() {
+        let (t, env, cfg) = setup();
+        t.write("home/user/.local/share/Trash/files/x", b"x");
+        t.write("home/user/.local/share/Trash/files/d/y", b"y");
+        t.write("home/user/.local/share/Trash/info/x.trashinfo", b"i");
+        t.write("home/user/.local/share/Trash/other", b"o");
+        t.write("tmp/x", b"x");
+        let ht = Scope::HomeTrash;
+        let trash = "/home/user/.local/share/Trash";
+        for s in [
+            format!("{trash}/files/x"),
+            format!("{trash}/files/d"),
+            format!("{trash}/info/x.trashinfo"),
+        ] {
+            let target = p(&s);
+            assert!(is_allowed_target(&env, &cfg, ht, &target), "{s}");
+            let fp = fingerprint(&env, &target).unwrap();
+            assert_eq!(verify_now(&env, &cfg, ht, &target), Ok(fp), "{s}");
+            assert_eq!(verify(&env, &cfg, ht, &target, &fp), Ok(()), "{s}");
+            assert!(
+                !is_allowed_target(&env, &cfg, Scope::UserTemp, &target),
+                "{s}"
+            );
+        }
+        for s in [
+            format!("{trash}/files/d/y"),
+            trash.to_string(),
+            format!("{trash}/files"),
+            format!("{trash}/info"),
+            format!("{trash}/other"),
+            "/tmp/x".to_string(),
+        ] {
+            assert!(!is_allowed_target(&env, &cfg, ht, &p(&s)), "{s}");
+            assert!(
+                matches!(
+                    verify_now(&env, &cfg, ht, &p(&s)),
+                    Err(SafetyError::OutsideAllowedRoots(_) | SafetyError::Protected(_))
+                ),
+                "{s}"
+            );
+        }
+    }
+
+    #[test]
+    fn home_trash_requires_private_trash_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+        let (t, env, cfg) = setup();
+        t.write("home/user/.local/share/Trash/files/x", b"x");
+        t.mkdir("home/user/.local/share/Trash/info");
+        let target = p("/home/user/.local/share/Trash/files/x");
+        let fp = fingerprint(&env, &target).unwrap();
+        let ht = Scope::HomeTrash;
+        assert_eq!(verify(&env, &cfg, ht, &target, &fp), Ok(()));
+        let trash = t.dir.path().join("home/user/.local/share/Trash");
+        std::fs::set_permissions(&trash, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let err = verify(&env, &cfg, ht, &target, &fp).unwrap_err();
+        assert!(matches!(err, SafetyError::Ineligible(..)), "{err:?}");
+        std::fs::set_permissions(&trash, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Someone else's trash.
+        let mut other = env.clone();
+        other.uid = env.uid.wrapping_add(1);
+        assert!(matches!(
+            verify(&other, &cfg, ht, &target, &fp),
+            Err(SafetyError::Ineligible(..))
+        ));
+        // A missing `info` dir fails closed too.
+        std::fs::remove_dir(trash.join("info")).unwrap();
+        assert!(verify(&env, &cfg, ht, &target, &fp).is_err());
+        t.mkdir("home/user/.local/share/Trash/info");
+        // `files` swapped for a symlink to an identical-looking tree.
+        std::fs::rename(trash.join("files"), t.dir.path().join("real-files")).unwrap();
+        t.symlink(
+            "home/user/.local/share/Trash/files",
+            "../../../../../real-files",
+        );
+        assert_eq!(
+            verify(&env, &cfg, ht, &target, &fp),
+            Err(SafetyError::SymlinkedParent(p(
+                "~/.local/share/Trash/files"
+            )))
+        );
+    }
+
+    #[test]
+    fn protect_applies_in_every_scope() {
+        let (t, env, mut cfg) = setup();
+        t.write("tmp/keep", b"k");
+        t.write("tmp/excluded", b"e");
+        t.write("home/user/.local/share/Trash/files/keep", b"k");
+        t.mkdir("home/user/.local/share/Trash/info");
+        t.write("home/user/.config/keep", b"k");
+        cfg.protect.push(p("/tmp/keep"));
+        cfg.protect
+            .push(p("/home/user/.local/share/Trash/files/keep"));
+        cfg.protect.push(p("/home/user/.config/keep"));
+        cfg.exclude.push("/tmp/exclu*".into());
+        for (scope, s) in [
+            (Scope::UserTemp, "/tmp/keep"),
+            (Scope::HomeTrash, "/home/user/.local/share/Trash/files/keep"),
+            (Scope::Home, "/home/user/.config/keep"),
+        ] {
+            let target = p(s);
+            assert!(is_protected(&env, &cfg, &target), "{s}");
+            assert!(!is_allowed_target(&env, &cfg, scope, &target), "{s}");
+            let fp = fingerprint(&env, &target).unwrap();
+            assert!(
+                matches!(
+                    verify(&env, &cfg, scope, &target, &fp),
+                    Err(SafetyError::Protected(_))
+                ),
+                "{s}"
+            );
+        }
+        // Built-in protected paths too: `/` is never a temp child.
+        for scope in [Scope::Home, Scope::UserTemp, Scope::HomeTrash] {
+            assert!(!is_allowed_target(&env, &cfg, scope, &p("/")));
+        }
+        let excluded = p("/tmp/excluded");
+        assert!(!is_allowed_target(&env, &cfg, Scope::UserTemp, &excluded));
+        assert!(matches!(
+            verify_now(&env, &cfg, Scope::UserTemp, &excluded),
+            Err(SafetyError::OutsideAllowedRoots(_))
+        ));
+    }
+
+    #[test]
+    fn scope_serde_is_kebab_case_and_defaults_to_home() {
+        assert_eq!(Scope::default(), Scope::Home);
+        for (scope, text) in [
+            (Scope::Home, "\"home\""),
+            (Scope::UserTemp, "\"user-temp\""),
+            (Scope::HomeTrash, "\"home-trash\""),
+        ] {
+            assert_eq!(serde_json::to_string(&scope).unwrap(), text);
+            assert_eq!(serde_json::from_str::<Scope>(text).unwrap(), scope);
+        }
+    }
+
+    #[test]
+    fn is_allowed_target_home_matches_user_target() {
+        let (_t, env, cfg) = setup();
+        for s in [
+            "/home/user",
+            "/home/user/.config/foo",
+            "/tmp/x",
+            "/home/user/.ssh/x",
+        ] {
+            assert_eq!(
+                is_allowed_target(&env, &cfg, Scope::Home, &p(s)),
+                is_allowed_user_target(&env, &cfg, &p(s)),
+                "{s}"
+            );
+        }
     }
 }

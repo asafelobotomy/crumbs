@@ -38,7 +38,7 @@ fn mkdir_private(path: &Path) -> Result<(), CoreError> {
 
 /// The trash dir must be a real directory (not a symlink) owned by us with no
 /// group/other access.
-fn validate_private_dir(env: &Env, path: &Path) -> Result<(), CoreError> {
+pub(crate) fn validate_private_dir(env: &Env, path: &Path) -> Result<(), CoreError> {
     let m = fs::symlink_metadata(path).map_err(|e| io_err(path, e))?;
     let bad = |msg: &str| {
         io_err(

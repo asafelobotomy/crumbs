@@ -8,7 +8,7 @@ use crate::env::Env;
 use crate::error::CoreError;
 use crate::leftovers::{Finding, FindingKind};
 use crate::model::{App, SourceKind};
-use crate::safety::{self, Fingerprint};
+use crate::safety::{self, Fingerprint, Scope};
 use crate::size::disk_usage;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -45,6 +45,10 @@ pub struct PlannedAction {
     /// Taken at scan time; the executor re-verifies against it.
     #[serde(skip)]
     pub fingerprint: Fingerprint,
+    /// Where the path may lie; the executor verifies it in this scope.
+    /// Left out of the JSON when it is `Home`, as in M2.
+    #[serde(default, skip_serializing_if = "Scope::is_home")]
+    pub scope: Scope,
     pub reason: String,
 }
 
@@ -101,6 +105,7 @@ pub fn build_plan(
                 size: disk_usage(env, &location).bytes,
                 action: remove(location.clone(), opts),
                 fingerprint,
+                scope: Scope::Home,
                 reason: REASON_APPIMAGE.into(),
             });
             skip_path = Some(location);
@@ -129,6 +134,7 @@ pub fn build_plan(
             action,
             size,
             fingerprint: f.fingerprint,
+            scope: Scope::Home,
             reason: f.reason.clone(),
         });
     }

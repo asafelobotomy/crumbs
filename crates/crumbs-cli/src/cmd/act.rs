@@ -328,7 +328,7 @@ pub fn apply(
 mod tests {
     use super::*;
     use crumbs_core::plan::PlannedAction;
-    use crumbs_core::safety::Fingerprint;
+    use crumbs_core::safety::{Fingerprint, Scope};
     use std::path::PathBuf;
 
     fn action(a: Action, size: u64) -> PlannedAction {
@@ -340,6 +340,7 @@ mod tests {
                 ino: 0,
                 is_symlink: false,
             },
+            scope: Scope::Home,
             reason: String::new(),
         }
     }

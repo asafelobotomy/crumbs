@@ -59,7 +59,7 @@ pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
     for (i, pa) in plan.actions.iter().enumerate() {
         let id = format!("{batch}-{i}");
         let path = pa.action.path();
-        let outcome = safety::verify(env, cfg, path, &pa.fingerprint)
+        let outcome = safety::verify(env, cfg, pa.scope, path, &pa.fingerprint)
             .map_err(|e| e.to_string())
             .and_then(|()| act(env, &pa.action, &pa.fingerprint, &batch));
         let (ok, error, done) = match outcome {
@@ -138,17 +138,17 @@ fn act(env: &Env, action: &Action, fp: &Fingerprint, batch: &str) -> Result<Done
 
 /// Removes the entry itself: a symlink or file is unlinked, a real
 /// directory is removed recursively (std's `remove_dir_all` does not follow
-/// symlinks inside the tree). A directory holding another filesystem's
-/// mount point is refused untouched.
+/// symlinks inside the tree). A directory holding a mount point (another
+/// filesystem, or a bind mount of the same one) is refused untouched.
 fn delete(env: &Env, path: &Path) -> Result<(), String> {
-    delete_with(env, path, &|_, m| m.dev())
+    delete_with(env, path, &size::mount_id)
 }
 
-/// [`delete`] with the device lookup injected (tests fake a mount point).
+/// [`delete`] with the mount lookup injected (tests fake a mount point).
 fn delete_with(
     env: &Env,
     path: &Path,
-    dev_of: &dyn Fn(&Path, &fs::Metadata) -> u64,
+    mount_of: &dyn Fn(&Path, &fs::Metadata) -> Option<u64>,
 ) -> Result<(), String> {
     let real = env.sys_path(path);
     let meta = fs::symlink_metadata(&real).map_err(|e| io_msg(env, path, &e))?;
@@ -156,7 +156,7 @@ fn delete_with(
         return fs::remove_file(&real).map_err(|e| io_msg(env, path, &e));
     }
     // `remove_dir_all` would empty a filesystem mounted inside the tree.
-    match size::crosses_device(&real, dev_of) {
+    match size::crosses_mount(&real, mount_of) {
         Ok(false) => {}
         Ok(true) => {
             return Err(format!(

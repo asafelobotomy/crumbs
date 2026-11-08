@@ -56,16 +56,19 @@ pub fn disk_usage(env: &Env, in_system: &Path) -> DiskUsage {
 }
 
 /// Whether any entry in the tree at the real path `real` lies on another
-/// device than `real` itself (a mount point inside it). Does not follow
-/// symlinks and stops at the first such entry. `dev_of` gives an entry's
-/// device (`Metadata::dev` outside tests). Any read error is returned, so
-/// callers can fail closed.
-pub(crate) fn crosses_device(
+/// mount than `real` itself (a mount point inside it, including a bind
+/// mount of the same filesystem). Does not follow symlinks and stops at the
+/// first such entry. `mount_of` gives an entry's mount ([`mount_id`]
+/// outside tests); `None` from it, like any read error, is returned as an
+/// error, so callers can fail closed.
+pub(crate) fn crosses_mount(
     real: &Path,
-    dev_of: &dyn Fn(&Path, &fs::Metadata) -> u64,
+    mount_of: &dyn Fn(&Path, &fs::Metadata) -> Option<u64>,
 ) -> io::Result<bool> {
+    let unknown =
+        |p: &Path| io::Error::other(format!("cannot determine the mount of {}", p.display()));
     let meta = fs::symlink_metadata(real)?;
-    let root = dev_of(real, &meta);
+    let root = mount_of(real, &meta).ok_or_else(|| unknown(real))?;
     if !meta.is_dir() {
         return Ok(false);
     }
@@ -74,7 +77,7 @@ pub(crate) fn crosses_device(
         for entry in fs::read_dir(&dir)? {
             let path = entry?.path();
             let m = fs::symlink_metadata(&path)?;
-            if dev_of(&path, &m) != root {
+            if mount_of(&path, &m).ok_or_else(|| unknown(&path))? != root {
                 return Ok(true);
             }
             if m.is_dir() {
@@ -83,6 +86,22 @@ pub(crate) fn crosses_device(
         }
     }
     Ok(false)
+}
+
+/// The mount ID of the entry at the real path `path` (not following a
+/// final symlink), from `statx`. Where the kernel doesn't report mount IDs,
+/// falls back to the device in `meta` (its `lstat`). `None` when `statx`
+/// fails.
+pub(crate) fn mount_id(path: &Path, meta: &fs::Metadata) -> Option<u64> {
+    use rustix::fs::{AtFlags, CWD, StatxFlags, statx};
+    use rustix::io::Errno;
+    match statx(CWD, path, AtFlags::SYMLINK_NOFOLLOW, StatxFlags::MNT_ID) {
+        Ok(stx) if StatxFlags::from_bits_retain(stx.stx_mask).contains(StatxFlags::MNT_ID) => {
+            Some(stx.stx_mnt_id)
+        }
+        Ok(_) | Err(Errno::NOSYS) => Some(meta.dev()),
+        Err(_) => None,
+    }
 }
 
 /// Accounts for one entry; queues it when it is a directory.
@@ -166,23 +185,44 @@ mod tests {
     }
 
     #[test]
-    fn crosses_device_finds_nested_mount() {
+    fn crosses_mount_finds_nested_mount() {
         let t = FixtureTree::new();
         t.write("/data/a/b/deep/file", b"x");
         t.symlink("/data/link", "/elsewhere");
         let root = t.dir.path().join("data");
-        let same = |_: &Path, m: &fs::Metadata| m.dev();
-        assert!(!crosses_device(&root, &same).unwrap());
+        let same = |_: &Path, m: &fs::Metadata| Some(m.dev());
+        assert!(!crosses_mount(&root, &same).unwrap());
         let deep = root.join("a/b/deep");
         let other = |p: &Path, m: &fs::Metadata| {
-            if p.starts_with(&deep) {
+            Some(if p.starts_with(&deep) {
                 m.dev() + 1
             } else {
                 m.dev()
-            }
+            })
         };
-        assert!(crosses_device(&root, &other).unwrap());
-        assert!(crosses_device(&root.join("nope"), &same).is_err());
+        assert!(crosses_mount(&root, &other).unwrap());
+        assert!(crosses_mount(&root.join("nope"), &same).is_err());
+        // The real lookup sees one mount in a plain tree.
+        assert!(!crosses_mount(&root, &mount_id).unwrap());
+    }
+
+    #[test]
+    fn crosses_mount_detects_same_dev_bind_mount() {
+        let t = FixtureTree::new();
+        t.write("/data/a/bind/file", b"x");
+        let root = t.dir.path().join("data");
+        let bind = root.join("a/bind");
+        // A bind mount of the same filesystem: same `st_dev`, another mount ID.
+        let mnt = |p: &Path, _: &fs::Metadata| Some(if p.starts_with(&bind) { 7 } else { 3 });
+        let dev = |p: &Path, m: &fs::Metadata| {
+            assert_eq!(m.dev(), fs::symlink_metadata(&root).unwrap().dev(), "{p:?}");
+            Some(m.dev())
+        };
+        assert!(!crosses_mount(&root, &dev).unwrap());
+        assert!(crosses_mount(&root, &mnt).unwrap());
+        // An entry whose mount can't be determined fails closed.
+        let unknown = |p: &Path, _: &fs::Metadata| (!p.starts_with(&bind)).then_some(3);
+        assert!(crosses_mount(&root, &unknown).is_err());
     }
 
     #[test]

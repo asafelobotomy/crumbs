@@ -329,6 +329,7 @@ mod tests {
             .map(|action| PlannedAction {
                 size: 1,
                 fingerprint: fingerprint(env, action.path()).unwrap(),
+                scope: crate::safety::Scope::Home,
                 reason: "test".into(),
                 action,
             })

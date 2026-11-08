@@ -6,7 +6,7 @@ use super::*;
 use crate::history::{HistoryAction, read_history};
 use crate::model::SourceKind;
 use crate::plan::PlannedAction;
-use crate::safety::fingerprint;
+use crate::safety::{Scope, fingerprint};
 use crate::size::disk_usage;
 use crate::testing::FixtureTree;
 
@@ -20,6 +20,7 @@ fn planned(env: &Env, action: Action) -> PlannedAction {
     PlannedAction {
         size,
         fingerprint: fingerprint(env, &p).unwrap(),
+        scope: Scope::Home,
         reason: "test".into(),
         action,
     }
@@ -352,6 +353,29 @@ fn running_processes_without_proc_is_empty() {
     assert!(running_processes(&env, &appimage_app()).is_empty());
 }
 
+/// A plan's scope reaches `verify`: a `/tmp` child is deleted under
+/// `UserTemp` and refused under the default `Home`.
+#[test]
+fn execute_passes_scope_to_verify() {
+    let t = FixtureTree::new();
+    t.write("tmp/a", b"a");
+    t.write("tmp/b", b"b");
+    let env = t.env();
+    let mut temp = planned(&env, delete("/tmp/a"));
+    temp.scope = Scope::UserTemp;
+    let home = planned(&env, delete("/tmp/b"));
+    assert_eq!(home.scope, Scope::Home);
+    let report = execute(&env, &Config::default(), &plan_of(vec![temp, home]));
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    assert!(!report.results[1].ok);
+    assert_eq!(
+        report.results[1].error.as_deref(),
+        Some("refusing: /tmp/b is outside the allowed roots")
+    );
+    assert!(!env.sys("/tmp/a").exists());
+    assert!(env.sys("/tmp/b").exists());
+}
+
 /// `--permanent` never descends into another filesystem: a tree holding a
 /// mount point is refused untouched. Mounts can't be made in tests, so
 /// the device lookup is faked for one subdirectory.
@@ -363,20 +387,15 @@ fn delete_refuses_tree_with_another_filesystem() {
     t.write("home/user/.config/foo/mnt/inner", b"on another fs");
     let env = t.env();
     let mnt = env.sys("/home/user/.config/foo/mnt");
-    let fake_dev = |p: &Path, m: &fs::Metadata| {
-        if p.starts_with(&mnt) {
-            m.dev() + 1
-        } else {
-            m.dev()
-        }
-    };
-    let err = delete_with(&env, Path::new("/home/user/.config/foo"), &fake_dev).unwrap_err();
+    // A same-device bind mount: only the mount ID differs.
+    let fake_mount = |p: &Path, _: &fs::Metadata| Some(if p.starts_with(&mnt) { 2 } else { 1 });
+    let err = delete_with(&env, Path::new("/home/user/.config/foo"), &fake_mount).unwrap_err();
     assert_eq!(err, "refusing: ~/.config/foo contains another filesystem");
     assert!(env.sys("/home/user/.config/foo/a").exists());
     assert!(env.sys("/home/user/.config/foo/mnt/inner").exists());
 
     // Same device everywhere: deleted as before.
-    let same = |_: &Path, m: &fs::Metadata| m.dev();
+    let same = |_: &Path, m: &fs::Metadata| Some(m.dev());
     delete_with(&env, Path::new("/home/user/.config/foo"), &same).unwrap();
     assert!(!env.sys("/home/user/.config/foo").exists());
 }
