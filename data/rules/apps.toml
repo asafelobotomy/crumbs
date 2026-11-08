@@ -4,17 +4,17 @@
 
 # Firefox
 [[app]]
-match = { package = ["firefox"], flatpak = ["org.mozilla.firefox"] }
+match = { package = ["firefox", "firefox-esr", "firefox-developer-edition", "firefox-nightly"] }
 paths = ["~/.mozilla/firefox", "$XDG_CACHE_HOME/mozilla/firefox"]
 
 # Thunderbird
 [[app]]
-match = { package = ["thunderbird"], flatpak = ["org.mozilla.Thunderbird"] }
+match = { package = ["thunderbird"] }
 paths = ["~/.thunderbird", "$XDG_CACHE_HOME/thunderbird"]
 
 # Chromium
 [[app]]
-match = { package = ["chromium"], flatpak = ["org.chromium.Chromium"] }
+match = { package = ["chromium"] }
 paths = ["$XDG_CONFIG_HOME/chromium", "$XDG_CACHE_HOME/chromium"]
 
 # Google Chrome
@@ -24,17 +24,22 @@ paths = ["$XDG_CONFIG_HOME/google-chrome", "$XDG_CACHE_HOME/google-chrome"]
 
 # Brave
 [[app]]
-match = { package = ["brave-bin", "brave-browser"], flatpak = ["com.brave.Browser"] }
+match = { package = ["brave-bin", "brave-browser"] }
 paths = ["$XDG_CONFIG_HOME/BraveSoftware", "$XDG_CACHE_HOME/BraveSoftware"]
 
 # VS Code
 [[app]]
-match = { package = ["visual-studio-code-bin", "code"], flatpak = ["com.visualstudio.code"] }
+match = { package = ["visual-studio-code-bin"] }
 paths = ["$XDG_CONFIG_HOME/Code", "~/.vscode"]
+
+# Code - OSS
+[[app]]
+match = { package = ["code"] }
+paths = ["$XDG_CONFIG_HOME/Code - OSS", "~/.vscode-oss"]
 
 # VSCodium
 [[app]]
-match = { package = ["vscodium", "vscodium-bin"], flatpak = ["com.vscodium.codium"] }
+match = { package = ["vscodium", "vscodium-bin"] }
 paths = ["$XDG_CONFIG_HOME/VSCodium", "~/.vscode-oss"]
 
 # Cursor
@@ -44,70 +49,65 @@ paths = ["$XDG_CONFIG_HOME/Cursor", "~/.cursor"]
 
 # Discord
 [[app]]
-match = { package = ["discord"], flatpak = ["com.discordapp.Discord"] }
+match = { package = ["discord"] }
 paths = ["$XDG_CONFIG_HOME/discord"]
 
 # Spotify
 [[app]]
-match = { package = ["spotify"], flatpak = ["com.spotify.Client"] }
+match = { package = ["spotify"] }
 paths = ["$XDG_CONFIG_HOME/spotify", "$XDG_CACHE_HOME/spotify"]
-
-# Steam
-[[app]]
-match = { package = ["steam"], flatpak = ["com.valvesoftware.Steam"] }
-paths = ["~/.steam", "$XDG_DATA_HOME/Steam"]
 
 # OBS Studio
 [[app]]
-match = { package = ["obs-studio"], flatpak = ["com.obsproject.Studio"] }
+match = { package = ["obs-studio"] }
 paths = ["$XDG_CONFIG_HOME/obs-studio"]
 
 # GIMP
 [[app]]
-match = { package = ["gimp"], flatpak = ["org.gimp.GIMP"] }
+match = { package = ["gimp"] }
 paths = ["$XDG_CONFIG_HOME/GIMP", "$XDG_CACHE_HOME/gimp"]
 
 # Inkscape
 [[app]]
-match = { package = ["inkscape"], flatpak = ["org.inkscape.Inkscape"] }
+match = { package = ["inkscape"] }
 paths = ["$XDG_CONFIG_HOME/inkscape", "$XDG_CACHE_HOME/inkscape"]
 
 # LibreOffice
 [[app]]
-match = { package = ["libreoffice-fresh", "libreoffice-still"], flatpak = ["org.libreoffice.LibreOffice"] }
+match = { package = ["libreoffice-fresh", "libreoffice-still"] }
 paths = ["$XDG_CONFIG_HOME/libreoffice"]
 
 # Blender
 [[app]]
-match = { package = ["blender"], flatpak = ["org.blender.Blender"] }
+match = { package = ["blender"] }
 paths = ["$XDG_CONFIG_HOME/blender"]
 
 # Godot
 [[app]]
-match = { package = ["godot"], flatpak = ["org.godotengine.Godot"] }
-paths = ["$XDG_CONFIG_HOME/godot", "$XDG_DATA_HOME/godot", "$XDG_CACHE_HOME/godot"]
+match = { package = ["godot"] }
+paths = ["$XDG_CONFIG_HOME/godot", "$XDG_CACHE_HOME/godot"]
 
 # Telegram
 [[app]]
-match = { package = ["telegram-desktop"], flatpak = ["org.telegram.desktop"] }
+match = { package = ["telegram-desktop"] }
 paths = ["$XDG_DATA_HOME/TelegramDesktop"]
 
 # Signal
 [[app]]
-match = { package = ["signal-desktop"], flatpak = ["org.signal.Signal"] }
+match = { package = ["signal-desktop"] }
 paths = ["$XDG_CONFIG_HOME/Signal"]
 
 # Slack
 [[app]]
-match = { package = ["slack-desktop"], flatpak = ["com.slack.Slack"] }
+match = { package = ["slack-desktop"] }
 paths = ["$XDG_CONFIG_HOME/Slack"]
 
 # Zoom
 [[app]]
-match = { package = ["zoom"], flatpak = ["us.zoom.Zoom"] }
+match = { package = ["zoom"] }
 paths = ["~/.zoom", "$XDG_CONFIG_HOME/zoomus.conf"]
 
 # Android Studio
 [[app]]
 match = { package = ["android-studio"] }
-paths = ["~/.android", "$XDG_CONFIG_HOME/Google/AndroidStudio*", "$XDG_CACHE_HOME/Google/AndroidStudio*"]
+paths = ["$XDG_CONFIG_HOME/Google/AndroidStudio*", "$XDG_CACHE_HOME/Google/AndroidStudio*"]
