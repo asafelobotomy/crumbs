@@ -519,6 +519,7 @@ fn flatpak_browser_cache_found() {
         status: 0,
         stdout: "com.brave.Browser\norg.other.App\n".into(),
         stderr: String::new(),
+        timed_out: false,
     };
     let runner = FakeRunner::new().on("flatpak", &["ps", "--columns=application"], ps);
     let items = scan_one(&t, &Config::default(), &runner, Category::BrowserCache).unwrap();
@@ -553,6 +554,7 @@ fn flatpak_browser_cache_found() {
             status: 1,
             stdout: String::new(),
             stderr: "boom".into(),
+            timed_out: false,
         },
     );
     for runner in [FakeRunner::new(), failing] {

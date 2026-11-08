@@ -358,7 +358,7 @@ mod tests {
             .into_iter()
             .map(|action| PlannedAction {
                 size: 1,
-                fingerprint: fingerprint(env, action.path()).unwrap(),
+                fingerprint: fingerprint(env, action.path().unwrap()).unwrap(),
                 scope: crate::safety::Scope::Home,
                 depends_on: None,
                 reason: "test".into(),
@@ -764,6 +764,7 @@ mod tests {
                 status: 0,
                 stdout: String::new(),
                 stderr: String::new(),
+                timed_out: false,
             },
         );
         let plan = Plan {
@@ -779,6 +780,8 @@ mod tests {
                     dev: 0,
                     ino: 0,
                     is_symlink: false,
+                    ctime: 0,
+                    ctime_nsec: 0,
                 },
                 scope: crate::safety::Scope::Home,
                 depends_on: None,

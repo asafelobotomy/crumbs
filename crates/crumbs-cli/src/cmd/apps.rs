@@ -77,7 +77,12 @@ fn list(
     json: bool,
 ) -> anyhow::Result<ExitCode> {
     let (cfg, notes) = load_cfg(env)?;
-    let mut inv = discover(env, &SystemRunner, &ListOptions { include_all: all }, &cfg);
+    let mut inv = discover(
+        env,
+        &SystemRunner::new(),
+        &ListOptions { include_all: all },
+        &cfg,
+    );
     if !sources.is_empty() {
         inv.apps.retain(|a| sources.contains(&a.source));
         // A source that was not asked for is none of the caller's business.

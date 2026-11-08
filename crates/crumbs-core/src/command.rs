@@ -1,6 +1,10 @@
+use std::ffi::OsString;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::env::Env;
 use crate::error::CoreError;
@@ -13,31 +17,122 @@ pub struct CmdOutput {
     pub status: i32,
     pub stdout: String,
     pub stderr: String,
+    /// The process was killed because it ran past its timeout; `status` is
+    /// then `-1` and the output is whatever was read before the kill.
+    pub timed_out: bool,
 }
 
 pub trait CommandRunner: Send + Sync {
     fn run(&self, program: &Path, args: &[&str]) -> Result<CmdOutput, CoreError>;
 }
 
-/// Runs real processes with `LC_ALL=C` and a null stdin.
-pub struct SystemRunner;
+/// Variables a child may inherit; everything else is dropped.
+const ENV_ALLOWLIST: [&str; 8] = [
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+];
+const ENV_ALLOWLIST_EXTRA: &str = "DBUS_SESSION_BUS_ADDRESS";
+const CHILD_PATH: &str = "/usr/bin:/usr/sbin:/bin:/sbin";
+const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a `UserCommand` may run.
+pub const USER_COMMAND_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Runs real processes with a cleared environment (an allowlist plus a fixed
+/// `PATH` and `LC_ALL=C`), a null stdin and a timeout.
+pub struct SystemRunner {
+    timeout: Duration,
+}
+
+impl SystemRunner {
+    pub fn new() -> Self {
+        Self {
+            timeout: QUERY_TIMEOUT,
+        }
+    }
+
+    pub fn with_timeout(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+
+    fn run_with_env(
+        &self,
+        program: &Path,
+        args: &[&str],
+        parent: &[(OsString, OsString)],
+    ) -> Result<CmdOutput, CoreError> {
+        let fail = |e: std::io::Error| CoreError::Command {
+            program: program.display().to_string(),
+            message: e.to_string(),
+        };
+        let mut cmd = Command::new(program);
+        cmd.args(args).env_clear();
+        for (k, v) in parent {
+            if ENV_ALLOWLIST.iter().any(|a| k == *a) || k == ENV_ALLOWLIST_EXTRA {
+                cmd.env(k, v);
+            }
+        }
+        cmd.env("PATH", CHILD_PATH).env("LC_ALL", "C");
+        let mut child = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(fail)?;
+        // Readers run beside the wait so a chatty child can't fill a pipe
+        // and block forever.
+        let out = child.stdout.take().map(read_all);
+        let err = child.stderr.take().map(read_all);
+        let deadline = Instant::now() + self.timeout;
+        let (status, timed_out) = loop {
+            match child.try_wait().map_err(fail)? {
+                Some(st) => break (st.code().unwrap_or(-1), false),
+                None if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break (-1, true);
+                }
+                None => thread::sleep(POLL_INTERVAL),
+            }
+        };
+        let text = |h: Option<thread::JoinHandle<Vec<u8>>>| {
+            h.and_then(|h| h.join().ok())
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default()
+        };
+        Ok(CmdOutput {
+            status,
+            stdout: text(out),
+            stderr: text(err),
+            timed_out,
+        })
+    }
+}
+
+impl Default for SystemRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn read_all<R: Read + Send + 'static>(mut r: R) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = r.read_to_end(&mut buf);
+        buf
+    })
+}
 
 impl CommandRunner for SystemRunner {
     fn run(&self, program: &Path, args: &[&str]) -> Result<CmdOutput, CoreError> {
-        let out = Command::new(program)
-            .args(args)
-            .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| CoreError::Command {
-                program: program.display().to_string(),
-                message: e.to_string(),
-            })?;
-        Ok(CmdOutput {
-            status: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
+        let parent: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+        self.run_with_env(program, args, &parent)
     }
 }
 
@@ -59,6 +154,57 @@ mod tests {
     use super::*;
     use crate::error::CoreError;
     use crate::testing::{FakeRunner, FixtureTree};
+    use std::ffi::OsString;
+    use std::time::Duration;
+
+    fn os(s: &str) -> OsString {
+        OsString::from(s)
+    }
+
+    #[test]
+    fn system_runner_clears_env() {
+        let t = FixtureTree::new();
+        let script = t.write_exec("/usr/bin/printenv-fixture", b"#!/bin/sh\n/usr/bin/env\n");
+        let parent = [
+            (os("LD_PRELOAD"), os("/tmp/evil.so")),
+            (os("FOO"), os("bar")),
+            (os("HOME"), os("/home/kept")),
+            (os("PATH"), os("/tmp/evil")),
+            (os("LC_ALL"), os("de_DE.UTF-8")),
+        ];
+        let out = SystemRunner::new()
+            .run_with_env(&script, &[], &parent)
+            .unwrap();
+        assert_eq!(out.status, 0, "{out:?}");
+        let lines: Vec<&str> = out.stdout.lines().collect();
+        assert!(!lines.iter().any(|l| l.starts_with("LD_PRELOAD=")));
+        assert!(!lines.iter().any(|l| l.starts_with("FOO=")));
+        assert!(lines.contains(&"HOME=/home/kept"));
+        assert!(lines.contains(&"PATH=/usr/bin:/usr/sbin:/bin:/sbin"));
+        assert!(lines.contains(&"LC_ALL=C"));
+        assert!(!out.timed_out);
+    }
+
+    #[test]
+    fn system_runner_times_out() {
+        let started = std::time::Instant::now();
+        let out = SystemRunner::with_timeout(Duration::from_millis(200))
+            .run(Path::new("/bin/sleep"), &["5"])
+            .unwrap();
+        assert!(out.timed_out);
+        assert_eq!(out.status, -1);
+        assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    #[test]
+    fn system_runner_drains_large_output() {
+        let out = SystemRunner::new()
+            .run(Path::new("/bin/sh"), &["-c", "head -c 300000 /dev/zero"])
+            .unwrap();
+        assert_eq!(out.status, 0);
+        assert!(!out.timed_out);
+        assert_eq!(out.stdout.len(), 300_000);
+    }
 
     #[test]
     fn resolves_from_usr_bin() {
@@ -99,6 +245,7 @@ mod tests {
             status: 0,
             stdout: "ok".into(),
             stderr: String::new(),
+            timed_out: false,
         };
         let r = FakeRunner::new().on("pacman", &["-Q"], out);
         let runner: &dyn CommandRunner = &r;

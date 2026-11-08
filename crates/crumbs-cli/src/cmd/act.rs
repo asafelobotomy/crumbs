@@ -3,6 +3,7 @@
 //! preview, running-app check, confirmation, execution and report.
 
 use std::io::Write;
+use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Args;
@@ -224,14 +225,14 @@ pub fn drop_overlaps(targets: &mut [Target]) {
         // Old index -> new index of the actions that stay.
         let mut new_index: Vec<Option<usize>> = Vec::with_capacity(t.plan.actions.len());
         for mut pa in t.plan.actions.drain(..) {
-            let path = pa.action.path().to_path_buf();
             // A command has no filesystem path to overlap with.
-            let is_cmd = |a: &Action| matches!(a, Action::UserCommand { .. });
-            let covered = !is_cmd(&pa.action)
-                && earlier
+            let path = pa.action.path().map(Path::to_path_buf);
+            let covered = path.as_ref().is_some_and(|path| {
+                earlier
                     .iter()
                     .flat_map(|e| &e.plan.actions)
-                    .any(|e| !is_cmd(&e.action) && path.starts_with(e.action.path()));
+                    .any(|e| e.action.path().is_some_and(|ep| path.starts_with(ep)))
+            });
             if !covered {
                 // A dropped dependency was covered by an earlier plan, which
                 // runs first in the batch, so there is nothing to wait for.
@@ -248,7 +249,7 @@ pub fn drop_overlaps(targets: &mut [Target]) {
                     .iter_mut()
                     .flat_map(|e| e.plan.actions.iter_mut())
                     .map(|e| &mut e.action)
-                    .find(|a| a.path() == path);
+                    .find(|a| a.path() == path.as_deref());
                 if let Some(Action::EditFile {
                     remove_lines: lines,
                     ..
@@ -371,7 +372,7 @@ pub fn apply(
 mod tests {
     use super::*;
     use crumbs_core::safety::{Fingerprint, Scope};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn action(a: Action, size: u64) -> PlannedAction {
         PlannedAction {
@@ -381,6 +382,8 @@ mod tests {
                 dev: 0,
                 ino: 0,
                 is_symlink: false,
+                ctime: 0,
+                ctime_nsec: 0,
             },
             scope: Scope::Home,
             depends_on: None,
@@ -421,7 +424,7 @@ mod tests {
         t.plan
             .actions
             .iter()
-            .map(|a| a.action.path().to_path_buf())
+            .filter_map(|a| a.action.path().map(Path::to_path_buf))
             .collect()
     }
 

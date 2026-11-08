@@ -74,6 +74,7 @@ mod tests {
             status,
             stdout: stdout.into(),
             stderr: stderr.into(),
+            timed_out: false,
         }
     }
 

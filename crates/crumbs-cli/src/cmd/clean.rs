@@ -63,7 +63,7 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
         env,
         cfg: &setup.cfg,
         inv: &setup.inv,
-        runner: &SystemRunner,
+        runner: &SystemRunner::new(),
         now: env.now(),
     };
     let report = scan_all(&cx, &which);

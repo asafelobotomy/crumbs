@@ -35,14 +35,13 @@ pub enum Action {
 }
 
 impl Action {
-    /// The in-system path the action works on. A command has none; its
-    /// program name stands in so it can be shown.
-    pub fn path(&self) -> &Path {
+    /// The in-system path the action works on; `None` for a command.
+    pub fn path(&self) -> Option<&Path> {
         match self {
             Action::Trash { path } | Action::Delete { path } | Action::EditFile { path, .. } => {
-                path
+                Some(path)
             }
-            Action::UserCommand { program, .. } => Path::new(program),
+            Action::UserCommand { .. } => None,
         }
     }
 }
@@ -213,6 +212,8 @@ pub fn build_clean_plan(
                     dev: 0,
                     ino: 0,
                     is_symlink: false,
+                    ctime: 0,
+                    ctime_nsec: 0,
                 },
                 scope: item.scope,
                 depends_on: None,
@@ -330,7 +331,7 @@ mod tests {
         assert!(plan.total_size > 0);
         assert_eq!(
             plan.actions[0].action.path(),
-            Path::new("/home/user/.config/foo")
+            Some(Path::new("/home/user/.config/foo"))
         );
         assert_eq!(plan.actions[0].fingerprint, fs[0].fingerprint);
         assert_eq!(plan.actions[0].reason, fs[0].reason);
@@ -405,7 +406,7 @@ mod tests {
         assert_eq!(kinds(&plan), ["trash"]);
         assert_eq!(
             plan.actions[0].action.path(),
-            Path::new("/home/user/.config/foo")
+            Some(Path::new("/home/user/.config/foo"))
         );
         assert_eq!(plan.notes, [NOTE_APP_STAYS]);
         assert_eq!(plan.app_id.as_deref(), Some("appimage:Foo.AppImage"));
@@ -477,7 +478,7 @@ mod tests {
 
         let plan = build_plan(&env, Some(&app), &fs, &PlanOptions::default()).unwrap();
         assert_eq!(kinds(&plan), ["trash", "trash"]);
-        assert_eq!(plan.actions[0].action.path(), loc);
+        assert_eq!(plan.actions[0].action.path(), Some(loc.as_path()));
 
         app.location = None;
         assert!(build_plan(&env, Some(&app), &fs, &PlanOptions::default()).is_err());
@@ -661,5 +662,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn action_path_none_for_commands() {
+        let cmd = Action::UserCommand {
+            program: "flatpak".into(),
+            args: vec![],
+        };
+        assert_eq!(cmd.path(), None);
+        let trash = Action::Trash {
+            path: PathBuf::from("/home/user/x"),
+        };
+        assert_eq!(trash.path(), Some(Path::new("/home/user/x")));
     }
 }

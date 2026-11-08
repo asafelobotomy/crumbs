@@ -236,6 +236,13 @@ pub struct Fingerprint {
     pub dev: u64,
     pub ino: u64,
     pub is_symlink: bool,
+    /// Status-change time. A file replaced by another that reuses the inode
+    /// still gets a new ctime. Never serialised: it is only meaningful
+    /// within the run that took the fingerprint.
+    #[serde(skip)]
+    pub ctime: i64,
+    #[serde(skip)]
+    pub ctime_nsec: i64,
 }
 
 /// True when the path is absolute and already in normalised form.
@@ -259,6 +266,8 @@ fn fingerprint_of(m: &fs::Metadata) -> Fingerprint {
         dev: m.dev(),
         ino: m.ino(),
         is_symlink: m.file_type().is_symlink(),
+        ctime: m.ctime(),
+        ctime_nsec: m.ctime_nsec(),
     }
 }
 
@@ -279,7 +288,7 @@ pub fn fingerprint(env: &Env, in_system: &Path) -> Result<Fingerprint, CoreError
 /// Re-checks `in_system` immediately before an action. Order: allowed
 /// target for `scope`, parent chain (no symlinks from the scope's root down
 /// to the path's parent), the scope's own rules for the target, then the
-/// target's `(dev, ino, is_symlink)` against `expected`.
+/// target's `(dev, ino, is_symlink, ctime)` against `expected`.
 pub fn verify(
     env: &Env,
     cfg: &Config,
@@ -1011,5 +1020,25 @@ mod tests {
                 "{s}"
             );
         }
+    }
+
+    #[test]
+    fn fingerprint_detects_inode_reuse() {
+        // Same dev, ino and kind but a different ctime: a file replaced and
+        // handed the old inode.
+        let t = FixtureTree::new();
+        t.write("/home/user/.config/foo/bar", b"x");
+        let env = t.env();
+        let p = std::path::Path::new("/home/user/.config/foo/bar");
+        let old = fingerprint(&env, p).unwrap();
+        let mut stale = old;
+        stale.ctime_nsec += 1;
+        assert_ne!(old, stale);
+        let cfg = Config::default();
+        assert!(verify(&env, &cfg, Scope::Home, p, &old).is_ok());
+        assert_eq!(
+            verify(&env, &cfg, Scope::Home, p, &stale),
+            Err(SafetyError::Changed("~/.config/foo/bar".into()))
+        );
     }
 }

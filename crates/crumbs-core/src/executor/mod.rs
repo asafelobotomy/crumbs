@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::command::{CommandRunner, SystemRunner, resolve_trusted};
+use crate::command::{CommandRunner, SystemRunner, USER_COMMAND_TIMEOUT, resolve_trusted};
 use crate::config::Config;
 use crate::env::{Env, display_path};
 use crate::history::{self, HistoryAction, HistoryEntry};
@@ -56,7 +56,12 @@ struct Done {
 /// `ok` still describes what happened on disk); other entries are
 /// unaffected.
 pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
-    execute_with(env, cfg, plan, &SystemRunner)
+    execute_with(
+        env,
+        cfg,
+        plan,
+        &SystemRunner::with_timeout(USER_COMMAND_TIMEOUT),
+    )
 }
 
 /// [`execute`] with the command runner injected; `UserCommand` actions run
@@ -72,7 +77,7 @@ pub fn execute_with(
     let mut freed = 0u64;
     for (i, pa) in plan.actions.iter().enumerate() {
         let id = format!("{batch}-{i}");
-        let mut path = pa.action.path().to_path_buf();
+        let mut path = action_target(&pa.action);
         let mut argv = None;
         let outcome = match skip_reason(env, plan, &results, pa.depends_on) {
             Some(reason) => Err(reason),
@@ -138,6 +143,15 @@ pub fn execute_with(
     }
 }
 
+/// What stands for the action in results and history: its path, or for a
+/// command its program name.
+fn action_target(action: &Action) -> PathBuf {
+    match action {
+        Action::UserCommand { program, .. } => PathBuf::from(program),
+        other => other.path().map(Path::to_path_buf).unwrap_or_default(),
+    }
+}
+
 /// Runs a `UserCommand`. On return `path` is the in-system program path (or
 /// the bare name when it is not installed) and `argv` its arguments.
 fn run_command(
@@ -156,6 +170,9 @@ fn run_command(
     *path = env.unsys(&resolved);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = runner.run(&resolved, &args).map_err(|e| e.to_string())?;
+    if out.timed_out {
+        return Err("timed out".into());
+    }
     if out.status == 0 {
         return Ok(Done::default());
     }
@@ -195,7 +212,7 @@ fn skip_reason(
     }
     let shown = plan.actions.get(dep).map_or_else(
         || format!("action {dep}"),
-        |d| display_path(env, d.action.path()),
+        |d| display_path(env, &action_target(&d.action)),
     );
     Some(format!("skipped: {shown} was not removed"))
 }

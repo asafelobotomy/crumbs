@@ -132,6 +132,7 @@ com.obsproject.Studio\tOBS Studio\t33.0.0\tsystem\t593.5 MB\n";
             status,
             stdout: stdout.into(),
             stderr: stderr.into(),
+            timed_out: false,
         }
     }
 

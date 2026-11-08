@@ -72,7 +72,7 @@ pub fn run(env: &Env, args: &ScanArgs) -> anyhow::Result<ExitCode> {
         env,
         cfg: &setup.cfg,
         inv: &setup.inv,
-        runner: &SystemRunner,
+        runner: &SystemRunner::new(),
         now: env.now(),
     };
     let mut scanned = scan_all(&cx, &which).categories;

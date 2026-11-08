@@ -14,7 +14,7 @@ use crate::testing::FixtureTree;
 
 /// Like `build_plan`: edits free nothing, removals free the disk usage.
 fn planned(env: &Env, action: Action) -> PlannedAction {
-    let p = action.path().to_path_buf();
+    let p = action.path().unwrap().to_path_buf();
     let size = match action {
         Action::EditFile { .. } => 0,
         _ => disk_usage(env, &p).bytes,
@@ -77,7 +77,7 @@ fn execute_trashes_and_logs() {
         assert_eq!(h.id, report.results[i].history_id);
         assert_eq!(h.batch, report.batch);
         assert_eq!(h.action, HistoryAction::Trash);
-        assert_eq!(h.path, plan.actions[i].action.path());
+        assert_eq!(Some(h.path.as_path()), plan.actions[i].action.path());
         assert!(h.ok);
         assert_eq!(h.app_id.as_deref(), Some("pacman:foo"));
         assert_eq!(h.size, plan.actions[i].size);
@@ -607,10 +607,12 @@ fn execute_rechecks_temp_staleness() {
     stale.scope = Scope::UserTemp;
     let mut ok = planned(&env, delete("/tmp/gone"));
     ok.scope = Scope::UserTemp;
-    // Someone starts using the dir between scan and clean; the dir's own
-    // inode is unchanged, so `verify` alone would pass.
+    // Someone starts using the dir between scan and clean. Adding an entry
+    // bumps the dir's ctime, which `verify` now catches by itself, so the
+    // fingerprint is retaken to isolate the staleness recheck.
     age_days(&t.write("tmp/work/new", b"fresh"), 0);
     age_days(&dir, 30);
+    stale.fingerprint = fingerprint(&env, Path::new("/tmp/work")).unwrap();
     let report = execute(&env, &Config::default(), &plan_of(vec![stale, ok]));
     assert!(!report.results[0].ok);
     assert_eq!(
@@ -638,6 +640,8 @@ fn command_plan(program: &str, args: &[&str]) -> Plan {
             dev: 0,
             ino: 0,
             is_symlink: false,
+            ctime: 0,
+            ctime_nsec: 0,
         },
         scope: Scope::Home,
         depends_on: None,
@@ -703,6 +707,7 @@ fn user_command_failure_reports_last_stderr_line() {
         status,
         stdout: String::new(),
         stderr: stderr.into(),
+        timed_out: false,
     };
     let runner = FakeRunner::new()
         .on("flatpak", &["a"], out(1, "first\nerror: boom\n\n"))
@@ -715,6 +720,31 @@ fn user_command_failure_reports_last_stderr_line() {
         report.results[1].error.as_deref(),
         Some("exited with status 3")
     );
+}
+
+#[test]
+fn user_command_timeout_is_a_failure() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/flatpak", b"#!/bin/sh\n");
+    let env = t.env();
+    let runner = FakeRunner::new().on(
+        "flatpak",
+        &["a"],
+        CmdOutput {
+            status: -1,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: true,
+        },
+    );
+    let report = execute_with(
+        &env,
+        &Config::default(),
+        &command_plan("flatpak", &["a"]),
+        &runner,
+    );
+    assert!(!report.results[0].ok);
+    assert_eq!(report.results[0].error.as_deref(), Some("timed out"));
 }
 
 #[test]

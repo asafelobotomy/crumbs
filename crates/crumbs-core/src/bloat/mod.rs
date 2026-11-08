@@ -309,6 +309,8 @@ mod tests {
                     dev: 1,
                     ino: 2,
                     is_symlink: false,
+                    ctime: 0,
+                    ctime_nsec: 0,
                 },
             )],
             app_id: None,
@@ -386,6 +388,7 @@ mod tests {
             status: 0,
             stdout: String::new(),
             stderr: String::new(),
+            timed_out: false,
         };
     }
 

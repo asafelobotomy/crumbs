@@ -238,6 +238,8 @@ mod tests {
                 dev: 0,
                 ino: 0,
                 is_symlink: false,
+                ctime: 0,
+                ctime_nsec: 0,
             },
             mime_lines: Vec::new(),
         }

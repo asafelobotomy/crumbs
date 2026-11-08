@@ -50,7 +50,7 @@ fn target(env: &Env, a: &Action) -> String {
             }
             sanitise(&line)
         }
-        _ => shown_path(env, a.path()),
+        _ => a.path().map(|p| shown_path(env, p)).unwrap_or_default(),
     }
 }
 

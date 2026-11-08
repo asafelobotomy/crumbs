@@ -1484,8 +1484,8 @@ fn scan_sanitises_labels() {
 // ---- clean (only ever inside the fixture) ----
 
 /// Lists apps and runtimes; `uninstall` appends its args to
-/// `$CRUMBS_ROOT/flatpak-args` instead of removing anything.
-const FLATPAK_RECORD: &str = "#!/bin/sh\nif [ \"$1\" = uninstall ]; then echo \"$@\" >> \"$CRUMBS_ROOT/flatpak-args\"; exit 0; fi\nprintf 'app.xemu.xemu\\txemu\\t0.8.136\\tuser\\t34.4 MB\\n'\n";
+/// `<root>/flatpak-args` (the child gets no `CRUMBS_ROOT`) instead of removing anything.
+const FLATPAK_RECORD: &str = "#!/bin/sh\nif [ \"$1\" = uninstall ]; then echo \"$@\" >> \"$(dirname \"$0\")/../../flatpak-args\"; exit 0; fi\nprintf 'app.xemu.xemu\\txemu\\t0.8.136\\tuser\\t34.4 MB\\n'\n";
 /// The app listing works; only the runtime listing (the `flatpak-unused`
 /// scanner) fails.
 const FLATPAK_RUNTIME_FAIL: &str = "#!/bin/sh\ncase \"$*\" in *--runtime*) echo boom >&2; exit 1;; esac\nprintf 'app.xemu.xemu\\txemu\\t0.8.136\\tuser\\t34.4 MB\\n'\n";

@@ -12,7 +12,7 @@ use crate::output::{ErrorEntry, print_json_entries};
 
 pub fn run(env: &Env, json: bool) -> anyhow::Result<ExitCode> {
     let (cfg, notes) = load_cfg(env)?;
-    let report = doctor(env, &SystemRunner, &cfg);
+    let report = doctor(env, &SystemRunner::new(), &cfg);
     let code = if crate::output::partial_failure_parts(&report.sources, &report.errors) {
         3
     } else {

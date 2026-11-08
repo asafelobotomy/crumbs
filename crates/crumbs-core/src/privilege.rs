@@ -79,6 +79,7 @@ mod tests {
                 status: 0,
                 stdout: stdout.into(),
                 stderr: String::new(),
+                timed_out: false,
             },
         )
     }
