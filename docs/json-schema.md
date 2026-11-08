@@ -443,20 +443,20 @@ With `--leftovers-only`, the plan leaves out what launches or opens the app: its
 |---|---|---|
 | `batch` | string | Batch ID. |
 | `time` | string | RFC 3339 UTC time of the batch's first entry. |
-| `label` | string | The app ID, `orphans`, or `restore` for a batch made by `restore`. |
+| `label` | string | By the entries' `kind`: the app ID for `uninstall`, otherwise `orphans` or `clean`; `restore` for a batch made by `restore`. Entries without `kind` (written by earlier builds) give the app ID, or `orphans` when there is none. |
 | `items` | number | Number of entries. |
 | `size` | number | Bytes of the entries that succeeded. |
 | `restored` | number | Entries of this batch that a later successful restore put back. |
 | `entries` | array | History entries (below). |
 
-**History entry**: `id` (`<batch>-<index>`), `batch`, `time`, `action` (`trash`, `delete`, `edit-file`, `restore` or `command`; lines written by earlier builds may say `edit_file`, which means the same), `path`, `trashed` (null, or `{ original, files_path, info_path }`), `backup` (string or null), `size` (number), `ok` (boolean), `error` (string or null), `app_id` (string or null) and `restores` (string or null) and `argv` (array of string; present on `command` entries only).
+**History entry**: `id` (`<batch>-<index>`), `batch`, `time`, `action` (`trash`, `delete`, `edit-file`, `restore` or `command`; lines written by earlier builds may say `edit_file`, which means the same), `path`, `trashed` (null, or `{ original, files_path, info_path }`), `backup` (string or null), `size` (number), `ok` (boolean), `error` (string or null), `app_id` (string or null), `restores` (string or null), `argv` (array of string; present on `command` entries only) and `kind` (string: `uninstall`, `orphans` or `clean`, the command that made the batch; absent on `restore` entries and on lines written by earlier builds).
 
 - `trashed` is set for `trash` entries, and on `restore` entries it repeats the trash record that was restored.
 - On an `edit-file` entry, `backup` is the copy of the file as it was before the edit.
 - On a `restore` entry, `restores` is the ID of the entry it restored. For a restored `edit-file`, `backup` is the **pre-restore backup**: a copy of the file as it was just before the restore overwrote it. For other entries `backup` is null.
 - On a `command` entry (a `user-command` action that ran), `path` is the program's in-system path (or its bare name when it is not installed), `argv` its arguments, `size` 0, `trashed` and `backup` null. It cannot be restored.
 - Failed and skipped attempts are recorded too (`ok` false, `error` set).
-- A batch made by `clean` has `app_id` null on its entries, so `history` labels it `orphans`.
+- A batch made by `clean` has `app_id` null and `kind` `clean` on its entries, so `history` labels it `clean`.
 
 `errors` has a `history` entry when unreadable lines were skipped. Exit 0. Example (a trashed orphan, then a restore of it; one batch of each):
 
@@ -504,6 +504,7 @@ With `--leftovers-only`, the plan leaves out what launches or opens the app: its
             "batch": "1794141800816",
             "error": null,
             "id": "1794141800816-0",
+            "kind": "orphans",
             "ok": true,
             "path": "/home/user/.thunderbird",
             "restores": null,
@@ -541,7 +542,7 @@ Selectors are batch IDs, entry IDs or absolute original paths. `data`: `outcomes
 | `ok` | boolean | |
 | `error` | string or null | For example `already restored`, `no matching history entry`. |
 
-A path selector names the newest successful trash entry for that path that has not been restored yet. `--dry-run` checks and reports without changing anything. Exit 0 when every outcome is `ok`; 2 when no selector matched any history entry (every outcome has an empty `entry_id`); otherwise 3.
+A batch selector restores the batch's successful `trash` and `edit-file` entries; `delete` and `command` entries are skipped, since nothing of them can be put back (an entry ID names one anyway, and its outcome says `permanently deleted; cannot be restored` or `commands cannot be undone`). A path selector names the newest successful trash entry for that path that has not been restored yet. `--dry-run` checks and reports without changing anything. Exit 0 when every outcome is `ok`; 2 when no selector matched any history entry (every outcome has an empty `entry_id`); otherwise 3.
 
 ```json
 {
@@ -594,7 +595,7 @@ A path selector names the newest successful trash entry for that path that has n
 | `label` | string | What to show: a name, a display path, or for a command what it does. |
 | `size` | number or null | Bytes. `null` when unknown. |
 | `rebuildable` | boolean | The owner recreates it on demand (caches). |
-| `preselected` | boolean | Whether `clean` includes it by default. `false` for an item held back (its app is running, see `note`) and for `flatpak-unused`, which only runs when named. |
+| `preselected` | boolean | Whether `clean` includes it by default. `false` for an item held back (its app is running, see `note`) and for `flatpak-unused` and `trash` items, which `clean` includes only when their category is named. |
 | `note` | string or null | Why it is held back (`Firefox is running`), or what to know (`deleted permanently (temporary file)`, `decided by flatpak`). |
 | `action` | string or object | `"trash"`, `"delete"`, or `{ "command": { "program", "args" } }`. |
 | `scope` | string | `home`, `user-temp` or `home-trash` (see the plan action's `scope`). Always present here. |
@@ -643,7 +644,7 @@ The internal fingerprint of an item is never serialized.
             "label": "~/docs/old.txt",
             "size": 8192,
             "rebuildable": false,
-            "preselected": true,
+            "preselected": false,
             "note": null,
             "action": "delete",
             "scope": "home-trash",
@@ -781,7 +782,7 @@ Which items are planned:
 
 - With no category, every enabled category is scanned (all but those in `categories_off`). Naming categories scans exactly those, even ones switched off in the config.
 - The items cleaned are the ones with `preselected` true. An item held back (its app is running) is left out and listed nowhere in the JSON. With `-i` you pick from all items instead.
-- `flatpak-unused` only runs when it is named, as its item is never preselected otherwise.
+- `flatpak-unused` and `trash` are opt-in: their items are never preselected, so they are planned only when the category is named (or ticked with `-i`). A plain `crumbs clean` never empties the trash.
 - `trash` and `temp` items are always permanent deletes (`delete` actions with `scope` `home-trash` and `user-temp`, and the plan's `notes` say so). With `--permanent`, trash items of the other categories become `delete` too.
 - When any action is a `trash`, the plan's `notes` include `space is freed when the trash is emptied (or use --permanent)`.
 
