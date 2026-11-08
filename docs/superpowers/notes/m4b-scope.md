@@ -26,7 +26,17 @@ Notation: "M1 follow-ups, Entry criteria for M4, item 2" means that section and 
 From the M2 and M3 "Before M4" lists:
 
 - **HomeTrash roots trust `data_home`.** They are validated as private directories but not required to be under the home directory. M3 FU, Before M4. Matters more once M4b adds system roots, so that one cannot be redirected into the other.
-- **Trash topdir accepted by name only.** M2 FU, Before M4, item 3. (M4 did clamp the topdir walk at the fake root, and made the history file `O_NOFOLLOW`; M4 did not change how an existing topdir trash root is accepted; re-check that before relying on it.)
+- **Trash topdir accepted by name only.** M2 FU, Before M4, item 3. Still true and unchanged: `restore.rs::valid_trash` accepts a topdir trash root by its name. (M4 did clamp the topdir walk at the fake root, and made the history file `O_NOFOLLOW`.)
+- **Process matching misses `claude`/electron-style executables** (M3 FU, Before M4), so caches of those running apps are pre-selected (they are trashed, so restorable). Commit aa5a04b changed process matching; whether it covers these executables was not re-checked.
+- **Bind mounts before a root tree deletion.** M2 FU, Before M3, item 2. M3 switched `size::crosses_device` to the mount ID (`stx_mnt_id`), which covers the user-level `--permanent` case; M4b must verify it also holds for a recursive delete as root (a bind mount inside `/opt/<name>` must never be descended) before it ships.
+
+From the M3 final review ("Open from the final review"):
+
+- `restore <batch>` on a delete-only batch (`clean temp`, `clean trash`) says `no matching history entry` and exits 2, although `history` lists the batch.
+- `--keep-data` fallbacks: a launcher with a non-UTF-8 name or an unreadable one is treated as the app's own and removed with the AppImage (trashed, so restorable).
+- `--keep-data` leaves mime associations that point at the removed launcher.
+
+From the M2 "Before M3" list, checked against the code: items 1, 3, 4 and 5 are done and so are most small items (config-error envelope, `apps list --source` error scoping, `doctor` using the config, dotfile kind, `restore <path>` skipping restored entries, own launchers with `--keep-data`). Not verified, treat as open: `orphans` with clean-only flags printing the uninstall-style error envelope; `glob_match` with several `**` being exponential and `.cache/**` not matching `.cache`; unsanitised edit preview lines.
 
 From the M3 "Smaller items (any time)", none of which M4 touched:
 

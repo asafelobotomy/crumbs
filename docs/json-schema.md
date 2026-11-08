@@ -64,10 +64,10 @@ The exit code tells you which kind of failure it was (see below). `apps show` re
 |---|---|
 | 0 | Success (including a dry run and "nothing to do"). |
 | 1 | Error, or `uninstall`/`orphans --clean`/`clean` refused because a source or scanner failed (override with `--force`) or an app is running, or `uninstall` refused an AppImage whose file fails the safety checks, or refused a package removal: pacman's simulation refused it (for example it would break a dependency), the pacman database is locked (`pacman is busy (database lock present)`), or the name is not a plain package name. |
-| 2 | Usage error: bad flags, an unknown category name, `--user` together with `--system`, a named category of the other kind (`clean cache --system`, `scan --user --category journal`), ambiguous or not-found app, `--json` without `--yes` or `--dry-run`, a destructive command run non-interactively without `--yes`, removing an unmanaged app without `--leftovers-only`, or `restore` with no selector matching any history entry. |
+| 2 | Usage error: bad flags, a missing package tool (`pacman is not installed` when removing a pacman app), an unknown category name, `--user` together with `--system`, a named category of the other kind (`clean cache --system`, `scan --user --category journal`), ambiguous or not-found app, `--json` without `--yes` or `--dry-run`, a destructive command run non-interactively without `--yes`, removing an unmanaged app without `--leftovers-only`, or `restore` with no selector matching any history entry. |
 | 3 | Partial failure: some source failed while another worked, some actions/restores failed (privileged ones included, when administrator rights were granted but a step failed), or (`scan`) some category's scanner failed. |
 | 4 | Aborted by the user at a prompt. |
-| 5 | Administrator rights were needed and not available: no escalation program (run0, pkexec, or sudo on a terminal) was found, or the prompt was cancelled or denied. Nothing that needs those rights was changed. The human output lists the commands to run by hand, and `--json` carries them in `data.manual_commands` (see `uninstall`). |
+| 5 | Administrator rights were needed and not available: no escalation program (`run0` on systemd 256 or newer, `pkexec`, or `sudo` on a terminal) was found, or the prompt was cancelled or denied. Nothing that needs those rights was changed. The human output lists the commands to run by hand, and `--json` carries them in `data.manual_commands` (see `uninstall`). |
 
 ## App IDs
 
@@ -135,7 +135,7 @@ Each action is `{ "action", "size", "reason" }`, plus two optional fields. `acti
 
 `size` is bytes (0 for `edit-file`, and 0 for a command or `package-remove` whose size is unknown; a `privileged-command` from `clean --system` carries the size its scan estimated, such as the package cache).
 
-**Privileged batch.** All `privileged-command` and `package-remove` actions of one run, and each `delete` with `scope` `system`, are joined into one `/bin/sh` script and run once, so there is one authorisation prompt however many there are. The escalation program is `run0`, else `pkexec`, else `sudo` (only when stdin is a terminal). The script sets a fixed `PATH` and clears `LD_PRELOAD` and `LD_LIBRARY_PATH`; each program is resolved in the trusted system directories and every argument is single-quoted. It runs before the rest of the plan. The human preview says `these steps run with administrator rights; you will be asked once` (a `note:` line of the human output only; it is not in the plan's `notes`). A privileged action that `depends_on` another action is skipped. `--dry-run` never escalates.
+**Privileged batch.** All `privileged-command` and `package-remove` actions of one run, and each `delete` with `scope` `system`, are joined into one `/bin/sh` script and run once, so there is one authorisation prompt however many there are. The escalation program is `run0` (only on systemd 256 or newer), else `pkexec`, else `sudo` (only when stdin is a terminal). The script sets a fixed `PATH` and clears `LD_PRELOAD` and `LD_LIBRARY_PATH`; each program is resolved in the trusted system directories and every argument is single-quoted. It runs before the rest of the plan. The human preview says `these steps run with administrator rights; you will be asked once` (a `note:` line of the human output only; it is not in the plan's `notes`). A privileged action that `depends_on` another action is skipped. `--dry-run` never escalates.
 
 The optional fields are left out when they have no value:
 
@@ -532,7 +532,19 @@ A system Flatpak app plans (`flatpak uninstall --system ...`):
 
 ### Exit 5 and manual commands
 
-When administrator rights are needed and cannot be had (no `run0`, `pkexec` or terminal `sudo`, or the prompt was cancelled or denied), nothing that needs them is changed, the actions that depend on them are skipped, and the exit code is 5. The human output prints, after the report, the commands to run by hand:
+Exit 5 has two paths. In both, nothing that needs administrator rights is changed and the commands to run by hand are listed.
+
+**(a) No escalation program.** None of `run0` (systemd 256 or newer), `pkexec` or a terminal `sudo` is usable. crumbs stops after the preview, before any prompt: nothing is run, no report is produced and no history is written. stderr:
+
+```
+error: no way to get administrator rights
+to do it yourself, run:
+  sudo '/usr/bin/pacman' '-Rn' '--noconfirm' 'firefox' 'gn' 'libjuice'
+```
+
+With `--json`, `data` is `{ "manual_commands": [...], "plans": [...], "report": null }` and the `errors` array ends with a `cli` entry whose `message` is `no way to get administrator rights`. Every privileged action of the plan is listed (a dependent leftover action is not).
+
+**(b) Prompt cancelled or denied.** An escalation program exists and ran, but no step came back with a result. The actions that depend on the privileged ones are skipped and the reports have `escalation_failed` true; the attempt is recorded in the history. The human output prints, after the report, the commands to run by hand:
 
 ```
 error: administrator rights were not granted; nothing that needs them was changed
@@ -540,7 +552,7 @@ to do it yourself, run:
   sudo '/usr/bin/pacman' '-Rn' '--noconfirm' 'firefox' 'gn' 'libjuice'
 ```
 
-With `--json` the envelope has `data.manual_commands`: an array of those lines, one per privileged action that never got rights, in plan order, each exactly as the batch would run it (program path, every argument single-quoted). It is present only in an exit-5 envelope. A dependent that was skipped, and an action crumbs refused before the batch (it changed since the scan, or failed a safety check), are never listed: running them by hand would skip crumbs' checks. The `errors` array ends with a `cli` entry carrying the same text as the `error:` line, and `data.report` holds the reports, with `escalation_failed` true. The attempt is recorded in the history with `ok` false.
+With `--json` the envelope has `data.manual_commands`: an array of those lines, one per privileged action that never got rights, in plan order, each exactly as the batch would run it (program path, every argument single-quoted). It is present only in an exit-5 envelope, for both paths. A dependent that was skipped, and an action crumbs refused before the batch (it changed since the scan, or failed a safety check), are never listed: running them by hand would skip crumbs' checks. In path (b) the `errors` array ends with a `cli` entry carrying the same text as the `error:` line, and `data.report` holds the reports, with `escalation_failed` true. The attempt is recorded in the history with `ok` false. The example below is path (b).
 
 ```json
 {
@@ -709,7 +721,7 @@ Selectors are batch IDs, entry IDs or absolute original paths. `data`: `outcomes
 | `ok` | boolean | |
 | `error` | string or null | For example `already restored`, `no matching history entry`. |
 
-A batch selector restores the batch's successful `trash` and `edit-file` entries; `delete` and `command` entries are skipped, since nothing of them can be put back (an entry ID names one anyway, and its outcome says `permanently deleted; cannot be restored` or `commands cannot be undone`). A path selector names the newest successful trash entry for that path that has not been restored yet. `--dry-run` checks and reports without changing anything. Exit 0 when every outcome is `ok`; 2 when no selector matched any history entry (every outcome has an empty `entry_id`); otherwise 3.
+A batch selector restores the batch's successful `trash` and `edit-file` entries; `delete`, `command`, `privileged-command` and `package-remove` entries are skipped, since nothing of them can be put back (an entry ID names one anyway, and its outcome says `permanently deleted; cannot be restored`, `commands cannot be undone` or `packages cannot be restored by crumbs`). A path selector names the newest successful trash entry for that path that has not been restored yet. `--dry-run` checks and reports without changing anything. Exit 0 when every outcome is `ok`; 2 when no selector matched any history entry (every outcome has an empty `entry_id`); otherwise 3.
 
 ```json
 {

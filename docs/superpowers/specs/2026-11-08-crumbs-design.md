@@ -98,7 +98,7 @@ trait AppSource {
 | pacman | `/var/lib/pacman/local` exists | Parse `local/*/desc` + `files` directly | `pacman -Rn --noconfirm <simulated closure>` |
 | dpkg | `/var/lib/dpkg/status` exists | Parse `status`; file lists from `info/*.list` | `apt-get purge <pkg>` (`dpkg -P` if apt-get missing) |
 | rpm | `rpm` in trusted path | `rpm -qa --qf` with a fixed format; `rpm -ql` per app on demand | `dnf remove <pkg>` (`zypper remove` if dnf missing; `rpm -e` last) |
-| Flatpak | `flatpak` in trusted path | `flatpak list --app --columns=application,name,version,installation,size` | `flatpak uninstall [--user\|--system] --delete-data <id>` |
+| Flatpak | `flatpak` in trusted path | `flatpak list --app --columns=application,name,version,installation,size` | `flatpak uninstall [--user\|--system\|--installation=<name>] -y --noninteractive <id>` (never `--delete-data`) |
 | Snap | `snap` in trusted path | `snap list` | `snap remove --purge <name>` |
 | AppImage | always | Scan `~/Applications`, `~/.local/bin`, `~/Downloads`, `~/opt` and AppImageLauncher's configured dir for ELF files with the AppImage magic (`AI\x02` at offset 8) | Trash the file |
 | Unmanaged | always | `.desktop` entries whose `Exec` target is not owned by any package and is not an AppImage (e.g. `/opt/foo` tarballs) | Path-based removal of the install dir if it is unambiguous; otherwise leftovers only |
