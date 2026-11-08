@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use super::*;
 use crate::config::Config;
@@ -653,24 +654,91 @@ fn flatpak_icons_need_full_id_or_desktop_stem() {
     assert!(at(&fs, ".local/share/icons/hicolor/48x48/apps/firefox.png").is_some());
 }
 
-fn orphans(t: &FixtureTree, apps: Vec<App>, show_low: bool) -> Vec<Finding> {
+const DAY: Duration = Duration::from_secs(86_400);
+
+fn orphans_at(t: &FixtureTree, apps: Vec<App>, show_low: bool, now: SystemTime) -> Vec<Finding> {
     let (rules, _) = load_rules(&t.env());
     let r = Run::with(t, apps, &rules, &Config::default());
-    find_orphans(&r.idx, show_low)
+    super::orphans::find_orphans_at(&r.idx, show_low, now)
+}
+
+/// Orphans with the clock 60 days ahead, so fixture files count as old.
+fn orphans(t: &FixtureTree, apps: Vec<App>, show_low: bool) -> Vec<Finding> {
+    orphans_at(t, apps, show_low, SystemTime::now() + DAY * 60)
+}
+
+fn set_age(t: &FixtureTree, rel: &str, days: u64) {
+    let f = std::fs::File::open(t.mkdir(rel)).unwrap();
+    f.set_modified(SystemTime::now() - DAY * days as u32)
+        .unwrap();
 }
 
 #[test]
-fn uninstalled_rule_app_is_high() {
+fn uninstalled_rule_app_is_medium() {
     let t = FixtureTree::new();
     t.write("/home/user/.thunderbird/profiles.ini", b"x");
-    let fs = orphans(&t, vec![pacman("firefox", &["firefox"])], false);
+    set_age(&t, "/home/user/.thunderbird", 60);
+    let fs = orphans_at(
+        &t,
+        vec![pacman("firefox", &["firefox"])],
+        false,
+        SystemTime::now(),
+    );
     let f = must(&fs, ".thunderbird");
-    assert_eq!(f.confidence, Confidence::High);
-    assert_eq!(f.reason, "belongs to thunderbird, which is not installed");
+    assert_eq!(f.confidence, Confidence::Medium);
+    assert_eq!(
+        f.reason,
+        "looks like thunderbird data; thunderbird was not detected as installed"
+    );
     assert_eq!(f.kind, FindingKind::DotDir);
     assert_eq!(f.size.files, 1);
     assert_eq!(f.fingerprint, fingerprint(&t.env(), &f.path).unwrap());
     assert!(!f.shared && f.mime_lines.is_empty());
+}
+
+#[test]
+fn recently_modified_rule_orphan_is_capped_low() {
+    let t = FixtureTree::new();
+    t.write("/home/user/.thunderbird/profiles.ini", b"x");
+    let now = SystemTime::now();
+    assert!(orphans_at(&t, Vec::new(), false, now).is_empty());
+    let fs = orphans_at(&t, Vec::new(), true, now);
+    let f = must(&fs, ".thunderbird");
+    assert_eq!(f.confidence, Confidence::Low);
+    assert_eq!(
+        f.reason,
+        "looks like thunderbird data; thunderbird was not detected as installed; modified 0 days ago"
+    );
+    // The same directory seen 5 days later.
+    let fs = orphans_at(&t, Vec::new(), true, now + DAY * 5);
+    assert!(
+        must(&fs, ".thunderbird")
+            .reason
+            .ends_with("; modified 5 days ago")
+    );
+}
+
+#[test]
+fn recency_cap_applies_to_medium_flatpak_dir() {
+    let t = FixtureTree::new();
+    t.mkdir("/home/user/.var/app/org.gone.App");
+    let fs = orphans_at(&t, Vec::new(), true, SystemTime::now());
+    let f = must(&fs, ".var/app/org.gone.App");
+    assert_eq!(f.confidence, Confidence::Low);
+    assert_eq!(
+        f.reason,
+        "data of the Flatpak org.gone.App, which is not installed; modified 0 days ago"
+    );
+}
+
+#[test]
+fn brave_origin_bin_keeps_brave_config() {
+    let t = FixtureTree::new();
+    t.mkdir("/home/user/.config/BraveSoftware/Brave-Browser");
+    t.mkdir("/home/user/.cache/BraveSoftware");
+    let fs = orphans(&t, vec![pacman("brave-origin-bin", &["brave"])], true);
+    assert!(at(&fs, ".config/BraveSoftware").is_none(), "{fs:#?}");
+    assert!(at(&fs, ".cache/BraveSoftware").is_none(), "{fs:#?}");
 }
 
 #[test]
@@ -773,10 +841,11 @@ fn orphans_never_preselected() {
     let fs = orphans(&t, Vec::new(), true);
     assert_eq!(fs.len(), 3, "{fs:#?}");
     assert!(fs.iter().all(|f| !f.preselected));
+    assert!(fs.iter().all(|f| f.confidence != Confidence::High));
     let order: Vec<_> = fs.iter().map(|f| f.confidence).collect();
     assert_eq!(
         order,
-        [Confidence::High, Confidence::Medium, Confidence::Low]
+        [Confidence::Medium, Confidence::Medium, Confidence::Low]
     );
 }
 

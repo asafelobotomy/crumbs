@@ -24,7 +24,7 @@ paths = ["$XDG_CONFIG_HOME/google-chrome", "$XDG_CACHE_HOME/google-chrome"]
 
 # Brave
 [[app]]
-match = { package = ["brave-bin", "brave-browser"] }
+match = { package = ["brave-bin", "brave-browser", "brave-origin-bin"] }
 paths = ["$XDG_CONFIG_HOME/BraveSoftware", "$XDG_CACHE_HOME/BraveSoftware"]
 
 # VS Code

@@ -2,6 +2,7 @@
 
 use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::command::TRUSTED_DIRS;
 use crate::env::Env;
@@ -96,11 +97,21 @@ fn rule_label(rule: &Rule) -> Option<&str> {
     .find(|s| !s.is_empty())
 }
 
-/// Leftover candidates that match no installed app. `High` only when a
-/// builtin rule names them and its app is not installed. Sorted by
+/// Leftover candidates that match no installed app. Never `High`: a rule
+/// naming an undetected app gives `Medium` (not detected is not uninstalled),
+/// and anything modified in the last 30 days is capped at `Low`. Sorted by
 /// confidence (highest first), then path. Low findings only with `show_low`.
 /// Orphans are never pre-selected.
 pub fn find_orphans(idx: &LeftoverIndex, show_low: bool) -> Vec<Finding> {
+    find_orphans_at(idx, show_low, SystemTime::now())
+}
+
+/// `find_orphans` with an injectable clock.
+pub(crate) fn find_orphans_at(
+    idx: &LeftoverIndex,
+    show_low: bool,
+    now: SystemTime,
+) -> Vec<Finding> {
     let env = idx.env();
     let apps = &idx.inventory().apps;
 
@@ -118,7 +129,7 @@ pub fn find_orphans(idx: &LeftoverIndex, show_low: bool) -> Vec<Finding> {
             let Some(label) = rule_label(rule) else {
                 continue;
             };
-            let reason = format!("belongs to {label}, which is not installed");
+            let reason = format!("looks like {label} data; {label} was not detected as installed");
             gone.extend(paths.map(|p| (p, reason.clone())));
         }
     }
@@ -154,7 +165,11 @@ pub fn find_orphans(idx: &LeftoverIndex, show_low: bool) -> Vec<Finding> {
         {
             continue;
         }
-        let (confidence, reason) = classify(env, c, &gone);
+        let (mut confidence, mut reason) = classify(env, c, &gone);
+        if let Some(days) = recent_days(env, &c.path, now) {
+            confidence = confidence.min(Confidence::Low);
+            reason.push_str(&format!("; modified {days} days ago"));
+        }
         if confidence == Confidence::Low && !show_low {
             continue;
         }
@@ -178,9 +193,22 @@ pub fn find_orphans(idx: &LeftoverIndex, show_low: bool) -> Vec<Finding> {
     out
 }
 
+/// Whole days since the candidate itself (lstat, no tree walk) was modified,
+/// when that is within the last 30 days.
+fn recent_days(env: &Env, path: &Path, now: SystemTime) -> Option<u64> {
+    let modified = std::fs::symlink_metadata(env.sys_path(path))
+        .ok()?
+        .modified()
+        .ok()?;
+    // A modification time in the future counts as just now.
+    let age = now.duration_since(modified).unwrap_or_default();
+    let days = age.as_secs() / 86_400;
+    (days < 30).then_some(days)
+}
+
 fn classify(env: &Env, c: &Candidate, gone: &[(PathBuf, String)]) -> (Confidence, String) {
     if let Some((_, reason)) = gone.iter().find(|(p, _)| c.path.starts_with(p)) {
-        return (Confidence::High, reason.clone());
+        return (Confidence::Medium, reason.clone());
     }
     match &c.subject {
         Subject::Flatpak(id) => (

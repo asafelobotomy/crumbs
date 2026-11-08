@@ -172,9 +172,9 @@ precedence. Rule-matched paths are High confidence.
 ### Orphans
 
 `crumbs orphans` lists entries in the user search locations that match **no**
-installed app and no curated rule. Orphans are Medium at best (High only when a
-curated rule identifies the app and that app is confirmed not installed) and are
-never pre-selected.
+installed app. Orphans are never High, since "not detected" is not "not
+installed": a curated rule naming an undetected app gives Medium, and anything
+modified in the last 30 days is capped at Low. Orphans are never pre-selected.
 
 ## 5. Bloat scanners
 

@@ -302,6 +302,11 @@ mod tests {
         assert!(rules.len() >= 20, "only {} rules", rules.len());
         assert!(rules.iter().all(|r| r.origin == RuleOrigin::Builtin));
         assert!(rules.iter().all(|r| !r.paths.is_empty()));
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.packages.iter().any(|p| p == "brave-origin-bin"))
+        );
         assert!(rules.iter().all(|r| r.flatpaks.is_empty()));
         assert!(
             rules
