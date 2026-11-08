@@ -33,19 +33,38 @@ impl AppSource for PacmanSource {
             path: path.clone(),
             source,
         };
-        let mut dirs: Vec<PathBuf> = fs::read_dir(&db)
-            .map_err(|e| io_err(&db, e))?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .collect();
+        let mut listing = SourceListing::default();
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        for entry in fs::read_dir(&db).map_err(|e| io_err(&db, e))? {
+            match entry {
+                Ok(e) => {
+                    let p = e.path();
+                    if p.is_dir() {
+                        dirs.push(p);
+                    }
+                }
+                Err(e) => listing.errors.push(SourceError {
+                    source: SourceKind::Pacman,
+                    message: format!("cannot read package database entry: {e}"),
+                }),
+            }
+        }
         dirs.sort();
 
         let by_id: HashMap<&str, &DesktopEntry> =
             cx.desktop.iter().map(|d| (d.id.as_str(), d)).collect();
-        let mut listing = SourceListing::default();
 
         for dir in dirs {
+            // Ownership must be complete even when desc is unusable.
+            let files = match fs::read(dir.join("files")) {
+                Ok(b) => owned_files(&String::from_utf8_lossy(&b)),
+                Err(e) => {
+                    listing
+                        .errors
+                        .push(pkg_error(&dir, format!("cannot read files: {e}")));
+                    Vec::new()
+                }
+            };
             let desc_path = dir.join("desc");
             let desc = match fs::read(&desc_path) {
                 Ok(b) => parse_sections(&String::from_utf8_lossy(&b)),
@@ -53,6 +72,9 @@ impl AppSource for PacmanSource {
                     listing
                         .errors
                         .push(pkg_error(&dir, format!("cannot read desc: {e}")));
+                    listing
+                        .owned_paths
+                        .extend(files.into_iter().map(PathBuf::from));
                     continue;
                 }
             };
@@ -60,12 +82,10 @@ impl AppSource for PacmanSource {
                 listing
                     .errors
                     .push(pkg_error(&dir, "desc has no %NAME%".into()));
+                listing
+                    .owned_paths
+                    .extend(files.into_iter().map(PathBuf::from));
                 continue;
-            };
-
-            let files = match fs::read(dir.join("files")) {
-                Ok(b) => owned_files(&String::from_utf8_lossy(&b)),
-                Err(_) => Vec::new(),
             };
 
             let mut app = App::new(SourceKind::Pacman, &name);
@@ -296,20 +316,34 @@ mod tests {
         assert_eq!(ns.install_size, None);
         assert!(l.apps.iter().any(|a| a.id == "pacman:badbytes"));
         assert!(l.owned_paths.contains(&PathBuf::from("/usr/bin/ok")));
-        assert!(!l.owned_paths.contains(&PathBuf::from("/usr/x")));
+        // Files of a package with an unreadable desc still count as owned.
+        assert!(l.owned_paths.contains(&PathBuf::from("/usr/x")));
     }
 
     #[test]
-    fn missing_files_means_no_gui() {
+    fn missing_files_is_an_error() {
         let t = FixtureTree::new();
         t.write(
             "/var/lib/pacman/local/nofiles-1-1/desc",
             b"%NAME%\nnofiles\n\n%VERSION%\n1-1\n\n",
         );
         let l = list(&t, true);
-        assert!(l.errors.is_empty());
-        assert_eq!(l.apps.len(), 1);
-        assert!(!l.apps[0].has_gui);
+        assert_eq!(l.errors.len(), 1);
+        assert!(l.errors[0].message.contains("nofiles-1-1"));
+        assert!(l.errors[0].message.contains("cannot read files"));
+        assert!(l.apps.iter().all(|a| !a.has_gui));
+    }
+
+    #[test]
+    fn unreadable_desc_still_records_owned_files() {
+        let t = FixtureTree::new();
+        t.write(
+            "/var/lib/pacman/local/nodesc-1-1/files",
+            b"%FILES%\nopt/x/x\n",
+        );
+        let l = list(&t, true);
+        assert_eq!(l.errors.len(), 1);
+        assert!(l.owned_paths.contains(&PathBuf::from("/opt/x/x")));
     }
 
     #[test]

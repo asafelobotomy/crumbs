@@ -63,6 +63,7 @@ pub fn discover(env: &Env, runner: &dyn CommandRunner, opts: &ListOptions) -> In
     let mut owned = HashSet::new();
     let mut claimed = HashSet::new();
     let mut package_db_listed = false;
+    let mut package_db_incomplete = false;
 
     for source in default_sources() {
         let kind = source.kind();
@@ -77,7 +78,13 @@ pub fn discover(env: &Env, runner: &dyn CommandRunner, opts: &ListOptions) -> In
         }
         match source.list(&cx) {
             Ok(listing) => {
-                package_db_listed |= source.is_package_db();
+                if source.is_package_db() {
+                    if listing.errors.is_empty() {
+                        package_db_listed = true;
+                    } else {
+                        package_db_incomplete = true;
+                    }
+                }
                 statuses.push(SourceStatus {
                     source: kind,
                     available: true,
@@ -96,6 +103,9 @@ pub fn discover(env: &Env, runner: &dyn CommandRunner, opts: &ListOptions) -> In
                     app_count: 0,
                     skipped_reason: None,
                 });
+                if source.is_package_db() {
+                    package_db_incomplete = true;
+                }
                 errors.push(SourceError {
                     source: kind,
                     message: e.to_string(),
@@ -103,6 +113,8 @@ pub fn discover(env: &Env, runner: &dyn CommandRunner, opts: &ListOptions) -> In
             }
         }
     }
+    // An incomplete ownership set must never be used to classify unmanaged apps.
+    package_db_listed &= !package_db_incomplete;
 
     if package_db_listed {
         let listing = list_unmanaged(&cx, &owned, &claimed);
@@ -118,7 +130,14 @@ pub fn discover(env: &Env, runner: &dyn CommandRunner, opts: &ListOptions) -> In
             source: SourceKind::Unmanaged,
             available: false,
             app_count: 0,
-            skipped_reason: Some("no supported package database found".into()),
+            skipped_reason: Some(
+                if package_db_incomplete {
+                    "package database incomplete"
+                } else {
+                    "no supported package database found"
+                }
+                .into(),
+            ),
         });
     }
 
@@ -276,6 +295,31 @@ mod tests {
             ]
         );
         assert!(inv.errors.is_empty());
+    }
+
+    #[test]
+    fn unmanaged_skipped_when_package_db_has_errors() {
+        let t = FixtureTree::new();
+        firefox(&t);
+        t.write(
+            "/var/lib/pacman/local/nofiles-1-1/desc",
+            b"%NAME%\nnofiles\n\n%VERSION%\n1-1\n\n",
+        );
+        t.write_exec("/opt/foo/foo", b"");
+        t.desktop(
+            "/usr/share/applications/foo.desktop",
+            "[Desktop Entry]\nType=Application\nName=Foo\nExec=/opt/foo/foo\n",
+        );
+        let inv = discover(&t.env(), &FakeRunner::new(), &ListOptions::default());
+        assert!(!inv.errors.is_empty());
+        let st = inv.statuses.last().unwrap();
+        assert_eq!(st.source, SourceKind::Unmanaged);
+        assert!(!st.available);
+        assert_eq!(
+            st.skipped_reason.as_deref(),
+            Some("package database incomplete")
+        );
+        assert!(inv.apps.iter().all(|a| a.source != SourceKind::Unmanaged));
     }
 
     #[test]
