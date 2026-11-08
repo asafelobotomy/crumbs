@@ -469,13 +469,16 @@ fn excluded_never_found() {
 fn version_suffix_stripped() {
     let t = FixtureTree::new();
     t.mkdir("/home/user/.config/Foo-2");
-    t.mkdir("/home/user/.local/share/foo_1.4.2");
+    t.mkdir("/home/user/.local/share/foo_3");
+    // Only one final segment is dropped: `foo-1.2` → `foo-1`, no match.
+    t.mkdir("/home/user/.cache/foo-1.2");
     let r = Run::new(&t, vec![pacman("foo", &[])]);
-    let fs = r.find(0, false);
+    let fs = r.find(0, true);
     assert_eq!(must(&fs, ".config/Foo-2").confidence, Confidence::Medium);
-    let d = must(&fs, ".local/share/foo_1.4.2");
+    let d = must(&fs, ".local/share/foo_3");
     assert_eq!(d.confidence, Confidence::Medium);
     assert_eq!(d.kind, FindingKind::Data);
+    assert!(at(&fs, ".cache/foo-1.2").is_none(), "{fs:#?}");
 }
 
 #[test]
@@ -538,4 +541,114 @@ fn serializes_kebab_and_lowercase_without_fingerprint() {
     assert_eq!(v["confidence"], "high");
     assert!(v.get("fingerprint").is_none());
     assert!(Confidence::Low < Confidence::Medium && Confidence::Medium < Confidence::High);
+}
+
+#[test]
+fn other_apps_data_inside_makes_parent_shared() {
+    let t = FixtureTree::new();
+    t.mkdir("/home/user/.config/foo/b-plugin");
+    t.mkdir("/home/user/.config/foo/both");
+    let rules = [
+        user_rule(
+            &["bar"],
+            &["$XDG_CONFIG_HOME/foo/b-plugin", "$XDG_CONFIG_HOME/foo/both"],
+        ),
+        user_rule(&["foo"], &["$XDG_CONFIG_HOME/foo/both"]),
+    ];
+    let r = Run::with(
+        &t,
+        vec![pacman("foo", &[]), pacman("bar", &[])],
+        &rules,
+        &Config::default(),
+    );
+    let fs = r.find(0, false);
+    let parent = must(&fs, ".config/foo");
+    assert!(parent.shared, "{parent:#?}");
+    assert!(!parent.preselected);
+    assert_eq!(parent.confidence, Confidence::Medium);
+    assert!(parent.reason.contains("bar"), "{}", parent.reason);
+    // A shared child stays listed even inside a finding of equal confidence.
+    let both = must(&fs, ".config/foo/both");
+    assert!(both.shared && !both.preselected);
+
+    let bar = r.find(1, false);
+    let plugin = must(&bar, ".config/foo/b-plugin");
+    assert_eq!(plugin.confidence, Confidence::High);
+    assert!(plugin.preselected);
+}
+
+#[test]
+fn snap_data_never_matched() {
+    let t = FixtureTree::new();
+    t.mkdir("/home/user/snap/firefox/common");
+    let r = Run::new(&t, vec![pacman("firefox", &["firefox"])]);
+    assert!(r.find(0, true).is_empty(), "{:#?}", r.find(0, true));
+    let i = r
+        .idx
+        .candidates()
+        .iter()
+        .position(|c| c.path == Path::new("/home/user/snap/firefox"))
+        .expect("snap dir is a candidate");
+    assert_eq!(r.idx.candidates()[i].kind, FindingKind::SnapData);
+    assert!(!r.idx.matched_by_any(i));
+}
+
+#[test]
+fn flatpak_matches_outside_own_data_capped_at_medium() {
+    let t = FixtureTree::new();
+    let id = "com.valvesoftware.Steam";
+    t.mkdir("/home/user/.local/share/Steam");
+    t.mkdir("/home/user/.steam");
+    t.mkdir(&format!("/home/user/.var/app/{id}"));
+    t.desktop(
+        &format!("/home/user/.local/share/applications/{id}.desktop"),
+        "[Desktop Entry]\nType=Application\nExec=flatpak run com.valvesoftware.Steam\nX-Flatpak=com.valvesoftware.Steam\n",
+    );
+    let rule = Rule {
+        flatpaks: vec![id.into()],
+        packages: Vec::new(),
+        ..user_rule(&[], &["~/.steam"])
+    };
+    let r = Run::with(&t, vec![flatpak(id)], &[rule], &Config::default());
+    let fs = r.find(0, false);
+    let steam = must(&fs, ".local/share/Steam");
+    assert_eq!(steam.confidence, Confidence::Medium);
+    assert!(!steam.preselected);
+    assert_eq!(must(&fs, ".steam").confidence, Confidence::Medium);
+    assert_eq!(
+        must(&fs, &format!(".var/app/{id}")).confidence,
+        Confidence::High
+    );
+    let launcher = must(&fs, &format!(".local/share/applications/{id}.desktop"));
+    assert_eq!(launcher.confidence, Confidence::High);
+}
+
+#[test]
+fn flatpak_icons_need_full_id_or_desktop_stem() {
+    let t = FixtureTree::new();
+    t.write(
+        "/home/user/.local/share/icons/hicolor/48x48/apps/firefox.png",
+        b"p",
+    );
+    t.write(
+        "/home/user/.local/share/icons/hicolor/48x48/apps/org.mozilla.firefox.png",
+        b"p",
+    );
+    let r = Run::new(&t, vec![flatpak("org.mozilla.firefox")]);
+    let fs = r.find(0, true);
+    assert!(
+        at(&fs, ".local/share/icons/hicolor/48x48/apps/firefox.png").is_none(),
+        "{fs:#?}"
+    );
+    let own = must(
+        &fs,
+        ".local/share/icons/hicolor/48x48/apps/org.mozilla.firefox.png",
+    );
+    assert_eq!(own.confidence, Confidence::High);
+
+    let mut with_stem = flatpak("org.mozilla.firefox");
+    with_stem.desktop_ids.push("firefox.desktop".into());
+    let r = Run::new(&t, vec![with_stem]);
+    let fs = r.find(0, true);
+    assert!(at(&fs, ".local/share/icons/hicolor/48x48/apps/firefox.png").is_some());
 }

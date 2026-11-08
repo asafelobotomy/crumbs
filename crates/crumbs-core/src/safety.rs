@@ -104,10 +104,15 @@ fn normalise(p: &Path) -> Option<PathBuf> {
 }
 
 pub fn is_protected(env: &Env, cfg: &Config, in_system: &Path) -> bool {
+    is_protected_by(&protected_paths(env, cfg), in_system)
+}
+
+/// [`is_protected`] against a precomputed [`protected_paths`] list.
+pub(crate) fn is_protected_by(protected: &[(PathBuf, Protection)], in_system: &Path) -> bool {
     let Some(path) = normalise(in_system) else {
         return true;
     };
-    protected_paths(env, cfg).iter().any(|(p, kind)| {
+    protected.iter().any(|(p, kind)| {
         let Some(p) = normalise(p) else {
             // A malformed configured entry can't be compared: fail closed.
             return true;
@@ -120,6 +125,16 @@ pub fn is_protected(env: &Env, cfg: &Config, in_system: &Path) -> bool {
 }
 
 pub fn is_allowed_user_target(env: &Env, cfg: &Config, in_system: &Path) -> bool {
+    is_allowed_user_target_by(env, cfg, &protected_paths(env, cfg), in_system)
+}
+
+/// [`is_allowed_user_target`] against a precomputed [`protected_paths`] list.
+pub(crate) fn is_allowed_user_target_by(
+    env: &Env,
+    cfg: &Config,
+    protected: &[(PathBuf, Protection)],
+    in_system: &Path,
+) -> bool {
     let Some(path) = normalise(in_system) else {
         return false;
     };
@@ -127,7 +142,7 @@ pub fn is_allowed_user_target(env: &Env, cfg: &Config, in_system: &Path) -> bool
     if path == home || !path.starts_with(&home) {
         return false;
     }
-    if is_protected(env, cfg, &path) {
+    if is_protected_by(protected, &path) {
         return false;
     }
     let text = path.to_string_lossy();

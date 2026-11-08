@@ -10,6 +10,7 @@ use crate::env::Env;
 use crate::inventory::Inventory;
 use crate::model::{App, SourceKind};
 use crate::rules::{Rule, RuleOrigin, resolve_rule_paths, rules_for};
+use crate::safety::protected_paths;
 use crate::size::{DiskUsage, disk_usage};
 
 use super::candidates::{Bases, Candidate, Subject, admit, enumerate, holds_container, lexical};
@@ -37,6 +38,10 @@ pub struct LeftoverIndex {
 }
 
 impl LeftoverIndex {
+    /// Builds the index. `inv` must be discovered with
+    /// `ListOptions { include_all: true }`: sharing is only detected against
+    /// apps in the inventory, so a filtered inventory under-reports `shared`
+    /// and pre-selects paths that other packages still use.
     pub fn build(env: &Env, cfg: &Config, rules: &[Rule], inv: &Inventory) -> LeftoverIndex {
         let mut candidates = enumerate(env, cfg);
         let idents: Vec<Idents> = inv.apps.iter().map(Idents::of).collect();
@@ -58,7 +63,7 @@ impl LeftoverIndex {
                         let (confidence, reason) = score(c, app, ids, &appimage_launchers)?;
                         Some(Match {
                             app: i,
-                            confidence,
+                            confidence: cap(c, app, confidence),
                             reason,
                         })
                     })
@@ -67,6 +72,7 @@ impl LeftoverIndex {
             .collect();
 
         let bases = Bases::of(env);
+        let protected = protected_paths(env, cfg);
         let containers = bases.containers();
         let mut by_path: HashMap<PathBuf, usize> = candidates
             .iter()
@@ -88,7 +94,8 @@ impl LeftoverIndex {
                         Some(&ci) => ci,
                         None => {
                             let kind = bases.kind_for(&path);
-                            let Some(c) = admit(env, cfg, path.clone(), kind, Subject::RuleOnly)
+                            let subject = Subject::RuleOnly;
+                            let Some(c) = admit(env, cfg, &protected, path.clone(), kind, subject)
                             else {
                                 continue;
                             };
@@ -100,10 +107,11 @@ impl LeftoverIndex {
                     };
                     let m = Match {
                         app: ai,
-                        confidence: Confidence::High,
+                        confidence: cap(&candidates[ci], app, Confidence::High),
                         reason: reason.clone(),
                     };
                     match matches[ci].iter_mut().find(|m| m.app == ai) {
+                        Some(old) if old.confidence > m.confidence => {}
                         Some(old) => *old = m,
                         None => matches[ci].push(m),
                     }
@@ -143,6 +151,21 @@ impl LeftoverIndex {
     }
 }
 
+/// A Flatpak keeps its data in `~/.var/app/<id>`; anything else it matches
+/// (other than by its own desktop ID or full app ID) is at most Medium.
+fn cap(c: &Candidate, app: &App, confidence: Confidence) -> Confidence {
+    let by_id = match &c.subject {
+        Subject::Flatpak(_) | Subject::Icon(_) | Subject::Mime(_) => true,
+        Subject::Launcher(e) => app.desktop_ids.contains(&e.id),
+        _ => false,
+    };
+    if app.source == SourceKind::Flatpak && !by_id {
+        confidence.min(Confidence::Medium)
+    } else {
+        confidence
+    }
+}
+
 /// How strongly `app` claims candidate `c`, ignoring rules and sharing.
 fn score(
     c: &Candidate,
@@ -165,7 +188,7 @@ fn score(
             (ids.has_exec(base) || app.location.as_deref() == Some(Path::new(program)))
                 .then(|| (Confidence::Medium, format!("user service runs {program}")))
         }
-        Subject::Service(None) | Subject::RuleOnly => None,
+        Subject::Service(None) | Subject::Snap(_) | Subject::RuleOnly => None,
         Subject::Mime(lines) => lines
             .iter()
             .any(|l| l.desktop_ids.iter().any(|d| app.desktop_ids.contains(d)))
@@ -229,10 +252,23 @@ pub fn find_leftovers(idx: &LeftoverIndex, app: &App, show_low: bool) -> Vec<Fin
                 })
                 .collect()
         } else if m.confidence >= Confidence::Medium {
-            ms.iter()
+            // Another app's Medium+ claim on this path, or on anything inside
+            // it, means trashing it would take that app's data too.
+            let inside = idx
+                .candidates
+                .iter()
+                .zip(&idx.matches)
+                .filter(|(d, _)| d.path != c.path && d.path.starts_with(&c.path))
+                .flat_map(|(_, dm)| dm);
+            let mut v: Vec<usize> = ms
+                .iter()
+                .chain(inside)
                 .filter(|o| o.app != ai && o.confidence >= Confidence::Medium)
                 .map(|o| o.app)
-                .collect()
+                .collect();
+            v.sort_unstable();
+            v.dedup();
+            v
         } else {
             Vec::new()
         };
@@ -266,13 +302,15 @@ pub fn find_leftovers(idx: &LeftoverIndex, app: &App, show_low: bool) -> Vec<Fin
         found.push((finding, c));
     }
 
-    // Something inside an equally or more confident finding goes with it.
+    // Something inside an equally or more confident finding goes with it,
+    // unless it is shared (it must stay visible with its own flag).
     let covered: Vec<bool> = found
         .iter()
         .map(|(f, _)| {
-            found.iter().any(|(g, _)| {
-                g.path != f.path && f.path.starts_with(&g.path) && g.confidence >= f.confidence
-            })
+            !f.shared
+                && found.iter().any(|(g, _)| {
+                    g.path != f.path && f.path.starts_with(&g.path) && g.confidence >= f.confidence
+                })
         })
         .collect();
     let mut out: Vec<Finding> = found

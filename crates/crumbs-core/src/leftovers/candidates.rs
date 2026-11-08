@@ -7,9 +7,13 @@ use std::path::{Component, Path, PathBuf};
 use crate::config::Config;
 use crate::desktop::{DesktopEntry, parse_desktop, split_exec};
 use crate::env::Env;
-use crate::safety::{Fingerprint, fingerprint, is_allowed_user_target};
+use crate::safety::{
+    Fingerprint, Protection, fingerprint, is_allowed_user_target_by, protected_paths,
+};
+use crate::sources::appimage::normalize_name;
 
 use super::FindingKind;
+use super::score::strip_version;
 
 /// A path that may be a leftover. `path` is in-system and canonical.
 #[derive(Debug, Clone)]
@@ -24,7 +28,11 @@ pub(crate) struct Candidate {
 #[derive(Debug, Clone)]
 pub(crate) enum Subject {
     /// A directory or file name (a dot entry's leading `.` stripped).
-    Name(String),
+    Name(NameKey),
+    /// `~/snap/<name>`. Never matched in M2 (no snap source); orphans only.
+    // The name is read by orphan detection.
+    #[allow(dead_code)]
+    Snap(String),
     /// `~/.var/app/<id>`.
     Flatpak(String),
     /// An autostart or local `.desktop` file.
@@ -37,6 +45,25 @@ pub(crate) enum Subject {
     Mime(Vec<MimeLine>),
     /// A path that only a rule names.
     RuleOnly,
+}
+
+/// A candidate name with its normalised forms, computed once.
+#[derive(Debug, Clone)]
+pub(crate) struct NameKey {
+    pub(crate) raw: String,
+    pub(crate) norm: String,
+    /// `normalize_name(strip_version(raw))`.
+    pub(crate) unversioned: String,
+}
+
+impl NameKey {
+    pub(crate) fn new(raw: &str) -> NameKey {
+        NameKey {
+            raw: raw.to_string(),
+            norm: normalize_name(raw),
+            unversioned: normalize_name(strip_version(raw)),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -140,16 +167,18 @@ pub(crate) fn lexical(p: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
-/// A candidate for `path` when it is an allowed user target that can be
-/// fingerprinted; `None` otherwise (fail closed).
+/// A candidate for `path` when it is an allowed user target (checked against
+/// `protected`, from [`protected_paths`]) that can be fingerprinted; `None`
+/// otherwise (fail closed).
 pub(crate) fn admit(
     env: &Env,
     cfg: &Config,
+    protected: &[(PathBuf, Protection)],
     path: PathBuf,
     kind: FindingKind,
     subject: Subject,
 ) -> Option<Candidate> {
-    if !is_allowed_user_target(env, cfg, &path) {
+    if !is_allowed_user_target_by(env, cfg, protected, &path) {
         return None;
     }
     let fingerprint = fingerprint(env, &path).ok()?;
@@ -194,7 +223,7 @@ pub(crate) fn enumerate(env: &Env, cfg: &Config) -> Vec<Candidate> {
         let Some(base) = base else { continue };
         for (path, name) in children(env, base) {
             if !holds_container(&containers, &path) {
-                raw.push((path, kind, Subject::Name(name)));
+                raw.push((path, kind, Subject::Name(NameKey::new(&name))));
             }
         }
     }
@@ -210,13 +239,13 @@ pub(crate) fn enumerate(env: &Env, cfg: &Config) -> Vec<Candidate> {
             if skip.contains(&&path) || holds_container(&containers, &path) {
                 continue;
             }
-            raw.push((path, FindingKind::DotDir, Subject::Name(bare.to_string())));
+            raw.push((path, FindingKind::DotDir, Subject::Name(NameKey::new(bare))));
         }
         for (path, id) in children(env, &home.join(".var/app")) {
             raw.push((path, FindingKind::FlatpakData, Subject::Flatpak(id)));
         }
         for (path, name) in children(env, &home.join("snap")) {
-            raw.push((path, FindingKind::SnapData, Subject::Name(name)));
+            raw.push((path, FindingKind::SnapData, Subject::Snap(name)));
         }
     }
     if let Some(config) = &bases.config {
@@ -246,11 +275,12 @@ pub(crate) fn enumerate(env: &Env, cfg: &Config) -> Vec<Candidate> {
         icons(env, &data.join("icons"), &mut raw);
     }
 
+    let protected = protected_paths(env, cfg);
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut out: Vec<Candidate> = Vec::new();
     for (path, kind, subject) in raw {
         if seen.insert(path.clone()) {
-            out.extend(admit(env, cfg, path, kind, subject));
+            out.extend(admit(env, cfg, &protected, path, kind, subject));
         }
     }
     out
