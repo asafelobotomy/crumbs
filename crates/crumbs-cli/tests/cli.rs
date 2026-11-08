@@ -949,3 +949,25 @@ fn uninstall_refuses_appimage_outside_home() {
     assert!(real(&t, "/home/user/.config/Foo/settings.json").exists());
     assert!(real(&t, "/opt/apps/Foo-1.0-x86_64.AppImage").exists());
 }
+
+#[test]
+fn preview_lists_lines_an_edit_removes() {
+    let t = fixture(FLATPAK_OK);
+    t.write(
+        "/home/user/.config/mimeapps.list",
+        b"[Default Applications]\ntext/html=firefox.desktop\nimage/png=other.desktop\n\n[Added Associations]\nx-scheme-handler/https=firefox.desktop;\n",
+    );
+    let out = crumbs(&t)
+        .args(["uninstall", "firefox", "--leftovers-only", "--dry-run"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.contains(
+            "~/.config/mimeapps.list  file-type associations\n    - text/html=firefox.desktop\n    - x-scheme-handler/https=firefox.desktop;\n"
+        ),
+        "{text}"
+    );
+    insta::assert_snapshot!(text);
+}

@@ -117,6 +117,16 @@ pub fn print_json_entries<T: Serialize>(
 /// Renders a table with padded columns and a bold header row. The last
 /// column is not padded, so lines carry no trailing spaces.
 pub fn print_table(header: &[&str], rows: &[Vec<String>]) -> io::Result<()> {
+    print_table_with_details(header, rows, &[])
+}
+
+/// Like [`print_table`], with `details[i]` printed under row `i`, one per
+/// line, as `    - <detail>`. Missing entries mean no details.
+pub fn print_table_with_details(
+    header: &[&str],
+    rows: &[Vec<String>],
+    details: &[Vec<String>],
+) -> io::Result<()> {
     let mut widths: Vec<usize> = header.iter().map(|h| h.chars().count()).collect();
     for row in rows {
         for (w, cell) in widths.iter_mut().zip(row) {
@@ -140,8 +150,11 @@ pub fn print_table(header: &[&str], rows: &[Vec<String>]) -> io::Result<()> {
     };
     let head = line(&mut header.iter().copied());
     writeln!(out, "{bold}{head}{bold:#}")?;
-    for row in rows {
+    for (i, row) in rows.iter().enumerate() {
         writeln!(out, "{}", line(&mut row.iter().map(String::as_str)))?;
+        for d in details.get(i).into_iter().flatten() {
+            writeln!(out, "    - {d}")?;
+        }
     }
     Ok(())
 }

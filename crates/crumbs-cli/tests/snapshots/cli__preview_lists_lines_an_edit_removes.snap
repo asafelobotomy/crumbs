@@ -1,0 +1,12 @@
+---
+source: crates/crumbs-cli/tests/cli.rs
+expression: text
+---
+Firefox  pacman:firefox
+ACTION  SIZE  PATH                     REASON
+edit    0 B   ~/.config/mimeapps.list  file-type associations
+    - text/html=firefox.desktop
+    - x-scheme-handler/https=firefox.desktop;
+note: the app itself stays installed (leftovers only)
+
+will edit 1 files (a backup of each is kept)

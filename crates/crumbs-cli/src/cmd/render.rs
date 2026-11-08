@@ -7,7 +7,7 @@ use crumbs_core::env::display_path;
 use crumbs_core::executor::ExecReport;
 use crumbs_core::plan::{Action, Plan};
 
-use crate::output::{fmt_size, print_table};
+use crate::output::{fmt_size, print_table_with_details};
 
 fn verb(a: &Action) -> &'static str {
     match a {
@@ -42,7 +42,16 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)], permanent: bool) -> anyhow:
                     ]
                 })
                 .collect();
-            print_table(&["ACTION", "SIZE", "PATH", "REASON"], &rows)?;
+            // An edit shows the exact lines it removes.
+            let details: Vec<Vec<String>> = plan
+                .actions
+                .iter()
+                .map(|a| match &a.action {
+                    Action::EditFile { remove_lines, .. } => remove_lines.clone(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            print_table_with_details(&["ACTION", "SIZE", "PATH", "REASON"], &rows, &details)?;
         }
         let mut out = anstream::stdout().lock();
         for n in &plan.notes {
