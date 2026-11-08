@@ -50,8 +50,9 @@ struct RawConfig {
     protect: Vec<String>,
     exclude: Vec<String>,
     appimage_dirs: Vec<String>,
-    temp_age_days: Option<u64>,
-    log_age_days: Option<u64>,
+    // Signed, so a negative value gets the same warning as zero.
+    temp_age_days: Option<i64>,
+    log_age_days: Option<i64>,
     categories_off: Option<Vec<String>>,
 }
 
@@ -70,19 +71,19 @@ fn expand(env: &Env, s: &str) -> Option<String> {
 }
 
 /// Resolves `.` and `..` segments and collapses repeated and trailing
-/// slashes. `None` when a `..` would climb above `/`.
-fn normalise_lexical(abs: &str) -> Option<String> {
+/// slashes. A `..` at `/` stays at `/`, as the kernel resolves it.
+fn normalise_lexical(abs: &str) -> String {
     let mut stack: Vec<&str> = Vec::new();
     for seg in abs.split('/') {
         match seg {
             "" | "." => {}
             ".." => {
-                stack.pop()?;
+                stack.pop();
             }
             s => stack.push(s),
         }
     }
-    Some(format!("/{}", stack.join("/")))
+    format!("/{}", stack.join("/"))
 }
 
 /// Loads `{config_home}/crumbs/config.toml`. A missing file yields the
@@ -109,13 +110,7 @@ pub fn load_config(env: &Env) -> Result<Config, CoreError> {
                     ));
                     return None;
                 };
-                let r = normalise_lexical(&expanded);
-                if r.is_none() {
-                    warnings.push(format!(
-                        "config.toml: ignoring {key} entry '{s}' (climbs above /)"
-                    ));
-                }
-                r
+                Some(normalise_lexical(&expanded))
             })
             .collect()
     };
@@ -137,13 +132,25 @@ pub fn load_config(env: &Env) -> Result<Config, CoreError> {
             })
             .collect(),
     };
+    let mut at_least_one = |key: &str, v: Option<i64>, default: u64| match v {
+        None => default,
+        Some(n) => u64::try_from(n)
+            .ok()
+            .filter(|&n| n >= 1)
+            .unwrap_or_else(|| {
+                warnings.push(format!("config.toml: {key} must be at least 1; using 1"));
+                1
+            }),
+    };
+    let temp_age_days = at_least_one("temp_age_days", raw.temp_age_days, 7);
+    let log_age_days = at_least_one("log_age_days", raw.log_age_days, 14);
     let paths = |v: Vec<String>| v.into_iter().map(PathBuf::from).collect();
     Ok(Config {
         protect: paths(protect),
         exclude,
         appimage_dirs: paths(appimage_dirs),
-        temp_age_days: raw.temp_age_days.unwrap_or(7),
-        log_age_days: raw.log_age_days.unwrap_or(14),
+        temp_age_days,
+        log_age_days,
         categories_off,
         warnings,
     })
@@ -388,12 +395,44 @@ mod tests {
             b"protect = [\"/a/b/../c\", \"/a/./d\", \"/../x\"]\nexclude = [\"~/.cache/../.config/*/keep\", \"/a/../../y\"]\nappimage_dirs = [\"/opt/./ai/\"]\n",
         );
         let c = load_config(&t.env()).unwrap();
-        assert_eq!(c.protect, [PathBuf::from("/a/c"), PathBuf::from("/a/d")]);
-        assert_eq!(c.exclude, ["/home/user/.config/*/keep"]);
+        // `..` at `/` stays at `/`, as the kernel resolves it: the entry is
+        // kept, never dropped.
+        assert_eq!(
+            c.protect,
+            [
+                PathBuf::from("/a/c"),
+                PathBuf::from("/a/d"),
+                PathBuf::from("/x")
+            ]
+        );
+        assert_eq!(c.exclude, ["/home/user/.config/*/keep", "/y"]);
         assert_eq!(c.appimage_dirs, [PathBuf::from("/opt/ai")]);
-        assert_eq!(c.warnings.len(), 2, "{:?}", c.warnings);
-        assert!(c.warnings[0].contains("climbs above /") && c.warnings[0].contains("/../x"));
-        assert!(c.warnings[1].contains("exclude") && c.warnings[1].contains("/a/../../y"));
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+    }
+
+    #[test]
+    fn config_age_days_at_least_one() {
+        let t = FixtureTree::new();
+        t.write(
+            "/home/user/.config/crumbs/config.toml",
+            b"temp_age_days = 0\nlog_age_days = -3\n",
+        );
+        let c = load_config(&t.env()).unwrap();
+        assert_eq!((c.temp_age_days, c.log_age_days), (1, 1));
+        assert_eq!(
+            c.warnings,
+            [
+                "config.toml: temp_age_days must be at least 1; using 1",
+                "config.toml: log_age_days must be at least 1; using 1"
+            ]
+        );
+        t.write(
+            "/home/user/.config/crumbs/config.toml",
+            b"temp_age_days = 1\nlog_age_days = 2\n",
+        );
+        let c = load_config(&t.env()).unwrap();
+        assert_eq!((c.temp_age_days, c.log_age_days), (1, 2));
+        assert!(c.warnings.is_empty());
     }
 
     #[test]
