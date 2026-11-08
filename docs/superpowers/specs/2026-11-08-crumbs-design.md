@@ -95,7 +95,7 @@ trait AppSource {
 
 | Source | Detection | Listing method | Removal |
 |---|---|---|---|
-| pacman | `/var/lib/pacman/local` exists | Parse `local/*/desc` + `files` directly | `pacman -Rns <pkg>` |
+| pacman | `/var/lib/pacman/local` exists | Parse `local/*/desc` + `files` directly | `pacman -Rn --noconfirm <simulated closure>` |
 | dpkg | `/var/lib/dpkg/status` exists | Parse `status`; file lists from `info/*.list` | `apt-get purge <pkg>` (`dpkg -P` if apt-get missing) |
 | rpm | `rpm` in trusted path | `rpm -qa --qf` with a fixed format; `rpm -ql` per app on demand | `dnf remove <pkg>` (`zypper remove` if dnf missing; `rpm -e` last) |
 | Flatpak | `flatpak` in trusted path | `flatpak list --app --columns=application,name,version,installation,size` | `flatpak uninstall [--user\|--system] --delete-data <id>` |
@@ -209,7 +209,7 @@ trait Scanner {
 | `pkg-cache` | Arch | `paccache -rk<keep>` (default keep 2); `pacman -Sc` if pacman-contrib missing |
 | | Debian | `apt-get clean` |
 | | Fedora | `dnf clean packages` |
-| `orphan-pkgs` | Arch | `pacman -Rns <explicit list from pacman -Qdtq>` |
+| `orphan-pkgs` | Arch | `pacman -Rn --noconfirm <closure simulated from pacman -Qdtq>` |
 | | Debian | `apt-get autoremove --purge` |
 | | Fedora | `dnf autoremove` |
 | `journal` | systemd | `journalctl --vacuum-size=<journal_max>` (default 500M) |
@@ -250,7 +250,7 @@ scan / match  →  Vec<Finding>  →  select  →  Plan  →  simulate  →  pre
 Before preview, the planner asks the package manager what will happen and puts
 the real result into the plan, so the user confirms what will actually be removed:
 
-- pacman: `pacman -Rns --print --print-format '%n %v' <pkgs>`
+- pacman: `pacman -Rs --print --print-format '%n %v' <pkgs>`
 - apt: `apt-get -s purge <pkgs>`
 - dnf: `dnf remove --assumeno <pkgs>` (parse the transaction summary)
 - flatpak unused: `flatpak uninstall --unused --noninteractive --dry-run` if
