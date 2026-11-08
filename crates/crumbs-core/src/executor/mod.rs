@@ -139,12 +139,18 @@ fn act(env: &Env, action: &Action, fp: &Fingerprint, batch: &str) -> Result<Done
 fn delete(env: &Env, path: &Path) -> Result<(), String> {
     let real = env.sys_path(path);
     let meta = fs::symlink_metadata(&real).map_err(|e| io_msg(env, path, &e))?;
-    let res = if meta.file_type().is_dir() {
-        fs::remove_dir_all(&real)
-    } else {
-        fs::remove_file(&real)
-    };
-    res.map_err(|e| io_msg(env, path, &e))
+    if !meta.file_type().is_dir() {
+        return fs::remove_file(&real).map_err(|e| io_msg(env, path, &e));
+    }
+    fs::remove_dir_all(&real).map_err(|e| {
+        let msg = io_msg(env, path, &e);
+        // Part of the tree may already be gone; say so.
+        if fs::symlink_metadata(&real).is_ok() {
+            format!("partially deleted: {msg}")
+        } else {
+            msg
+        }
+    })
 }
 
 /// Filters `path` in place. Returns the in-system backup path, or `None`
@@ -158,6 +164,17 @@ fn edit_file(
 ) -> Result<Option<PathBuf>, String> {
     let real = env.sys_path(path);
     let err = |e: io::Error| io_msg(env, path, &e);
+    if fs::symlink_metadata(&real)
+        .map_err(err)?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(format!(
+            "refusing: {} is a symlink; edit it by hand",
+            display_path(env, path)
+        ));
+    }
+    // Still opened no-follow in case it is swapped after the check.
     let file = files::open_regular_nofollow(&real).map_err(err)?;
     let meta = file.metadata().map_err(err)?;
     if meta.dev() != fp.dev || meta.ino() != fp.ino {

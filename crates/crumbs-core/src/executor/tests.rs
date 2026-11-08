@@ -260,9 +260,40 @@ fn edit_file_refuses_symlink() {
     let report = execute(&env, &Config::default(), &plan);
     assert!(!report.results[0].ok);
     assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("refusing: ~/.config/mimeapps.list is a symlink; edit it by hand")
+    );
+    assert!(
+        fs::symlink_metadata(env.sys("/home/user/.config/mimeapps.list"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
         fs::read(env.sys("/home/user/elsewhere.list")).unwrap(),
         MIME
     );
+}
+
+#[test]
+fn delete_reports_partial_removal() {
+    if rustix::process::getuid().is_root() {
+        return; // root ignores directory permissions
+    }
+    let t = FixtureTree::new();
+    t.write("home/user/.config/foo/a.txt", b"a");
+    t.write("home/user/.config/foo/locked/inner", b"i");
+    let locked = t.dir.path().join("home/user/.config/foo/locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+    let env = t.env();
+    let plan = plan_of(vec![planned(&env, delete("/home/user/.config/foo"))]);
+    let report = execute(&env, &Config::default(), &plan);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    let r = &report.results[0];
+    assert!(!r.ok);
+    let err = r.error.as_deref().unwrap();
+    assert!(err.starts_with("partially deleted: "), "{err}");
+    assert!(env.sys("/home/user/.config/foo/locked/inner").exists());
 }
 
 #[test]

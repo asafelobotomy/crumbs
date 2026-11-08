@@ -39,6 +39,7 @@ pub const ALREADY_RESTORED: &str = "already restored";
 /// entry whose `restores` is the restored entry's id.
 pub fn restore(
     env: &Env,
+    cfg: &Config,
     selectors: &[String],
     dry_run: bool,
 ) -> Result<Vec<RestoreOutcome>, CoreError> {
@@ -70,9 +71,12 @@ pub fn restore(
             let res = if restored.contains(e.id.as_str()) {
                 Err(ALREADY_RESTORED.to_string())
             } else {
-                restore_one(env, e, dry_run, &batch)
+                restore_one(env, cfg, e, dry_run, &batch)
             };
-            let error = res.err();
+            let (backup, error) = match res {
+                Ok(b) => (b, None),
+                Err(e) => (None, Some(e)),
+            };
             if !dry_run {
                 logged.push(HistoryEntry {
                     id: format!("{batch}-{}", logged.len()),
@@ -81,7 +85,7 @@ pub fn restore(
                     action: HistoryAction::Restore,
                     path: e.path.clone(),
                     trashed: e.trashed.clone(),
-                    backup: e.backup.clone(),
+                    backup,
                     size: e.size,
                     ok: error.is_none(),
                     error: error.clone(),
@@ -140,7 +144,15 @@ fn select<'a>(entries: &'a [HistoryEntry], sel: &str) -> Vec<&'a HistoryEntry> {
     Vec::new()
 }
 
-fn restore_one(env: &Env, e: &HistoryEntry, dry_run: bool, batch: &str) -> Result<(), String> {
+/// On success, the in-system path of the backup taken of the current file
+/// (EditFile restores only).
+fn restore_one(
+    env: &Env,
+    cfg: &Config,
+    e: &HistoryEntry,
+    dry_run: bool,
+    batch: &str,
+) -> Result<Option<PathBuf>, String> {
     if !e.ok {
         return Err("the original action failed; nothing to restore".into());
     }
@@ -148,18 +160,20 @@ fn restore_one(env: &Env, e: &HistoryEntry, dry_run: bool, batch: &str) -> Resul
         HistoryAction::Delete => Err("permanently deleted; cannot be restored".into()),
         HistoryAction::Restore => Err(INVALID_ENTRY.into()),
         HistoryAction::Trash => {
-            let t = valid_trash(env, e).ok_or(INVALID_ENTRY)?;
+            let t = valid_trash(env, cfg, e).ok_or(INVALID_ENTRY)?;
             check_parents(env, &t.original)?;
             if dry_run {
-                return dry_run_trash(env, &t);
+                return dry_run_trash(env, &t).map(|()| None);
             }
-            trash::restore_from_trash(env, &t).map_err(|e| e.to_string())
+            trash::restore_from_trash(env, &t)
+                .map(|()| None)
+                .map_err(|e| e.to_string())
         }
         HistoryAction::EditFile => {
             let Some(backup) = &e.backup else {
                 return Err("nothing was changed; no backup to restore".into());
             };
-            if !valid_backup(env, e, backup) {
+            if !valid_backup(env, cfg, e, backup) {
                 return Err(INVALID_ENTRY.into());
             }
             check_parents(env, &e.path)?;
@@ -169,15 +183,15 @@ fn restore_one(env: &Env, e: &HistoryEntry, dry_run: bool, batch: &str) -> Resul
 }
 
 /// Canonical, strictly under the in-system home and not protected.
-fn valid_target(env: &Env, p: &Path) -> bool {
-    is_canonical(p) && is_allowed_user_target(env, &Config::default(), p)
+fn valid_target(env: &Env, cfg: &Config, p: &Path) -> bool {
+    is_canonical(p) && is_allowed_user_target(env, cfg, p)
 }
 
 /// The entry's `trashed` record, when it is shaped like something
 /// `move_to_trash` produced for `e.path`.
-fn valid_trash(env: &Env, e: &HistoryEntry) -> Option<Trashed> {
+fn valid_trash(env: &Env, cfg: &Config, e: &HistoryEntry) -> Option<Trashed> {
     let t = e.trashed.as_ref()?;
-    if t.original != e.path || !valid_target(env, &t.original) {
+    if t.original != e.path || !valid_target(env, cfg, &t.original) {
         return None;
     }
     if !is_canonical(&t.files_path) || !is_canonical(&t.info_path) {
@@ -202,8 +216,8 @@ fn valid_trash(env: &Env, e: &HistoryEntry) -> Option<Trashed> {
     Some(t.clone())
 }
 
-fn valid_backup(env: &Env, e: &HistoryEntry, backup: &Path) -> bool {
-    valid_target(env, &e.path)
+fn valid_backup(env: &Env, cfg: &Config, e: &HistoryEntry, backup: &Path) -> bool {
+    valid_target(env, cfg, &e.path)
         && *backup == files::with_suffix(&e.path, &format!(".crumbs-bak-{}", e.batch))
 }
 
@@ -250,28 +264,51 @@ fn dry_run_trash(env: &Env, t: &Trashed) -> Result<(), String> {
     Ok(())
 }
 
-/// Copies the backup back over `path` via a temp file and rename.
+/// Copies the backup back over `path` via a temp file and rename. The
+/// current file must be a regular file (never a symlink); its content is
+/// first saved to `<path>.crumbs-bak-<batch>` so later edits survive.
+/// Returns that new backup's in-system path (`None` on a dry run).
 fn restore_backup(
     env: &Env,
     path: &Path,
     backup: &Path,
     dry_run: bool,
     batch: &str,
-) -> Result<(), String> {
+) -> Result<Option<PathBuf>, String> {
     let shown = |p: &Path, e: io::Error| format!("{}: {e}", display_path(env, p));
-    let file = files::open_regular_nofollow(&env.sys_path(backup)).map_err(|e| shown(backup, e))?;
-    let meta = file.metadata().map_err(|e| shown(backup, e))?;
-    let bytes = files::read_all(&file).map_err(|e| shown(backup, e))?;
-    if dry_run {
-        return Ok(());
+    let not_regular = || {
+        format!(
+            "refusing: {} is not a regular file",
+            display_path(env, path)
+        )
+    };
+    let real = env.sys_path(path);
+    match fs::symlink_metadata(&real) {
+        Ok(m) if m.file_type().is_file() => {}
+        _ => return Err(not_regular()),
     }
-    files::replace_via_temp(
-        &env.sys_path(path),
-        &bytes,
-        meta.mode() & 0o7777,
-        &format!(".crumbs-tmp-{batch}"),
-    )
-    .map_err(|e| shown(path, e))
+    let saved =
+        files::open_regular_nofollow(&env.sys_path(backup)).map_err(|e| shown(backup, e))?;
+    let saved_mode = saved.metadata().map_err(|e| shown(backup, e))?.mode() & 0o7777;
+    let bytes = files::read_all(&saved).map_err(|e| shown(backup, e))?;
+    // Opened no-follow, so a swap to a symlink after the lstat is refused too.
+    let current = files::open_regular_nofollow(&real).map_err(|_| not_regular())?;
+    let current_mode = current.metadata().map_err(|e| shown(path, e))?.mode() & 0o7777;
+    let current_bytes = files::read_all(&current).map_err(|e| shown(path, e))?;
+    if dry_run {
+        return Ok(None);
+    }
+    let new_backup = files::with_suffix(&real, &format!(".crumbs-bak-{batch}"));
+    let new_backup_in_system = env.unsys(&new_backup);
+    files::write_new(&new_backup, &current_bytes, current_mode)
+        .map_err(|e| shown(&new_backup_in_system, e))?;
+    if let Err(e) =
+        files::replace_via_temp(&real, &bytes, saved_mode, &format!(".crumbs-tmp-{batch}"))
+    {
+        let _ = fs::remove_file(&new_backup);
+        return Err(shown(path, e));
+    }
+    Ok(Some(new_backup_in_system))
 }
 
 #[cfg(test)]
@@ -334,7 +371,7 @@ mod tests {
             &env,
             vec![trash("/home/user/.config/a"), trash("/home/user/.cache/b")],
         );
-        let out = restore(&env, &sel(&rep.batch), false).unwrap();
+        let out = restore(&env, &Config::default(), &sel(&rep.batch), false).unwrap();
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|o| o.ok), "{out:?}");
         assert_eq!(out[0].entry_id, rep.results[0].history_id);
@@ -360,7 +397,13 @@ mod tests {
         t.write("home/user/.config/foo/v", b"new");
         let second = run(&env, vec![trash("/home/user/.config/foo")]);
         assert_ne!(first.batch, second.batch);
-        let out = restore(&env, &sel("/home/user/.config/foo"), false).unwrap();
+        let out = restore(
+            &env,
+            &Config::default(),
+            &sel("/home/user/.config/foo"),
+            false,
+        )
+        .unwrap();
         assert_eq!(out.len(), 1);
         assert!(out[0].ok, "{out:?}");
         assert_eq!(out[0].entry_id, second.results[0].history_id);
@@ -385,7 +428,7 @@ mod tests {
             vec![trash("/home/user/.config/a"), trash("/home/user/.config/b")],
         );
         t.write("home/user/.config/a/x", b"recreated");
-        let out = restore(&env, &sel(&rep.batch), false).unwrap();
+        let out = restore(&env, &Config::default(), &sel(&rep.batch), false).unwrap();
         assert!(!out[0].ok);
         assert!(
             out[0].error.as_deref().unwrap().contains("exists"),
@@ -415,12 +458,104 @@ mod tests {
         let env = t.env();
         let rep = run(&env, vec![trash("/home/user/.config/a")]);
         let id = rep.results[0].history_id.clone();
-        assert!(restore(&env, &sel(&id), false).unwrap()[0].ok);
-        let again = restore(&env, &sel(&id), false).unwrap();
+        assert!(restore(&env, &Config::default(), &sel(&id), false).unwrap()[0].ok);
+        let again = restore(&env, &Config::default(), &sel(&id), false).unwrap();
         assert_eq!(again.len(), 1);
         assert!(!again[0].ok);
         assert_eq!(again[0].error.as_deref(), Some("already restored"));
         assert_eq!(fs::read(env.sys("/home/user/.config/a/x")).unwrap(), b"A");
+    }
+
+    fn edit_mime(env: &Env, t: &FixtureTree, original: &[u8]) -> ExecReport {
+        t.write("home/user/.config/mimeapps.list", original);
+        run(
+            env,
+            vec![Action::EditFile {
+                path: "/home/user/.config/mimeapps.list".into(),
+                remove_lines: vec!["text/plain=foo.desktop".into()],
+            }],
+        )
+    }
+
+    #[test]
+    fn restore_edit_file_keeps_newer_content() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        let original = b"text/plain=foo.desktop\na=b\n";
+        let rep = edit_mime(&env, &t, original);
+        let file = env.sys("/home/user/.config/mimeapps.list");
+        fs::write(&file, b"a=b\nnewer=de.desktop\n").unwrap();
+        let out = restore(
+            &env,
+            &Config::default(),
+            &sel(&rep.results[0].history_id),
+            false,
+        )
+        .unwrap();
+        assert!(out[0].ok, "{out:?}");
+        assert_eq!(fs::read(&file).unwrap(), original);
+        let logged = restore_entries(&env);
+        let backup = logged[0].backup.clone().unwrap();
+        assert_eq!(
+            backup,
+            Path::new(&format!(
+                "/home/user/.config/mimeapps.list.crumbs-bak-{}",
+                logged[0].batch
+            ))
+        );
+        assert_eq!(
+            fs::read(env.sys_path(&backup)).unwrap(),
+            b"a=b\nnewer=de.desktop\n"
+        );
+    }
+
+    #[test]
+    fn restore_edit_file_refuses_symlink() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        let rep = edit_mime(&env, &t, b"text/plain=foo.desktop\na=b\n");
+        let file = env.sys("/home/user/.config/mimeapps.list");
+        fs::remove_file(&file).unwrap();
+        t.write("home/user/other.list", b"other");
+        t.symlink("home/user/.config/mimeapps.list", "../other.list");
+        let out = restore(
+            &env,
+            &Config::default(),
+            &sel(&rep.results[0].history_id),
+            false,
+        )
+        .unwrap();
+        assert!(!out[0].ok);
+        assert_eq!(
+            out[0].error.as_deref(),
+            Some("refusing: ~/.config/mimeapps.list is not a regular file")
+        );
+        assert!(
+            fs::symlink_metadata(&file)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read(env.sys("/home/user/other.list")).unwrap(),
+            b"other"
+        );
+    }
+
+    #[test]
+    fn restore_respects_user_protect() {
+        let t = FixtureTree::new();
+        t.write("home/user/.config/a/x", b"A");
+        let env = t.env();
+        let rep = run(&env, vec![trash("/home/user/.config/a")]);
+        let cfg = Config {
+            protect: vec!["/home/user/.config/a".into()],
+            ..Config::default()
+        };
+        let out = restore(&env, &cfg, &sel(&rep.batch), false).unwrap();
+        assert!(!out[0].ok);
+        assert_eq!(out[0].error.as_deref(), Some(INVALID_ENTRY));
+        assert!(!env.sys("/home/user/.config/a").exists());
     }
 
     #[test]
@@ -438,7 +573,13 @@ mod tests {
         );
         let file = env.sys("/home/user/.config/mimeapps.list");
         assert_ne!(fs::read(&file).unwrap(), original);
-        let out = restore(&env, &sel(&rep.results[0].history_id), false).unwrap();
+        let out = restore(
+            &env,
+            &Config::default(),
+            &sel(&rep.results[0].history_id),
+            false,
+        )
+        .unwrap();
         assert!(out[0].ok, "{out:?}");
         assert_eq!(fs::read(&file).unwrap(), original);
     }
@@ -447,7 +588,7 @@ mod tests {
     fn restore_unknown_selector() {
         let t = FixtureTree::new();
         let env = t.env();
-        let out = restore(&env, &sel("12345-0"), false).unwrap();
+        let out = restore(&env, &Config::default(), &sel("12345-0"), false).unwrap();
         assert_eq!(out.len(), 1);
         assert!(!out[0].ok);
         assert_eq!(out[0].error.as_deref(), Some("no matching history entry"));
@@ -460,7 +601,7 @@ mod tests {
         t.write("home/user/.config/a/x", b"A");
         let env = t.env();
         let rep = run(&env, vec![trash("/home/user/.config/a")]);
-        let out = restore(&env, &sel(&rep.batch), true).unwrap();
+        let out = restore(&env, &Config::default(), &sel(&rep.batch), true).unwrap();
         assert!(out[0].ok, "{out:?}");
         assert!(!env.sys("/home/user/.config/a").exists());
         assert!(restore_entries(&env).is_empty());
@@ -503,7 +644,7 @@ mod tests {
         }
         bad.push(e);
         history::append(&env, &bad).unwrap();
-        let out = restore(&env, &sel("1"), false).unwrap();
+        let out = restore(&env, &Config::default(), &sel("1"), false).unwrap();
         assert_eq!(out.len(), 3);
         for o in &out {
             assert!(!o.ok);
@@ -515,7 +656,7 @@ mod tests {
         );
         assert!(!env.sys("/home/user/.config/a").exists());
         // The genuine entry still restores.
-        let out = restore(&env, &sel(&rep.batch), false).unwrap();
+        let out = restore(&env, &Config::default(), &sel(&rep.batch), false).unwrap();
         assert!(out[0].ok, "{out:?}");
     }
 }
