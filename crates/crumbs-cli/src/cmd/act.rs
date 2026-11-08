@@ -405,6 +405,7 @@ mod tests {
             app: None,
             plan: Plan {
                 app_id: None,
+                kind: None,
                 actions,
                 total_size,
                 notes: Vec::new(),

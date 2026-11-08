@@ -42,7 +42,16 @@ pub struct HistoryEntry {
     /// `Command` entries only: the program's arguments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argv: Option<Vec<String>>,
+    /// The command whose batch this is: [`KIND_UNINSTALL`],
+    /// [`KIND_ORPHANS`] or [`KIND_CLEAN`]. Missing in lines written before
+    /// it existed, and in `Restore` entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
+
+pub const KIND_UNINSTALL: &str = "uninstall";
+pub const KIND_ORPHANS: &str = "orphans";
+pub const KIND_CLEAN: &str = "clean";
 
 fn io_err(path: &Path, source: io::Error) -> CoreError {
     CoreError::Io {
@@ -163,6 +172,7 @@ mod tests {
             ok: true,
             error: None,
             app_id: Some("appimage:~/X.AppImage".into()),
+            kind: Some(KIND_UNINSTALL.into()),
             restores: None,
             argv: None,
         }

@@ -108,6 +108,7 @@ fn restore_with(
                     app_id: e.app_id.clone(),
                     restores: Some(e.id.clone()),
                     argv: None,
+                    kind: None,
                 };
                 logged += 1;
                 // Appended right after its action, so a later failure never
@@ -366,6 +367,7 @@ mod tests {
             .collect();
         let plan = Plan {
             app_id: Some("pacman:foo".into()),
+            kind: None,
             total_size: actions.len() as u64,
             actions,
             notes: Vec::new(),
@@ -766,6 +768,7 @@ mod tests {
         );
         let plan = Plan {
             app_id: None,
+            kind: None,
             actions: vec![PlannedAction {
                 action: Action::UserCommand {
                     program: "flatpak".into(),

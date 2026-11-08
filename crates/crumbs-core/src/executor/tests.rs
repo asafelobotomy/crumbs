@@ -32,6 +32,7 @@ fn planned(env: &Env, action: Action) -> PlannedAction {
 fn plan_of(actions: Vec<PlannedAction>) -> Plan {
     Plan {
         app_id: Some("pacman:foo".into()),
+        kind: Some("uninstall".into()),
         total_size: actions.iter().map(|a| a.size).sum(),
         actions,
         notes: Vec::new(),

@@ -68,6 +68,10 @@ pub struct PlannedAction {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Plan {
     pub app_id: Option<String>,
+    /// Which command made the plan; recorded as each history entry's
+    /// `kind`. Not part of the JSON plan.
+    #[serde(skip)]
+    pub kind: Option<String>,
     pub actions: Vec<PlannedAction>,
     pub total_size: u64,
     pub notes: Vec<String>,
@@ -162,6 +166,14 @@ pub fn build_plan(
     let total_size = actions.iter().map(|a| a.size).sum();
     Ok(Plan {
         app_id: app.map(|a| a.id.clone()),
+        kind: Some(
+            if app.is_some() {
+                crate::history::KIND_UNINSTALL
+            } else {
+                crate::history::KIND_ORPHANS
+            }
+            .into(),
+        ),
         actions,
         total_size,
         notes,
@@ -257,6 +269,7 @@ pub fn build_clean_plan(
     let total_size = actions.iter().map(|a| a.size).sum();
     Ok(Plan {
         app_id: None,
+        kind: Some(crate::history::KIND_CLEAN.into()),
         actions,
         total_size,
         notes,
@@ -311,6 +324,7 @@ mod tests {
         let plan = build_plan(&env, Some(&app), &fs, &PlanOptions::default()).unwrap();
         assert_eq!(kinds(&plan), ["trash", "trash"]);
         assert_eq!(plan.app_id.as_deref(), Some("pacman:foo"));
+        assert_eq!(plan.kind.as_deref(), Some("uninstall"));
         assert_eq!(plan.notes, [NOTE_APP_STAYS]);
         assert_eq!(plan.total_size, fs[0].size.bytes + fs[1].size.bytes);
         assert!(plan.total_size > 0);
@@ -329,6 +343,7 @@ mod tests {
         let plan = build_plan(&env, None, &fs, &opts).unwrap();
         assert_eq!(kinds(&plan), ["delete", "delete"]);
         assert_eq!(plan.app_id, None);
+        assert_eq!(plan.kind.as_deref(), Some("orphans"));
         assert!(plan.notes.is_empty());
 
         let json = serde_json::to_value(&plan.actions[0]).unwrap();
@@ -568,6 +583,7 @@ mod tests {
         let plan = build_clean_plan(&env, &items, &PlanOptions::default()).unwrap();
         assert_eq!(kinds(&plan), ["trash", "delete", "delete", "command"]);
         assert_eq!(plan.app_id, None);
+        assert_eq!(plan.kind.as_deref(), Some("clean"));
         assert_eq!(plan.actions[2].scope, Scope::UserTemp);
         assert_eq!(plan.actions[0].fingerprint, items[0].fingerprint.unwrap());
         assert_eq!(plan.actions[0].reason, "label /home/user/.cache/foo");

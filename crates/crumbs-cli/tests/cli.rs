@@ -1910,3 +1910,55 @@ fn restore_mixed_clean_batch_skips_deletes() {
         "{stdout}"
     );
 }
+
+#[test]
+fn history_labels_batches_by_kind() {
+    let t = scan_fixture(FLATPAK_OK);
+    with_orphans(&t);
+    let (code, stdout, _) = run_clean(&t, &["cache", "--yes"]);
+    assert_eq!(code, 0, "{stdout}");
+    crumbs(&t)
+        .args(["orphans", "--clean", "--select", "~/.thunderbird", "--yes"])
+        .assert()
+        .code(0);
+    gutcheck(&t);
+    crumbs(&t)
+        .args(["uninstall", "GutCheck", "--yes"])
+        .assert()
+        .code(0);
+    let h = history_json(&t);
+    let batches = h["data"]["batches"].as_array().unwrap();
+    let kinds: Vec<_> = batches
+        .iter()
+        .map(|b| b["entries"][0]["kind"].as_str().unwrap_or("-"))
+        .collect();
+    assert_eq!(kinds, ["uninstall", "orphans", "clean"], "{h}");
+    let labels: Vec<_> = batches
+        .iter()
+        .map(|b| b["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "appimage:~/Applications/GutCheck-0.19.0-x86_64.AppImage",
+            "orphans",
+            "clean"
+        ],
+        "{h}"
+    );
+    // A line written before `kind` existed keeps the old label.
+    let log = real(&t, "/home/user/.local/state/crumbs/history.jsonl");
+    let mut text = std::fs::read_to_string(&log).unwrap();
+    text.push_str(r#"{"id":"1-0","batch":"1","time":"2026-01-01T00:00:00Z","action":"trash","path":"/home/user/x","trashed":null,"backup":null,"size":1,"ok":true,"error":null,"app_id":null}"#);
+    text.push('\n');
+    std::fs::write(&log, text).unwrap();
+    let out = crumbs(&t).arg("history").output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    let line = text.lines().find(|l| l.starts_with("1  ")).unwrap();
+    assert!(line.contains("  orphans  "), "{text}");
+    let clean = text
+        .lines()
+        .find(|l| l.contains("  clean  "))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(clean.contains("1 items"), "{clean}");
+}

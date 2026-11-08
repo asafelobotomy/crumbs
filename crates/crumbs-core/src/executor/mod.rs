@@ -112,6 +112,7 @@ pub fn execute_with(
             app_id: plan.app_id.clone(),
             restores: None,
             argv,
+            kind: plan.kind.clone(),
         };
         let error = match history::append(env, std::slice::from_ref(&entry)) {
             Ok(()) => error,

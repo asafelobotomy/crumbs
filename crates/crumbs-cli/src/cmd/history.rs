@@ -5,7 +5,9 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use crumbs_core::Env;
-use crumbs_core::history::{HistoryAction, HistoryEntry, read_history};
+use crumbs_core::history::{
+    HistoryAction, HistoryEntry, KIND_ORPHANS, KIND_UNINSTALL, read_history,
+};
 use serde::Serialize;
 use serde_json::json;
 
@@ -15,7 +17,7 @@ use crate::output::{ErrorEntry, fmt_size, print_json_entries};
 struct Batch<'a> {
     batch: &'a str,
     time: &'a str,
-    /// The app id, `orphans`, or `restore` for a batch of restores.
+    /// The app id, `orphans`, `clean`, or `restore` for a batch of restores.
     label: String,
     items: usize,
     /// Bytes of the entries that succeeded.
@@ -31,6 +33,20 @@ fn short_time(t: &str) -> &str {
         t.get(..19).unwrap_or(t)
     } else {
         t
+    }
+}
+
+/// `restore` for a batch of restores; otherwise by the recorded kind: the
+/// app id for an uninstall, else the kind itself. Entries written before
+/// `kind` existed fall back to the app id or `orphans`.
+fn label(es: &[&HistoryEntry]) -> String {
+    if es.iter().all(|e| e.action == HistoryAction::Restore) {
+        return "restore".to_string();
+    }
+    let app = || es.iter().find_map(|e| e.app_id.clone());
+    match es.iter().find_map(|e| e.kind.as_deref()) {
+        Some(KIND_UNINSTALL) | None => app().unwrap_or_else(|| KIND_ORPHANS.into()),
+        Some(kind) => kind.to_string(),
     }
 }
 
@@ -54,13 +70,7 @@ pub fn run(env: &Env, limit: usize, json: bool) -> anyhow::Result<ExitCode> {
         .take(limit)
         .map(|b| {
             let es: Vec<&HistoryEntry> = entries.iter().filter(|e| e.batch == *b).collect();
-            let label = if es.iter().all(|e| e.action == HistoryAction::Restore) {
-                "restore".to_string()
-            } else {
-                es.iter()
-                    .find_map(|e| e.app_id.clone())
-                    .unwrap_or_else(|| "orphans".into())
-            };
+            let label = label(&es);
             Batch {
                 batch: b,
                 time: es.first().map_or("", |e| e.time.as_str()),
