@@ -29,7 +29,9 @@ Exit codes: 0 ok, 1 error, 2 usage error or ambiguous app, 3 partial failure, 4 
 - **Trash first.** Files go to the freedesktop trash, not the void. Only `--permanent` deletes, and it says so in the preview.
 - **Preview before anything happens.** `uninstall` and `orphans --clean` show every path with its size and the reason it was chosen, then ask. `--dry-run` shows the plan and stops.
 - **No surprises in scripts.** Without a terminal, `--yes` is required (or `--dry-run`); `--json` needs one of the two as well.
-- **Protected paths.** crumbs refuses system locations, your home directory itself and other paths that should never be removed, re-checks every path right before acting, and skips anything that changed since the scan. `protect` and `exclude` in `~/.config/crumbs/config.toml` add your own.
+- **Protected paths.** crumbs refuses system locations, your home directory itself and other paths that should never be removed, re-checks every path right before acting, and skips anything that changed since the scan. Two keys in `~/.config/crumbs/config.toml` add your own (paths start with `/` or `~/`):
+  - `protect = ["~/.config/keepme"]`: that path, everything under it and every folder that contains it are never found or removed.
+  - `exclude = ["~/.config/Foo/keep", "~/.cache/*-tmp"]`: glob patterns (`*` matches within one path segment, `**` across segments). A path that matches, everything under it, and every folder that contains the pattern's fixed part (the text up to the last `/` before the first `*`, or the whole pattern without wildcards) are never found or removed. So excluding `~/.config/Foo/keep` keeps `~/.config/Foo` as well.
 - **Everything is logged and reversible.** Each removal is recorded in `history`; `crumbs restore` puts trashed items back, and files crumbs edited come back from a backup kept next to them.
 
 ## Docs

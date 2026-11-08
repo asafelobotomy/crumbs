@@ -847,3 +847,26 @@ fn json_report_aligned_with_plans() {
     assert!(report[0].is_null(), "{v}");
     assert_eq!(report[1]["results"].as_array().unwrap().len(), 2, "{v}");
 }
+
+#[test]
+fn uninstall_never_trashes_parent_of_excluded_path() {
+    let t = fixture(FLATPAK_OK);
+    t.appimage("/home/user/Applications/Foobar-1.0-x86_64.AppImage");
+    t.write("/home/user/.config/Foobar/keep/important", b"precious");
+    t.write("/home/user/.config/Foobar/other", b"x");
+    t.write(
+        "/home/user/.config/crumbs/config.toml",
+        b"exclude = [\"~/.config/Foobar/keep\"]\n",
+    );
+    let out = crumbs(&t)
+        .args(["uninstall", "Foobar", "--yes"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(!stdout.contains("~/.config/Foobar"), "{stdout}");
+    assert_eq!(
+        std::fs::read(real(&t, "/home/user/.config/Foobar/keep/important")).unwrap(),
+        b"precious"
+    );
+    assert!(real(&t, "/home/user/.config/Foobar/other").exists());
+}

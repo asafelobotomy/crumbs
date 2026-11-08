@@ -154,7 +154,23 @@ pub(crate) fn is_allowed_user_target_by(
         return false;
     }
     let text = path.to_string_lossy();
-    !cfg.exclude.iter().any(|pat| glob_match(pat, &text))
+    !cfg.exclude.iter().any(|pat| {
+        // Like a protected path, an exclude also shields every ancestor of
+        // its literal part: trashing `~/.config/Foo` would take the excluded
+        // `~/.config/Foo/keep` with it.
+        glob_match(pat, &text) || Path::new(literal_prefix(pat)).starts_with(&path)
+    })
+}
+
+/// The part of an exclude pattern before any wildcard: up to the last `/`
+/// before the first `*`, or the whole pattern (without a trailing `/`)
+/// when it has none.
+fn literal_prefix(pattern: &str) -> &str {
+    match pattern.find('*') {
+        Some(star) => pattern[..star].rfind('/').map_or("", |i| &pattern[..i]),
+        None if pattern.len() > 1 => pattern.trim_end_matches('/'),
+        None => pattern,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,6 +376,32 @@ mod tests {
             &cfg,
             &p("/home/user/.config/a-drop")
         ));
+    }
+
+    #[test]
+    fn exclude_protects_ancestors_of_its_literal_prefix() {
+        let (_t, env, mut cfg) = setup();
+        cfg.exclude.push("/home/user/.config/Foobar/keep".into());
+        cfg.exclude
+            .push("/home/user/.local/share/Baz/sub/*.db".into());
+        for s in [
+            "/home/user/.config/Foobar/keep",
+            "/home/user/.config/Foobar/keep/important",
+            "/home/user/.config/Foobar",
+            "/home/user/.local/share/Baz/sub",
+            "/home/user/.local/share/Baz",
+            "/home/user/.local/share/Baz/sub/x.db",
+        ] {
+            assert!(!is_allowed_user_target(&env, &cfg, &p(s)), "{s}");
+        }
+        for s in [
+            "/home/user/.config/Foobar/other",
+            "/home/user/.config/Foobarx",
+            "/home/user/.local/share/Baz/sub/x.txt",
+            "/home/user/.local/share/Baz/other",
+        ] {
+            assert!(is_allowed_user_target(&env, &cfg, &p(s)), "{s}");
+        }
     }
 
     #[test]
