@@ -872,3 +872,31 @@ fn regression_path_live_for_one_rule_gone_for_another_not_orphan() {
     let fs = orphans(&t, vec![pacman("vscodium", &["codium"])], true);
     assert!(at(&fs, ".vscode-oss").is_none(), "{fs:#?}");
 }
+
+/// `$XDG_CONFIG_HOME/crumbs` and `$XDG_STATE_HOME/crumbs` outside the
+/// default locations are crumbs' own: never a finding or an orphan.
+#[test]
+fn custom_xdg_crumbs_dirs_never_found() {
+    let t = FixtureTree::new();
+    let mut env = t.env();
+    env.config_home = env.home.join("xdg/config");
+    env.state_home = env.home.join("xdg/state");
+    t.write("/home/user/xdg/config/crumbs/config.toml", b"");
+    t.write("/home/user/xdg/state/crumbs/history.jsonl", b"");
+    set_age(&t, "/home/user/xdg/config/crumbs", 60);
+    set_age(&t, "/home/user/xdg/state/crumbs", 60);
+    let rules = [user_rule(
+        &["crumbs"],
+        &["$XDG_CONFIG_HOME/crumbs", "$XDG_STATE_HOME/crumbs"],
+    )];
+    let with_app = inv(vec![pacman("crumbs", &["crumbs"])]);
+    let idx = LeftoverIndex::build(&env, &Config::default(), &rules, &with_app);
+    let fs = find_leftovers(&idx, &with_app.apps[0], true);
+    assert!(fs.is_empty(), "{fs:#?}");
+    let idx = LeftoverIndex::build(&env, &Config::default(), &[], &inv(vec![]));
+    let orphans = super::orphans::find_orphans_at(&idx, true, SystemTime::now() + DAY * 60);
+    assert!(
+        !orphans.iter().any(|f| f.path.ends_with("crumbs")),
+        "{orphans:#?}"
+    );
+}

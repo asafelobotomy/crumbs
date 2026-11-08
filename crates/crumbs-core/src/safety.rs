@@ -71,6 +71,14 @@ pub fn protected_paths(env: &Env, cfg: &Config) -> Vec<(PathBuf, Protection)> {
     ] {
         v.push((home.join(rel), Protection::Subtree));
     }
+    // The same, wherever the XDG variables point.
+    for (base, rel) in [
+        (&env.config_home, "crumbs"),
+        (&env.state_home, "crumbs"),
+        (&env.data_home, "keyrings"),
+    ] {
+        v.push((env.unsys(base).join(rel), Protection::Subtree));
+    }
     for p in [
         "/usr",
         "/boot",
@@ -283,6 +291,32 @@ mod tests {
         assert!(is_protected(&env, &cfg, &p("/home/user/.local/share")));
         assert!(!is_protected(&env, &cfg, &p("/home/user/.local/share/foo")));
         assert!(is_protected(&env, &cfg, &p("/var/lib")));
+    }
+
+    #[test]
+    fn custom_xdg_crumbs_and_keyrings_protected() {
+        let (_t, mut env, cfg) = setup();
+        env.config_home = env.home.join("xdg/config");
+        env.state_home = env.home.join("xdg/state");
+        env.data_home = env.home.join("xdg/data");
+        for s in [
+            "/home/user/xdg/config/crumbs",
+            "/home/user/xdg/config/crumbs/config.toml",
+            "/home/user/xdg/state/crumbs/history.jsonl",
+            "/home/user/xdg/data/keyrings/login.keyring",
+            // The ~ forms stay protected too.
+            "/home/user/.config/crumbs",
+            "/home/user/.local/state/crumbs",
+            "/home/user/.local/share/keyrings",
+        ] {
+            assert!(is_protected(&env, &cfg, &p(s)), "{s}");
+            assert!(!is_allowed_user_target(&env, &cfg, &p(s)), "{s}");
+        }
+        assert!(is_allowed_user_target(
+            &env,
+            &cfg,
+            &p("/home/user/xdg/config/other")
+        ));
     }
 
     #[test]
