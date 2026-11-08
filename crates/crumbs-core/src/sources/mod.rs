@@ -1,3 +1,4 @@
+pub mod flatpak;
 pub mod pacman;
 
 use std::collections::HashSet;
