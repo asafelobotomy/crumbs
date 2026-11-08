@@ -292,7 +292,7 @@ mod tests {
     use super::*;
     use crumbs_core::leftovers::Confidence;
     use crumbs_core::plan::Action;
-    use crumbs_core::safety::Fingerprint;
+    use crumbs_core::safety::{Fingerprint, Scope};
     use crumbs_core::size::DiskUsage;
     use crumbs_core::testing::FixtureTree;
 
@@ -305,6 +305,7 @@ mod tests {
             reason: String::new(),
             size: DiskUsage::default(),
             preselected: true,
+            scope: Scope::Home,
             fingerprint: Fingerprint {
                 dev: 0,
                 ino: 0,

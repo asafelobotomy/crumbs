@@ -10,7 +10,7 @@ use crate::env::Env;
 use crate::inventory::Inventory;
 use crate::model::{App, SourceKind};
 use crate::rules::{Rule, RuleOrigin, resolve_rule_paths, rules_for};
-use crate::safety::protected_paths;
+use crate::safety::{Scope, protected_paths};
 use crate::size::{DiskUsage, disk_usage};
 
 use super::candidates::{Bases, Candidate, Subject, admit, enumerate, holds_container, lexical};
@@ -308,6 +308,7 @@ pub fn find_leftovers(idx: &LeftoverIndex, app: &App, show_low: bool) -> Vec<Fin
             size: DiskUsage::default(),
             preselected: confidence == Confidence::High && !shared,
             fingerprint: c.fingerprint,
+            scope: Scope::Home,
             mime_lines,
         };
         found.push((finding, c));

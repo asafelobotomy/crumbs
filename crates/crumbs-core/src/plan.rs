@@ -179,6 +179,24 @@ pub fn build_plan(
         if skip_path.as_ref() == Some(&f.path) {
             continue;
         }
+        if f.scope == Scope::SystemTree {
+            // Root deletes are never trashed, whatever `--permanent` says.
+            if !notes.iter().any(|n| n == NOTE_SYSTEM_DELETE) {
+                notes.push(NOTE_SYSTEM_DELETE.into());
+            }
+            actions.push(PlannedAction {
+                action: Action::Delete {
+                    path: f.path.clone(),
+                },
+                size: f.size.bytes,
+                fingerprint: f.fingerprint,
+                scope: Scope::SystemTree,
+                depends_on: None,
+                depends_on_plan: None,
+                reason: f.reason.clone(),
+            });
+            continue;
+        }
         let (action, size) = if f.kind == FindingKind::MimeAssoc {
             let edit = Action::EditFile {
                 path: f.path.clone(),
@@ -222,6 +240,8 @@ pub fn build_plan(
     })
 }
 
+pub const NOTE_SYSTEM_DELETE: &str =
+    "system files are deleted permanently with administrator rights and cannot be restored";
 pub const NOTE_TRASH_FREES_LATER: &str =
     "space is freed when the trash is emptied (or use --permanent)";
 pub const NOTE_PERMANENT_TEMP: &str = "permanently delete (temporary files)";
@@ -346,6 +366,7 @@ mod tests {
             shared: false,
             reason: format!("reason for {path}"),
             preselected: true,
+            scope: Scope::Home,
             mime_lines: Vec::new(),
         }
     }
@@ -362,6 +383,38 @@ mod tests {
                 Action::PackageRemove { .. } => "package-remove",
             })
             .collect()
+    }
+
+    #[test]
+    fn build_plan_system_finding_is_root_delete() {
+        let t = FixtureTree::new();
+        t.write("opt/inky/a", b"aaaa");
+        t.write("home/user/.config/inky/b", b"bbbb");
+        let env = t.env();
+        let mut sys = finding(&env, "/opt/inky", FindingKind::SystemData);
+        sys.scope = Scope::SystemTree;
+        sys.preselected = false;
+        let home = finding(&env, "/home/user/.config/inky", FindingKind::Config);
+        let fs = [home, sys.clone()];
+        let app = App::new(SourceKind::Pacman, "inky");
+        let plan = build_plan(&env, Some(&app), &fs, &PlanOptions::default()).unwrap();
+        assert_eq!(kinds(&plan), ["trash", "delete"]);
+        assert_eq!(plan.actions[0].scope, Scope::Home);
+        let a = &plan.actions[1];
+        assert_eq!(a.scope, Scope::SystemTree);
+        assert_eq!(a.action.path(), Some(Path::new("/opt/inky")));
+        assert_eq!(a.fingerprint, sys.fingerprint);
+        assert!(plan.notes.iter().any(|n| n == NOTE_SYSTEM_DELETE));
+        assert_eq!(
+            plan.notes
+                .iter()
+                .filter(|n| *n == NOTE_SYSTEM_DELETE)
+                .count(),
+            1
+        );
+        // Without a system finding the note is absent.
+        let plan = build_plan(&env, Some(&app), &fs[..1], &PlanOptions::default()).unwrap();
+        assert!(!plan.notes.iter().any(|n| n == NOTE_SYSTEM_DELETE));
     }
 
     #[test]

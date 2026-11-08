@@ -7,6 +7,7 @@ use std::time::SystemTime;
 use crate::command::TRUSTED_DIRS;
 use crate::env::Env;
 use crate::rules::{Rule, RuleOrigin, resolve_rule_paths, rule_matches};
+use crate::safety::Scope;
 use crate::size::disk_usage;
 
 use super::candidates::{Candidate, Subject, lexical};
@@ -183,6 +184,7 @@ pub(crate) fn find_orphans_at(
             size: disk_usage(env, &c.path),
             preselected: false,
             fingerprint: c.fingerprint,
+            scope: Scope::Home,
             mime_lines: Vec::new(),
         });
     }

@@ -240,6 +240,24 @@ pub fn expand_rule_path(env: &Env, raw: &str) -> Option<PathBuf> {
     (clean && path != home && path.starts_with(&home)).then_some(path)
 }
 
+/// A rule path naming a system leftover: exactly `/etc/<name>` or
+/// `/opt/<name>` (a trailing `/` is fine) with a name that
+/// [`crate::safety::is_system_leftover_name`] accepts. Anything else,
+/// including wildcards, `..` and deeper paths, is `None`.
+pub fn expand_system_rule_path(raw: &str) -> Option<PathBuf> {
+    let rest = raw
+        .strip_prefix("/etc/")
+        .map(|r| ("/etc", r))
+        .or_else(|| raw.strip_prefix("/opt/").map(|r| ("/opt", r)))?;
+    let name = rest.1.strip_suffix('/').unwrap_or(rest.1);
+    let ok = !name.is_empty()
+        && !name.contains(['/', '*'])
+        && name != "."
+        && name != ".."
+        && crate::safety::is_system_leftover_name(std::ffi::OsStr::new(name));
+    ok.then(|| Path::new(rest.0).join(name))
+}
+
 /// Expands every path of the rule and returns those that exist. A trailing `*`
 /// in the final component matches every existing sibling starting with the
 /// prefix (never an empty prefix).
@@ -285,6 +303,30 @@ fn glob_siblings(env: &Env, pattern: &Path, prefix: &str) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use crate::model::SourceKind;
+
+    #[test]
+    fn system_rule_paths_are_etc_or_opt_children_only() {
+        let p = |s: &str| expand_system_rule_path(s);
+        assert_eq!(p("/etc/foo"), Some(PathBuf::from("/etc/foo")));
+        assert_eq!(p("/opt/foo/"), Some(PathBuf::from("/opt/foo")));
+        for bad in [
+            "/etc/foo/bar",
+            "/etc",
+            "/etc/",
+            "/opt/..",
+            "/opt/foo/..",
+            "/etc/foo*",
+            "/etc/ssh",
+            "/etc/foo.bak",
+            "/usr/foo",
+            "/etcfoo",
+            "etc/foo",
+            "~/etc/foo",
+            "",
+        ] {
+            assert_eq!(p(bad), None, "{bad}");
+        }
+    }
     use crate::testing::FixtureTree;
 
     fn user_rule_file(t: &FixtureTree, name: &str, body: &str) {
