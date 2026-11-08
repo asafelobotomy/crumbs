@@ -28,3 +28,4 @@ These items came out of the M4 per-task reviews and the final whole-branch revie
 
 14. **Cross-plan skip.** No end-to-end CLI test covers a cross-plan skip. Only core and `drop_overlaps` unit tests cover it.
 15. **Missing /proc.** No test covers history mode-tightening when `/proc` is missing. The code warns instead of panicking.
+16. **Rare test flake on `command::tests::system_runner_clears_env`.** It failed once in a full parallel run after the merge, at the `run_with_env(...).unwrap()` spawn. It then passed in 30 isolated runs and in 20 runs of the whole core suite. The likely cause is ETXTBSY: a test writes a fixture script, and another test thread forks while the script's write fd is still open. Fix: retry the spawn on ETXTBSY in `SystemRunner`, or have fixtures write through a temp name and rename.
