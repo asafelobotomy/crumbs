@@ -1,5 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+// A release binary refuses CRUMBS_ROOT, so these tests would fail; before
+// that refusal they ran against the real root and home.
+#[cfg(not(debug_assertions))]
+compile_error!("crumbs CLI tests must run in a debug build; they rely on CRUMBS_ROOT");
+
 use assert_cmd::Command;
 use crumbs_core::testing::FixtureTree;
 use predicates::prelude::*;
