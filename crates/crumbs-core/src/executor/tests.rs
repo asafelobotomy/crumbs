@@ -1549,3 +1549,44 @@ fn failed_package_step_reports_what_was_removed() {
         Some("privilege escalation was cancelled or denied; removed: a")
     );
 }
+
+/// Without a real post-check (`execute`/`execute_with` until removal is
+/// wired) a failed package step claims nothing about what was removed.
+#[test]
+fn default_post_check_claims_nothing_on_failure() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "pacman", &log, "error: boom\n", 1);
+    let env = t.env();
+    let plan = plan_of(vec![pkg_remove(&["a", "b"], &["1", "2"])]);
+    let run = |pr: &dyn PrivilegedRunner| {
+        run_plan(
+            &env,
+            &Config::default(),
+            &plan,
+            &FakeRunner::new(),
+            pr,
+            Some(&esc()),
+            None,
+        )
+    };
+    let report = run(&FakePrivilegedRunner::default());
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("pacman exited with status 1: error: boom")
+    );
+    let report = run(&DeniedRunner::default());
+    assert_eq!(report.results[0].error.as_deref(), Some(ESCALATION_DENIED));
+    let (hist, _) = read_history(&env).unwrap();
+    assert!(hist.iter().all(|h| h.packages.is_none()), "{hist:?}");
+
+    // A step that succeeded is trusted: every package is recorded.
+    logging_program(&t, "pacman", &log, "", 0);
+    let report = run(&FakePrivilegedRunner::default());
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    let (hist, _) = read_history(&env).unwrap();
+    assert_eq!(
+        hist.last().unwrap().packages.as_deref(),
+        Some(&[("a".to_string(), "1".to_string()), ("b".into(), "2".into())][..])
+    );
+}

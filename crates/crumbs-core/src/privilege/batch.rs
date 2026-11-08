@@ -12,7 +12,7 @@
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 
@@ -207,7 +207,33 @@ pub trait PrivilegedRunner: Send + Sync {
 /// stdout is captured. The child stays in crumbs' process group (the
 /// escalation program must own the terminal for its prompt), so Ctrl-C
 /// reaches it too. There is no timeout: the user may take a while to answer.
-pub struct SystemPrivilegedRunner;
+///
+/// It refuses, without starting anything, inside crumbs' own unit tests and
+/// whenever the environment's root is not `/`: under a fake root the
+/// programs in the script are user-writable fixtures.
+pub struct SystemPrivilegedRunner {
+    root: PathBuf,
+}
+
+impl SystemPrivilegedRunner {
+    /// `root` is the environment's root (`Env::root`).
+    pub fn new(root: &Path) -> Self {
+        SystemPrivilegedRunner {
+            root: root.to_path_buf(),
+        }
+    }
+}
+
+/// Why escalating is refused: inside tests, or under a fake root.
+fn escalation_refused(root: &Path, in_test: bool) -> Option<&'static str> {
+    if in_test {
+        Some("refusing to escalate inside tests")
+    } else if root != Path::new("/") {
+        Some("refusing to escalate under a fake root")
+    } else {
+        None
+    }
+}
 
 /// The escalation program's arguments for running `script` in a root shell.
 fn escalation_args(esc: &Escalation, script: &[u8]) -> Vec<OsString> {
@@ -224,6 +250,12 @@ fn escalation_args(esc: &Escalation, script: &[u8]) -> Vec<OsString> {
 
 impl PrivilegedRunner for SystemPrivilegedRunner {
     fn run(&self, esc: &Escalation, script: &[u8]) -> Result<Vec<u8>, CoreError> {
+        if let Some(why) = escalation_refused(&self.root, cfg!(test)) {
+            return Err(CoreError::Command {
+                program: esc.program.display().to_string(),
+                message: why.into(),
+            });
+        }
         let fail = |e: std::io::Error| CoreError::Command {
             program: esc.program.display().to_string(),
             message: e.to_string(),
@@ -261,7 +293,6 @@ mod tests {
     use crate::privilege::EscalationKind;
     use crate::testing::{FakePrivilegedRunner, FixtureTree};
     use std::os::unix::ffi::OsStringExt;
-    use std::path::Path;
 
     fn esc() -> Escalation {
         Escalation {
@@ -590,5 +621,33 @@ mod tests {
             *r.calls.lock().unwrap(),
             [b"echo one".to_vec(), b"echo two".to_vec()]
         );
+    }
+
+    /// Review Focus: no test may ever escalate. The escalation program here
+    /// is a harmless fixture that only logs, in case the guard is missing.
+    #[test]
+    fn system_runner_refuses_in_tests_and_fake_roots() {
+        let t = FixtureTree::new();
+        let log = t.dir.path().join("esc.log");
+        let prog = t.write_exec(
+            "usr/bin/run0",
+            format!("#!/bin/sh\necho ran >> '{}'\n", log.display()).as_bytes(),
+        );
+        let esc = Escalation {
+            kind: EscalationKind::Run0,
+            program: prog,
+            requires_tty: false,
+        };
+        for root in [Path::new("/"), t.dir.path()] {
+            let err = SystemPrivilegedRunner::new(root)
+                .run(&esc, b"exit 0\n")
+                .unwrap_err();
+            assert!(err.to_string().contains("refusing to escalate"), "{err}");
+        }
+        assert!(!log.exists(), "the escalation program ran");
+        // Outside tests only a fake root is refused.
+        assert_eq!(escalation_refused(Path::new("/"), false), None);
+        assert!(escalation_refused(t.dir.path(), false).is_some());
+        assert!(escalation_refused(Path::new("/"), true).is_some());
     }
 }

@@ -88,14 +88,14 @@ pub fn execute_with(
     let esc = (env.root == Path::new("/") && plan.actions.iter().any(is_privileged))
         .then(|| detect_escalation(env, &SystemRunner::new()))
         .flatten();
-    execute_full(
+    run_plan(
         env,
         cfg,
         plan,
         runner,
-        &SystemPrivilegedRunner,
+        &SystemPrivilegedRunner::new(&env.root),
         esc.as_ref(),
-        &|_, _, _| Vec::new(),
+        None,
     )
 }
 
@@ -137,6 +137,21 @@ pub fn execute_full(
     priv_runner: &dyn PrivilegedRunner,
     esc: Option<&Escalation>,
     post_check: &PostCheck<'_>,
+) -> ExecReport {
+    run_plan(env, cfg, plan, runner, priv_runner, esc, Some(post_check))
+}
+
+/// [`execute_full`], with the post-check optional. Without one, a
+/// `PackageRemove` whose step succeeded is trusted, and one whose step
+/// failed claims nothing about what was removed.
+fn run_plan(
+    env: &Env,
+    cfg: &Config,
+    plan: &Plan,
+    runner: &dyn CommandRunner,
+    priv_runner: &dyn PrivilegedRunner,
+    esc: Option<&Escalation>,
+    post_check: Option<&PostCheck<'_>>,
 ) -> ExecReport {
     let batch = history::next_batch_id(env);
     let mut results: Vec<Option<ActionResult>> = vec![None; plan.actions.len()];
@@ -231,7 +246,7 @@ fn run_privileged(
     plan: &Plan,
     priv_runner: &dyn PrivilegedRunner,
     esc: Option<&Escalation>,
-    post_check: &PostCheck<'_>,
+    post_check: Option<&PostCheck<'_>>,
 ) -> (Vec<(usize, Attempt)>, bool) {
     let mut attempts: Vec<(usize, Attempt)> = Vec::new();
     let mut steps: Vec<Step> = Vec::new();
@@ -331,7 +346,7 @@ fn check_packages(
     env: &Env,
     action: &Action,
     end: StepEnd,
-    post_check: &PostCheck<'_>,
+    post_check: Option<&PostCheck<'_>>,
     attempt: &mut Attempt,
 ) -> Result<Done, String> {
     let Action::PackageRemove {
@@ -344,6 +359,23 @@ fn check_packages(
     else {
         return Err("not a package removal".into());
     };
+    let Some(post_check) = post_check else {
+        // Nothing to ask: only the step's own status is known.
+        return match end {
+            StepEnd::Succeeded => {
+                attempt.packages = Some(
+                    names
+                        .iter()
+                        .enumerate()
+                        .map(|(k, n)| (n.clone(), versions.get(k).cloned().unwrap_or_default()))
+                        .collect(),
+                );
+                Ok(Done::default())
+            }
+            StepEnd::Exited(status, line) => Err(exit_message(program, status, line)),
+            StepEnd::NotRun(msg) => Err(msg),
+        };
+    };
     let still = post_check(env, *source, names);
     let removed: Vec<(String, String)> = names
         .iter()
@@ -354,10 +386,7 @@ fn check_packages(
     let mut parts: Vec<String> = Vec::new();
     match end {
         StepEnd::Succeeded => {}
-        StepEnd::Exited(status, line) => parts.push(match line {
-            Some(line) => format!("{program} exited with status {status}: {line}"),
-            None => format!("{program} exited with status {status}"),
-        }),
+        StepEnd::Exited(status, line) => parts.push(exit_message(program, status, line)),
         StepEnd::NotRun(msg) => parts.push(msg),
     }
     let ok = parts.is_empty() && still.is_empty();
@@ -411,6 +440,14 @@ fn privileged_step(
         program: resolved,
         args: args.iter().map(OsString::from).collect(),
     })
+}
+
+/// `<program> exited with status N[: <last output line>]`.
+fn exit_message(program: &str, status: i32, line: Option<String>) -> String {
+    match line {
+        Some(line) => format!("{program} exited with status {status}: {line}"),
+        None => format!("{program} exited with status {status}"),
+    }
 }
 
 /// The last non-empty line of a command's output, trimmed.

@@ -67,7 +67,9 @@ mod tests {
         t.mkdir("/var/lib/pacman/local");
         t.mkdir("/home/user/.local/share/Trash");
         t.write_exec("/usr/bin/sudo", b"");
-        let r = doctor(&t.env(), &FakeRunner::new(), &Config::default());
+        let r = crate::privilege::allow_detection_in_test(|| {
+            doctor(&t.env(), &FakeRunner::new(), &Config::default())
+        });
         assert_eq!(r.crumbs_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(r.distro.id, "manjaro");
         let kinds: Vec<_> = r.sources.iter().map(|s| s.source).collect();

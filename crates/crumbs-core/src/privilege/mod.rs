@@ -49,8 +49,33 @@ fn modern_systemd(env: &Env, runner: &dyn CommandRunner) -> bool {
     }
 }
 
-/// Picks run0 (systemd 256+), else pkexec, else sudo (needs a TTY).
+#[cfg(test)]
+thread_local! {
+    static DETECTION_ALLOWED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with [`detect_escalation`] enabled on this thread. Unit tests
+/// find no escalation program otherwise.
+#[cfg(test)]
+pub(crate) fn allow_detection_in_test<R>(f: impl FnOnce() -> R) -> R {
+    DETECTION_ALLOWED.with(|a| a.set(true));
+    let r = f();
+    DETECTION_ALLOWED.with(|a| a.set(false));
+    r
+}
+
+/// Picks run0 (systemd 256+), else pkexec, else sudo (needs a TTY). In
+/// crumbs' unit tests it finds nothing unless [`allow_detection_in_test`]
+/// is used.
 pub fn detect_escalation(env: &Env, runner: &dyn CommandRunner) -> Option<Escalation> {
+    #[cfg(test)]
+    if !DETECTION_ALLOWED.with(std::cell::Cell::get) {
+        return None;
+    }
+    find_escalation(env, runner)
+}
+
+fn find_escalation(env: &Env, runner: &dyn CommandRunner) -> Option<Escalation> {
     let found = |kind, path: PathBuf, requires_tty| Escalation {
         kind,
         program: env.unsys(&path),
@@ -93,7 +118,7 @@ mod tests {
             t.write_exec(&format!("/usr/bin/{p}"), b"");
         }
         let runner = version("systemd 255 (255.4-1)\n+PAM\n");
-        let e = detect_escalation(&t.env(), &runner).unwrap();
+        let e = find_escalation(&t.env(), &runner).unwrap();
         assert_eq!(e.kind, EscalationKind::Pkexec);
         assert_eq!(e.program, PathBuf::from("/usr/bin/pkexec"));
         assert!(!e.requires_tty);
@@ -106,7 +131,7 @@ mod tests {
             t.write_exec(&format!("/usr/bin/{p}"), b"");
         }
         let runner = version("systemd 261 (261.3-1-manjaro)\n");
-        let e = detect_escalation(&t.env(), &runner).unwrap();
+        let e = find_escalation(&t.env(), &runner).unwrap();
         assert_eq!(e.kind, EscalationKind::Run0);
         assert_eq!(e.program, PathBuf::from("/usr/bin/run0"));
         assert!(!e.requires_tty);
@@ -119,10 +144,10 @@ mod tests {
         for p in ["run0", "pkexec", "systemctl"] {
             t.write_exec(&format!("/usr/bin/{p}"), b"");
         }
-        let e = detect_escalation(&t.env(), &version("garbage\n")).unwrap();
+        let e = find_escalation(&t.env(), &version("garbage\n")).unwrap();
         assert_eq!(e.kind, EscalationKind::Pkexec);
         // systemctl failing to run (no fake registered) also falls through.
-        let e = detect_escalation(&t.env(), &FakeRunner::new()).unwrap();
+        let e = find_escalation(&t.env(), &FakeRunner::new()).unwrap();
         assert_eq!(e.kind, EscalationKind::Pkexec);
     }
 
@@ -130,7 +155,7 @@ mod tests {
     fn sudo_fallback_requires_tty() {
         let t = FixtureTree::new();
         t.write_exec("/usr/bin/sudo", b"");
-        let e = detect_escalation(&t.env(), &FakeRunner::new()).unwrap();
+        let e = find_escalation(&t.env(), &FakeRunner::new()).unwrap();
         assert_eq!(e.kind, EscalationKind::Sudo);
         assert_eq!(e.program, PathBuf::from("/usr/bin/sudo"));
         assert!(e.requires_tty);
@@ -139,11 +164,22 @@ mod tests {
     #[test]
     fn none_when_nothing_present() {
         let t = FixtureTree::new();
-        assert_eq!(detect_escalation(&t.env(), &FakeRunner::new()), None);
+        assert_eq!(find_escalation(&t.env(), &FakeRunner::new()), None);
     }
 
     #[test]
     fn kind_serializes_kebab_case() {
         assert_eq!(serde_json::to_value(EscalationKind::Run0).unwrap(), "run0");
+    }
+
+    #[test]
+    fn detection_finds_nothing_in_tests_without_override() {
+        let t = FixtureTree::new();
+        t.write_exec("/usr/bin/sudo", b"");
+        assert_eq!(detect_escalation(&t.env(), &FakeRunner::new()), None);
+        let found = allow_detection_in_test(|| detect_escalation(&t.env(), &FakeRunner::new()));
+        assert_eq!(found.unwrap().kind, EscalationKind::Sudo);
+        // The override ends with the closure.
+        assert_eq!(detect_escalation(&t.env(), &FakeRunner::new()), None);
     }
 }
