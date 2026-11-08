@@ -12,7 +12,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, glob_match};
+use crate::config::{Config, could_match_below, glob_match};
 use crate::env::{Env, display_path};
 use crate::error::CoreError;
 
@@ -158,23 +158,12 @@ pub(crate) fn is_allowed_user_target_by(
         return false;
     }
     let text = path.to_string_lossy();
-    !cfg.exclude.iter().any(|pat| {
-        // Like a protected path, an exclude also shields every ancestor of
-        // its literal part: trashing `~/.config/Foo` would take the excluded
-        // `~/.config/Foo/keep` with it.
-        glob_match(pat, &text) || Path::new(literal_prefix(pat)).starts_with(&path)
-    })
-}
-
-/// The part of an exclude pattern before any wildcard: up to the last `/`
-/// before the first `*`, or the whole pattern (without a trailing `/`)
-/// when it has none.
-fn literal_prefix(pattern: &str) -> &str {
-    match pattern.find('*') {
-        Some(star) => pattern[..star].rfind('/').map_or("", |i| &pattern[..i]),
-        None if pattern.len() > 1 => pattern.trim_end_matches('/'),
-        None => pattern,
-    }
+    // Like a protected path, an exclude also shields every ancestor that
+    // could contain a match: trashing `~/.config/Foo` would take an
+    // excluded `~/.config/Foo/keep` (or `~/.config/*/keep`) with it.
+    !cfg.exclude
+        .iter()
+        .any(|pat| glob_match(pat, &text) || could_match_below(pat, &text))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -431,6 +420,24 @@ mod tests {
         ] {
             assert!(is_allowed_user_target(&env, &cfg, &p(s)), "{s}");
         }
+    }
+
+    #[test]
+    fn exclude_wildcard_shields_parent() {
+        let (_t, env, mut cfg) = setup();
+        cfg.exclude.push("/home/user/.config/*/keep".into());
+        for s in [
+            "/home/user/.config/Foobar",
+            "/home/user/.config",
+            "/home/user/.config/Foobar/keep",
+        ] {
+            assert!(!is_allowed_user_target(&env, &cfg, &p(s)), "{s}");
+        }
+        assert!(is_allowed_user_target(
+            &env,
+            &cfg,
+            &p("/home/user/.cache/x")
+        ));
     }
 
     #[test]

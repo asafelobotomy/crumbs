@@ -45,6 +45,22 @@ fn expand(env: &Env, s: &str) -> Option<String> {
     out.starts_with('/').then_some(out)
 }
 
+/// Resolves `.` and `..` segments and collapses repeated and trailing
+/// slashes. `None` when a `..` would climb above `/`.
+fn normalise_lexical(abs: &str) -> Option<String> {
+    let mut stack: Vec<&str> = Vec::new();
+    for seg in abs.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                stack.pop()?;
+            }
+            s => stack.push(s),
+        }
+    }
+    Some(format!("/{}", stack.join("/")))
+}
+
 /// Loads `{config_home}/crumbs/config.toml`. A missing file yields the
 /// default config. Entries that are not absolute after `~` expansion are
 /// dropped, each with a message in `warnings`.
@@ -63,10 +79,16 @@ pub fn load_config(env: &Env) -> Result<Config, CoreError> {
     let mut strings = |key: &str, v: &[String]| -> Vec<String> {
         v.iter()
             .filter_map(|s| {
-                let r = expand(env, s);
-                if r.is_none() {
+                let Some(expanded) = expand(env, s) else {
                     warnings.push(format!(
                         "config.toml: ignoring {key} entry '{s}' (must start with / or ~/)"
+                    ));
+                    return None;
+                };
+                let r = normalise_lexical(&expanded);
+                if r.is_none() {
+                    warnings.push(format!(
+                        "config.toml: ignoring {key} entry '{s}' (climbs above /)"
                     ));
                 }
                 r
@@ -87,41 +109,102 @@ pub fn load_config(env: &Env) -> Result<Config, CoreError> {
 
 /// Matches an in-system `path` against a glob `pattern`.
 ///
-/// `*` matches any characters except `/`; `**` matches any characters
-/// including `/`; everything else is literal. The whole path must match,
-/// except that a pattern also matches anything beneath a path it matches
-/// (so the literal `/a/b` matches `/a/b/c/d`, split on a `/` boundary).
+/// Both are compared as lists of `/`-separated segments. `*` matches any
+/// characters within one segment; a segment that is `**` matches zero or
+/// more whole segments. A segment that mixes `**` with other text is
+/// treated as a bare `**` (it can only shield more, never less). A pattern
+/// also matches anything beneath a path it matches (so `/a/b` matches
+/// `/a/b/c/d`). Runs in O(pattern segments x path segments).
 pub fn glob_match(pattern: &str, path: &str) -> bool {
-    // A trailing slash (`~/.cache/`) means the directory itself.
-    let pattern = if pattern.len() > 1 {
-        pattern.trim_end_matches('/')
-    } else {
-        pattern
-    };
-    let (p, s) = (pattern.as_bytes(), path.as_bytes());
-    if matches_at(p, s) {
+    let pat = segments(pattern);
+    let path = segments(path);
+    let mut cur = start_states(&pat);
+    if cur[pat.len()] {
         return true;
     }
-    s.iter()
-        .enumerate()
-        .any(|(i, &b)| b == b'/' && i > 0 && matches_at(p, &s[..i]))
+    for seg in path {
+        cur = step(&pat, &cur, seg);
+        if cur[pat.len()] {
+            return true;
+        }
+    }
+    false
 }
 
-fn matches_at(p: &[u8], s: &[u8]) -> bool {
-    match p.split_first() {
-        None => s.is_empty(),
-        Some((b'*', rest)) => {
-            if let Some(rest2) = rest.strip_prefix(b"*") {
-                (0..=s.len()).any(|i| matches_at(rest2, &s[i..]))
-            } else {
-                let limit = s.iter().position(|&b| b == b'/').unwrap_or(s.len());
-                (0..=limit).any(|i| matches_at(rest, &s[i..]))
-            }
-        }
-        Some((c, rest)) => s
-            .split_first()
-            .is_some_and(|(d, s2)| c == d && matches_at(rest, s2)),
+/// True if some path strictly beneath `dir` could match `pattern`: `dir`'s
+/// segments match a prefix of the pattern, with at least one pattern
+/// segment left to consume. A path equal to or beneath a fully matched
+/// pattern is [`glob_match`]'s business, not this function's.
+pub fn could_match_below(pattern: &str, dir: &str) -> bool {
+    let pat = segments(pattern);
+    let mut cur = start_states(&pat);
+    for seg in segments(dir) {
+        cur = step(&pat, &cur, seg);
     }
+    cur[..pat.len()].iter().any(|&b| b)
+}
+
+fn segments(s: &str) -> Vec<&str> {
+    s.split('/').filter(|s| !s.is_empty()).collect()
+}
+
+fn is_globstar(seg: &str) -> bool {
+    seg.contains("**")
+}
+
+/// Adds the states reachable by letting `**` segments match nothing.
+fn close(pat: &[&str], states: &mut [bool]) {
+    for j in 0..pat.len() {
+        if states[j] && is_globstar(pat[j]) {
+            states[j + 1] = true;
+        }
+    }
+}
+
+fn start_states(pat: &[&str]) -> Vec<bool> {
+    let mut s = vec![false; pat.len() + 1];
+    s[0] = true;
+    close(pat, &mut s);
+    s
+}
+
+/// Advances the set of pattern positions over one path segment.
+fn step(pat: &[&str], cur: &[bool], seg: &str) -> Vec<bool> {
+    let mut next = vec![false; pat.len() + 1];
+    for j in 0..pat.len() {
+        if !cur[j] {
+            continue;
+        }
+        if is_globstar(pat[j]) {
+            next[j] = true;
+        } else if segment_match(pat[j].as_bytes(), seg.as_bytes()) {
+            next[j + 1] = true;
+        }
+    }
+    close(pat, &mut next);
+    next
+}
+
+/// Matches one segment: `*` is any run of characters, the rest is literal.
+fn segment_match(p: &[u8], s: &[u8]) -> bool {
+    let (mut pi, mut si) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while si < s.len() {
+        if p.get(pi) == Some(&b'*') {
+            star = Some((pi, si));
+            pi += 1;
+        } else if p.get(pi) == Some(&s[si]) {
+            pi += 1;
+            si += 1;
+        } else if let Some((sp, ss)) = star {
+            pi = sp + 1;
+            si = ss + 1;
+            star = Some((sp, ss + 1));
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&b| b == b'*')
 }
 
 #[cfg(test)]
@@ -206,7 +289,7 @@ mod tests {
             ("/home/*/x", "/home/u/x", true),
             ("/home/*/x", "/home/u/v/x", false),
             ("/home/**/x", "/home/u/v/x", true),
-            ("/home/**/x", "/home/x", false),
+            ("/home/**/x", "/home/x", true), // `**` may match zero segments
             ("/a/b", "/a/b", true),
             ("/a/b", "/a/b/c/d", true),
             ("/a/b", "/a/bc", false),
@@ -218,5 +301,56 @@ mod tests {
         for (pat, path, want) in cases {
             assert_eq!(glob_match(pat, path), want, "{pat} vs {path}");
         }
+    }
+
+    #[test]
+    fn glob_double_star_matches_dir_itself() {
+        assert!(glob_match("/a/.cache/**", "/a/.cache"));
+        assert!(glob_match("/a/**/z", "/a/z"));
+        assert!(glob_match("/a/**/z", "/a/b/c/z"));
+        assert!(!glob_match("/a/**/z", "/a/b/c"));
+    }
+
+    #[test]
+    fn glob_many_double_stars_is_fast() {
+        let path = format!("/{}", vec!["seg"; 40].join("/"));
+        let start = std::time::Instant::now();
+        assert!(!glob_match("/**/**/**/**/**/**/x", &path));
+        assert!(glob_match("/**/**/**/**/**/**/seg", &path));
+        assert!(start.elapsed() < std::time::Duration::from_millis(50));
+    }
+
+    #[test]
+    fn could_match_below_table() {
+        let star = "/h/.config/*/keep";
+        let cases = [
+            (star, "/h/.config/Foobar", true),
+            (star, "/h/.config", true),
+            (star, "/h/.cache/x", false),
+            ("/h/a/**/z", "/h/a/b/c", true),
+            ("/h/a/b", "/h/a", true),
+            ("/h/a/b", "/h/a/b", false),
+            ("/h/a/b", "/h/x", false),
+            ("/h/a/**", "/h/a", true),
+        ];
+        for (pat, dir, want) in cases {
+            assert_eq!(could_match_below(pat, dir), want, "{pat} below {dir}");
+        }
+    }
+
+    #[test]
+    fn config_normalises_dotdot() {
+        let t = FixtureTree::new();
+        t.write(
+            "/home/user/.config/crumbs/config.toml",
+            b"protect = [\"/a/b/../c\", \"/a/./d\", \"/../x\"]\nexclude = [\"~/.cache/../.config/*/keep\", \"/a/../../y\"]\nappimage_dirs = [\"/opt/./ai/\"]\n",
+        );
+        let c = load_config(&t.env()).unwrap();
+        assert_eq!(c.protect, [PathBuf::from("/a/c"), PathBuf::from("/a/d")]);
+        assert_eq!(c.exclude, ["/home/user/.config/*/keep"]);
+        assert_eq!(c.appimage_dirs, [PathBuf::from("/opt/ai")]);
+        assert_eq!(c.warnings.len(), 2, "{:?}", c.warnings);
+        assert!(c.warnings[0].contains("climbs above /") && c.warnings[0].contains("/../x"));
+        assert!(c.warnings[1].contains("exclude") && c.warnings[1].contains("/a/../../y"));
     }
 }
