@@ -2118,9 +2118,7 @@ fn uninstall_pacman_dry_run_shows_also_removed() {
     );
     assert!(stdout.contains("~/.cache/firefox"), "{stdout}");
     assert!(
-        stdout.contains(
-            "note: packages are removed with administrator rights; you will be asked once"
-        ),
+        stdout.contains("note: these steps run with administrator rights; you will be asked once"),
         "{stdout}"
     );
     assert!(
@@ -2321,9 +2319,7 @@ fn uninstall_flatpak_system_uses_batch() {
     ]));
     assert_eq!(code, 0, "{stdout}{stderr}");
     assert!(
-        stdout.contains(
-            "note: packages are removed with administrator rights; you will be asked once"
-        ),
+        stdout.contains("note: these steps run with administrator rights; you will be asked once"),
         "{stdout}"
     );
     assert_eq!(
@@ -2622,9 +2618,7 @@ fn clean_system_dry_run_preview() {
         "{stdout}"
     );
     assert!(
-        stdout.contains(
-            "note: packages are removed with administrator rights; you will be asked once"
-        ),
+        stdout.contains("note: these steps run with administrator rights; you will be asked once"),
         "{stdout}"
     );
     // Opt-in categories stay out unless named.
@@ -2731,22 +2725,43 @@ fn clean_system_escalation_denied_exit_5() {
     );
     assert!(stderr.contains(&manual), "{stderr}");
     let v = json_error(&t, &["clean", "--system", "--json", "--yes"], 5);
-    let list = v["data"]["manual_commands"].as_array().unwrap();
-    assert!(list.iter().any(|m| m == &serde_json::json!(manual)), "{v}");
+    assert_eq!(
+        v["data"]["manual_commands"],
+        serde_json::json!([
+            "sudo '/usr/bin/paccache' '-rk2'",
+            "sudo '/usr/bin/journalctl' '--vacuum-size=500M'",
+            manual,
+            "sudo '/usr/bin/systemd-tmpfiles' '--clean' '--prefix=/tmp' '--prefix=/var/tmp'",
+        ]),
+        "{v}"
+    );
     assert!(real(&t, CORE).exists());
+}
+
+/// Swaps the coredump for a symlink to `<root>/precious` after the scan
+/// and confirmation, before anything executes (a debug-only test hook).
+fn swap_hook() -> String {
+    format!("rm -f \"$CRUMBS_ROOT{CORE}\"; ln -s \"$CRUMBS_ROOT/precious\" \"$CRUMBS_ROOT{CORE}\"")
 }
 
 #[test]
 fn clean_system_coredump_swapped_refused() {
-    // The journal query runs during the scan, after the coredump scanner has
-    // fingerprinted the file (it waits); it then swaps the file for a
-    // symlink to a precious one, as an attacker could before the batch.
-    let hook = format!("sleep 1; rm -f \"$root{CORE}\"; ln -s \"$root/precious\" \"$root{CORE}\";");
-    let t = system_fixture(&hook);
+    let t = system_fixture("");
     t.write("/precious", b"keep me");
-    let (code, stdout, stderr) = run_out(sh_runner(&t).args(["clean", "--system", "--yes"]));
+    let (code, stdout, stderr) = run_out(
+        sh_runner(&t)
+            .env("CRUMBS_TEST_BEFORE_EXECUTE", swap_hook())
+            .args(["clean", "--system", "--yes"]),
+    );
     assert_eq!(code, 3, "{stdout}{stderr}");
-    assert!(stdout.contains("✗"), "{stdout}");
+    let line = stdout
+        .lines()
+        .find(|l| l.starts_with('✗') && l.contains("core.foo"))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert!(
+        line.contains("symlink") || line.contains("changed"),
+        "{line}"
+    );
     // No rm step ran, and nothing was deleted through the link.
     assert!(
         recorded(&t, "/rm-args").is_none(),
@@ -2762,6 +2777,56 @@ fn clean_system_coredump_swapped_refused() {
     assert_eq!(std::fs::read(real(&t, "/precious")).unwrap(), b"keep me");
     // The other items in the batch still ran.
     assert_eq!(recorded(&t, "/paccache-args").as_deref(), Some("-rk2\n"));
+}
+
+#[test]
+fn clean_system_manual_commands_exclude_refused_actions() {
+    let t = system_fixture("");
+    t.write("/precious", b"keep me");
+    let out = crumbs(&t)
+        .env("CRUMBS_TEST_PRIV_RUNNER", "deny")
+        .env("CRUMBS_TEST_BEFORE_EXECUTE", swap_hook())
+        .args(["clean", "--system", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(5));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    // Only what failed for lack of rights; the swapped coredump was refused
+    // by the check and is not offered as a command to run by hand.
+    assert_eq!(
+        v["data"]["manual_commands"],
+        serde_json::json!([
+            "sudo '/usr/bin/paccache' '-rk2'",
+            "sudo '/usr/bin/journalctl' '--vacuum-size=500M'",
+            "sudo '/usr/bin/systemd-tmpfiles' '--clean' '--prefix=/tmp' '--prefix=/var/tmp'",
+        ]),
+        "{v}"
+    );
+    assert_eq!(std::fs::read(real(&t, "/precious")).unwrap(), b"keep me");
+}
+
+#[test]
+fn named_category_of_the_other_kind_is_usage_error() {
+    let t = system_fixture("");
+    let cases: [(&[&str], &str); 4] = [
+        (&["clean", "--user", "journal", "--dry-run"], "--user"),
+        (&["clean", "--system", "cache", "--dry-run"], "--system"),
+        (&["scan", "--user", "--category", "journal"], "--user"),
+        (&["scan", "--system", "--category", "cache"], "--system"),
+    ];
+    for (args, flag) in cases {
+        let (code, _, stderr) = run_out(crumbs(&t).args(args));
+        assert_eq!(code, 2, "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("category") && stderr.contains(&format!("cannot be used with {flag}")),
+            "{args:?}: {stderr}"
+        );
+    }
+    // The same kind is fine.
+    crumbs(&t)
+        .args(["clean", "--system", "journal", "--dry-run"])
+        .assert()
+        .code(0);
 }
 
 #[test]

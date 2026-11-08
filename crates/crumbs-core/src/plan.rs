@@ -222,9 +222,10 @@ pub const NOTE_PERMANENT_TRASH: &str = "permanently delete (emptying the trash)"
 
 /// Builds a plan for `clean` from scanned items. Trash items are trashed
 /// (deleted with `--permanent`), delete items are always deleted, command
-/// items become `UserCommand` and privileged items `PrivilegedCommand`. A `UserTemp` or `HomeTrash` item may only be
-/// deleted, never trashed. Extra paths (a trashed entry's `.trashinfo`) are
-/// deleted right after their item and depend on it.
+/// items become `UserCommand` and privileged items `PrivilegedCommand`. A
+/// `UserTemp` or `HomeTrash` item may only be deleted, never trashed. Extra
+/// paths (a trashed entry's `.trashinfo`) are deleted right after their item
+/// and depend on it.
 pub fn build_clean_plan(
     _env: &Env,
     items: &[BloatItem],
@@ -237,42 +238,24 @@ pub fn build_clean_plan(
             what: format!("clean item {}", item.label),
             message: message.into(),
         };
-        if let ItemAction::Command { program, args } = &item.action {
-            actions.push(PlannedAction {
-                action: Action::UserCommand {
-                    program: program.clone(),
-                    args: args.clone(),
-                },
-                size: item.size.unwrap_or(0),
-                fingerprint: Fingerprint {
-                    dev: 0,
-                    ino: 0,
-                    is_symlink: false,
-                    ctime: 0,
-                    ctime_nsec: 0,
-                },
-                scope: item.scope,
-                depends_on: None,
-                reason,
-            });
-            continue;
-        }
-        if let ItemAction::Privileged { program, args } = &item.action {
+        let command = match &item.action {
+            ItemAction::Command { program, args } => Some(Action::UserCommand {
+                program: program.clone(),
+                args: args.clone(),
+            }),
             // Run as root in the run's one batch; the executor resolves the
             // bare program name from the trusted directories.
+            ItemAction::Privileged { program, args } => Some(Action::PrivilegedCommand {
+                program: program.clone(),
+                args: args.clone(),
+            }),
+            ItemAction::Trash | ItemAction::Delete => None,
+        };
+        if let Some(action) = command {
             actions.push(PlannedAction {
-                action: Action::PrivilegedCommand {
-                    program: program.clone(),
-                    args: args.clone(),
-                },
+                action,
                 size: item.size.unwrap_or(0),
-                fingerprint: Fingerprint {
-                    dev: 0,
-                    ino: 0,
-                    is_symlink: false,
-                    ctime: 0,
-                    ctime_nsec: 0,
-                },
+                fingerprint: Fingerprint::default(),
                 scope: item.scope,
                 depends_on: None,
                 reason,

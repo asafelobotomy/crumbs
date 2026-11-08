@@ -251,7 +251,7 @@ fn is_excluded(cfg: &Config, path: &Path) -> bool {
         .any(|pat| glob_match(pat, &text) || could_match_below(pat, &text))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Fingerprint {
     pub dev: u64,
     pub ino: u64,

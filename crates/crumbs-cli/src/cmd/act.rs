@@ -391,6 +391,7 @@ pub fn apply(
         }
     }
 
+    before_execute_hook(env);
     let reports = run_plans(env, cfg, &plans, &privilege);
     let all_ok = reports
         .iter()
@@ -458,7 +459,26 @@ fn run_plans(
         .collect()
 }
 
-/// The manual commands for the privileged actions that did not succeed.
+/// Debug builds under a fake root only: runs `CRUMBS_TEST_BEFORE_EXECUTE`
+/// with `/bin/sh` after the preview and confirmation and before anything
+/// executes, so a test can change the files between scan and execute.
+fn before_execute_hook(env: &Env) {
+    #[cfg(debug_assertions)]
+    if env.root != Path::new("/")
+        && let Some(script) = std::env::var_os("CRUMBS_TEST_BEFORE_EXECUTE")
+    {
+        let _ = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .status();
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = env;
+}
+
+/// The manual commands for the privileged actions that did not run because
+/// administrator rights were missing. An action refused for another reason
+/// (a file that changed since the scan) is not among them.
 fn failed_privileged(env: &Env, plans: &[&Plan], reports: &[Option<ExecReport>]) -> Vec<String> {
     let failed = plans
         .iter()
@@ -468,7 +488,7 @@ fn failed_privileged(env: &Env, plans: &[&Plan], reports: &[Option<ExecReport>])
             p.actions
                 .iter()
                 .zip(&r.results)
-                .filter(|(_, res)| !res.ok)
+                .filter(|(_, res)| res.rights_missing)
                 .map(|(pa, _)| pa)
         });
     manual_commands(env, failed)

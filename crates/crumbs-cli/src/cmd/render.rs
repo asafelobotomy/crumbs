@@ -103,7 +103,7 @@ fn also_removed(a: &Action) -> Option<String> {
 }
 
 pub const NOTE_PRIVILEGED: &str =
-    "packages are removed with administrator rights; you will be asked once";
+    "these steps run with administrator rights; you will be asked once";
 
 fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })

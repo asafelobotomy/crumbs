@@ -13,6 +13,23 @@ use super::render::sanitise;
 use crate::output::{ErrorEntry, fmt_size, print_json_entries, print_table_with_details};
 
 pub const USER_AND_SYSTEM: &str = "use either --user or --system";
+
+/// A named category that contradicts `--user` or `--system`, as the usage
+/// error to print; `None` when the flags and names agree.
+pub fn cross_kind(categories: &[Category], user: bool, system: bool) -> Option<String> {
+    let bad = categories
+        .iter()
+        .find(|c| (user && c.system()) || (system && !c.system()))?;
+    let (flag, kind) = if bad.system() {
+        ("--user", "system")
+    } else {
+        ("--system", "user")
+    };
+    Some(format!(
+        "category '{}' is a {kind} category and cannot be used with {flag}",
+        bad.as_str()
+    ))
+}
 const OFF_NOTE: &str = "off (enable with --category or config)";
 
 #[derive(Args, Debug)]
@@ -47,10 +64,15 @@ fn skipped(category: Category) -> CategoryReport {
 }
 
 pub fn run(env: &Env, args: &ScanArgs) -> anyhow::Result<ExitCode> {
-    if args.user && args.system {
-        writeln!(anstream::stderr().lock(), "error: {USER_AND_SYSTEM}")?;
+    let usage = if args.user && args.system {
+        Some(USER_AND_SYSTEM.to_string())
+    } else {
+        cross_kind(&args.categories, args.user, args.system)
+    };
+    if let Some(msg) = usage {
+        writeln!(anstream::stderr().lock(), "error: {msg}")?;
         if args.json {
-            let entry = [ErrorEntry::new("cli", USER_AND_SYSTEM.into())];
+            let entry = [ErrorEntry::new("cli", msg)];
             print_json_entries("scan", &serde_json::Value::Null, &entry)?;
         }
         return Ok(ExitCode::from(2));

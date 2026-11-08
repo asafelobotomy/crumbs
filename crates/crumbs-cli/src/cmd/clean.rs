@@ -14,7 +14,7 @@ use serde_json::json;
 use super::act::{ActFlags, Out, Target, apply, precheck, refuse_failed};
 use super::context::{ScanSetup, print_notes};
 use super::render::sanitise;
-use super::scan::USER_AND_SYSTEM;
+use super::scan::{USER_AND_SYSTEM, cross_kind};
 use crate::output::{ErrorEntry, fmt_size, print_json_entries};
 use crate::prompt;
 
@@ -43,6 +43,9 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
     };
     if args.user && args.system {
         return out.fail(2, USER_AND_SYSTEM);
+    }
+    if let Some(msg) = cross_kind(&args.categories, args.user, args.system) {
+        return out.fail(2, &msg);
     }
     if let Some(code) = precheck(out, act)? {
         return Ok(code);

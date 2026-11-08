@@ -35,6 +35,11 @@ pub struct ActionResult {
     pub ok: bool,
     pub error: Option<String>,
     pub history_id: String,
+    /// A privileged step that never got administrator rights (none to
+    /// ask for, or the prompt was dismissed). False for an action refused
+    /// before the batch or one that ran and failed. Not part of the JSON.
+    #[serde(skip)]
+    pub rights_missing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -270,6 +275,8 @@ struct Attempt {
     argv: Option<Vec<String>>,
     packages: Option<Vec<(String, String)>>,
     outcome: Result<Done, String>,
+    /// See [`ActionResult::rights_missing`].
+    rights_missing: bool,
 }
 
 impl Attempt {
@@ -279,6 +286,7 @@ impl Attempt {
             argv: None,
             packages: None,
             outcome: Ok(Done::default()),
+            rights_missing: false,
         }
     }
 }
@@ -354,8 +362,14 @@ fn run_privileged(
             attempts[k][j].1.outcome = Err(msg.to_string());
         }
     };
+    let mark_missing = |attempts: &mut Vec<Vec<(usize, Attempt)>>| {
+        for &(k, j) in &stepped {
+            attempts[k][j].1.rights_missing = true;
+        }
+    };
     let Some(esc) = esc else {
         fail_all(&mut attempts, NO_ESCALATION);
+        mark_missing(&mut attempts);
         for &(k, _) in &stepped {
             failed[k] = true;
         }
@@ -385,10 +399,11 @@ fn run_privileged(
         }
     };
     for (&(k, j), end) in stepped.iter().zip(ends) {
+        let (i, attempt) = &mut attempts[k][j];
         if matches!(end, StepEnd::NotRun(_)) {
             failed[k] = true;
+            attempt.rights_missing = true;
         }
-        let (i, attempt) = &mut attempts[k][j];
         let action = &plans[k].actions[*i].action;
         attempt.outcome = match action {
             Action::PackageRemove { .. } => check_packages(env, action, end, post_check, attempt),
@@ -595,6 +610,7 @@ fn record(env: &Env, plan: &Plan, batch: &str, i: usize, attempt: Attempt) -> Ac
         ok,
         error,
         history_id: id,
+        rights_missing: attempt.rights_missing,
     }
 }
 
