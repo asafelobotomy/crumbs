@@ -48,6 +48,11 @@ pub struct ExecReport {
     pub results: Vec<ActionResult>,
     pub freed: u64,
     pub escalation_failed: bool,
+    /// The privileged batch ran but stopped before its last step (some
+    /// markers came back, then none). Not part of the JSON: the results
+    /// carry [`STOPPED_DURING`] and [`STOPPED_BEFORE`].
+    #[serde(skip)]
+    pub batch_stopped: bool,
 }
 
 /// What a successful action leaves for the history entry.
@@ -60,8 +65,14 @@ struct Done {
 /// Why every privileged action failed when no escalation program exists.
 pub const NO_ESCALATION: &str =
     "no way to get administrator rights (install systemd ≥ 256, polkit or sudo)";
-/// Why a privileged step failed when its marker never came back.
+/// Why a privileged step failed when no marker came back at all.
 pub const ESCALATION_DENIED: &str = "privilege escalation was cancelled or denied";
+/// Why the first step without a marker failed when earlier steps had
+/// theirs: the root shell ended (was killed) while this step ran.
+pub const STOPPED_DURING: &str =
+    "the privileged run stopped during this step; it may have partly run";
+/// Why a step after [`STOPPED_DURING`]'s failed.
+pub const STOPPED_BEFORE: &str = "not run: the privileged run stopped";
 
 /// Reports which of `names` are still installed from `source`, after a
 /// `PackageRemove` claimed success.
@@ -111,8 +122,10 @@ pub fn execute_with(
 /// is left out of it. No script runs when nothing is left, and a privileged
 /// action that depends on another action is skipped (the batch runs before
 /// everything else). A step's marker with status 0 is success; any other
-/// status fails with the step's last output line; a missing marker means
-/// the escalation was cancelled or denied. Every `PackageRemove` that was
+/// status fails with the step's last output line. No marker at all means
+/// the escalation was cancelled or denied; markers that stop part-way mean
+/// the root shell was stopped ([`STOPPED_DURING`] for the step it was in,
+/// [`STOPPED_BEFORE`] after it, and `batch_stopped`). Every `PackageRemove` that was
 /// sent to the script is re-checked with `post_check`, whatever its step
 /// said: it succeeds only if the step did and nothing is still installed,
 /// its error lists what was removed and what is still installed, and its
@@ -130,7 +143,7 @@ pub fn execute_with(
 /// other entries are unaffected. Results are in plan order.
 ///
 /// `escalation_failed` is set when privileged steps were due but `esc` is
-/// `None`, or a step's marker never came back.
+/// `None`, or no step's marker came back.
 pub fn execute_full(
     env: &Env,
     cfg: &Config,
@@ -180,6 +193,7 @@ fn run_one(
             results: Vec::new(),
             freed: 0,
             escalation_failed: false,
+            batch_stopped: false,
         })
 }
 
@@ -215,7 +229,7 @@ fn run_plans(
     post_check: Option<&PostCheck<'_>>,
 ) -> Vec<ExecReport> {
     let batches = batch_ids(env, plans.len());
-    let (attempts, failed) = run_privileged(env, cfg, plans, priv_runner, esc, post_check);
+    let (attempts, failed, stopped) = run_privileged(env, cfg, plans, priv_runner, esc, post_check);
     let mut results: Vec<Vec<Option<ActionResult>>> =
         plans.iter().map(|p| vec![None; p.actions.len()]).collect();
     let mut freed = vec![0u64; plans.len()];
@@ -267,6 +281,7 @@ fn run_plans(
             results: results.iter().flatten().cloned().collect(),
             freed: freed[k],
             escalation_failed: failed[k],
+            batch_stopped: stopped[k],
         });
     }
     reports
@@ -316,9 +331,19 @@ fn verify_path(
         .and_then(|()| recheck_scope(env, cfg, pa.scope, path))
 }
 
+/// Per plan, its privileged attempts with their action indices.
+type PlanAttempts = Vec<Vec<(usize, Attempt)>>;
+
 /// Runs the privileged actions of every plan as one batch; returns, per
-/// plan, their attempts in plan order (with action indices), and per plan
-/// whether its escalation failed.
+/// plan, their attempts in plan order (with action indices), whether its
+/// escalation failed, and whether the batch stopped part-way through its
+/// steps.
+///
+/// No marker at all means the escalation was cancelled or denied: every
+/// step is not run, for lack of rights. When some markers came back and
+/// then none, the root shell ran and was stopped: the first step without a
+/// marker gets [`STOPPED_DURING`], the later ones [`STOPPED_BEFORE`]; that
+/// is not an escalation failure, and no rights were missing.
 fn run_privileged(
     env: &Env,
     cfg: &Config,
@@ -326,9 +351,10 @@ fn run_privileged(
     priv_runner: &dyn PrivilegedRunner,
     esc: Option<&Escalation>,
     post_check: Option<&PostCheck<'_>>,
-) -> (Vec<Vec<(usize, Attempt)>>, Vec<bool>) {
-    let mut attempts: Vec<Vec<(usize, Attempt)>> = plans.iter().map(|_| Vec::new()).collect();
+) -> (PlanAttempts, Vec<bool>, Vec<bool>) {
+    let mut attempts: PlanAttempts = plans.iter().map(|_| Vec::new()).collect();
     let mut failed = vec![false; plans.len()];
+    let mut stopped = vec![false; plans.len()];
     let mut steps: Vec<Step> = Vec::new();
     // (plan, index into `attempts[plan]`) of the actions that became
     // `steps`, in order.
@@ -365,7 +391,7 @@ fn run_privileged(
         }
     }
     if steps.is_empty() {
-        return (attempts, failed);
+        return (attempts, failed, stopped);
     }
     let fail_all = |attempts: &mut Vec<Vec<(usize, Attempt)>>, msg: &str| {
         for &(k, j) in &stepped {
@@ -383,23 +409,29 @@ fn run_privileged(
         for &(k, _) in &stepped {
             failed[k] = true;
         }
-        return (attempts, failed);
+        return (attempts, failed, stopped);
     };
     let script = match build_script(&steps) {
         Ok(s) => s,
         Err(e) => {
             fail_all(&mut attempts, &e.to_string());
-            return (attempts, failed);
+            return (attempts, failed, stopped);
         }
     };
     let ends: Vec<StepEnd> = match priv_runner.run(esc, &script) {
         Ok(stdout) => {
             let outcomes = parse_markers(&stdout, steps.len());
+            // Markers come back in order, so this is how many steps ended.
+            let ended = outcomes.iter().take_while(|o| o.status.is_some()).count();
             (0..steps.len())
                 .map(|n| match outcomes.get(n).map(|o| (o.status, o)) {
                     Some((Some(0), _)) => StepEnd::Succeeded,
                     Some((Some(status), o)) => StepEnd::Exited(status, last_line(&o.output)),
-                    Some((None, _)) | None => StepEnd::NotRun(ESCALATION_DENIED.into()),
+                    Some((None, _)) | None if ended == 0 => {
+                        StepEnd::NotRun(ESCALATION_DENIED.into())
+                    }
+                    Some((None, _)) | None if n == ended => StepEnd::Stopped(STOPPED_DURING),
+                    Some((None, _)) | None => StepEnd::Stopped(STOPPED_BEFORE),
                 })
                 .collect()
         }
@@ -410,9 +442,13 @@ fn run_privileged(
     };
     for (&(k, j), end) in stepped.iter().zip(ends) {
         let (i, attempt) = &mut attempts[k][j];
-        if matches!(end, StepEnd::NotRun(_)) {
-            failed[k] = true;
-            attempt.rights_missing = true;
+        match end {
+            StepEnd::NotRun(_) => {
+                failed[k] = true;
+                attempt.rights_missing = true;
+            }
+            StepEnd::Stopped(_) => stopped[k] = true,
+            StepEnd::Succeeded | StepEnd::Exited(..) => {}
         }
         let action = &plans[k].actions[*i].action;
         attempt.outcome = match action {
@@ -423,10 +459,11 @@ fn run_privileged(
                     Err(line.unwrap_or_else(|| format!("exited with status {status}")))
                 }
                 StepEnd::NotRun(msg) => Err(msg),
+                StepEnd::Stopped(msg) => Err(msg.into()),
             },
         };
     }
-    (attempts, failed)
+    (attempts, failed, stopped)
 }
 
 /// How a batch step ended.
@@ -435,8 +472,10 @@ enum StepEnd {
     Succeeded,
     /// A non-zero status, with the step's last output line.
     Exited(i32, Option<String>),
-    /// No marker came back; why.
+    /// No marker came back (nor any other); why.
     NotRun(String),
+    /// No marker came back after earlier steps' did: the batch stopped.
+    Stopped(&'static str),
 }
 
 /// A `PackageRemove`'s outcome once its step ran (or should have): the
@@ -474,6 +513,7 @@ fn check_packages(
             }
             StepEnd::Exited(status, line) => Err(exit_message(program, status, line)),
             StepEnd::NotRun(msg) => Err(msg),
+            StepEnd::Stopped(msg) => Err(msg.into()),
         };
     };
     let still = match post_check(env, *source, names) {
@@ -485,6 +525,7 @@ fn check_packages(
                 StepEnd::Succeeded => {}
                 StepEnd::Exited(status, line) => parts.push(exit_message(program, status, line)),
                 StepEnd::NotRun(msg) => parts.push(msg),
+                StepEnd::Stopped(msg) => parts.push(msg.into()),
             }
             parts.push(format!("could not verify removal: {reason}"));
             return Err(parts.join("; "));
@@ -501,6 +542,7 @@ fn check_packages(
         StepEnd::Succeeded => {}
         StepEnd::Exited(status, line) => parts.push(exit_message(program, status, line)),
         StepEnd::NotRun(msg) => parts.push(msg),
+        StepEnd::Stopped(msg) => parts.push(msg.into()),
     }
     let ok = parts.is_empty() && still.is_empty();
     if !ok && !removed.is_empty() {

@@ -2858,3 +2858,104 @@ fn clean_default_still_user_only() {
     }
     assert!(stdout.lines().any(|l| l.starts_with("cache")), "{stdout}");
 }
+
+#[test]
+fn clean_system_batch_stopped_part_way_exit_3() {
+    let t = system_fixture("");
+    // The batch's steps: paccache, journalctl, rm (the core dump), tmpfiles;
+    // the root shell ends during the third.
+    let (code, stdout, stderr) = run_out(
+        crumbs(&t)
+            .env("CRUMBS_TEST_PRIV_RUNNER", "partial:2")
+            .args(["clean", "--system", "--yes"]),
+    );
+    assert_eq!(code, 3, "{stdout}{stderr}");
+    assert!(
+        !stderr.contains("nothing that needs them was changed"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("error: the privileged run stopped before it finished"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("to do it yourself"), "{stderr}");
+    assert!(
+        stdout.contains("the privileged run stopped during this step; it may have partly run"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("not run: the privileged run stopped"),
+        "{stdout}"
+    );
+    assert_eq!(recorded(&t, "/paccache-args").as_deref(), Some("-rk2\n"));
+    assert!(recorded(&t, "/journal-args").is_some());
+    assert!(recorded(&t, "/tmpfiles-args").is_none());
+    assert!(real(&t, CORE).exists());
+    // The history records what ran and what did not.
+    let h = history_json(&t).to_string();
+    assert!(h.contains("paccache"), "{h}");
+    assert!(h.contains("it may have partly run"), "{h}");
+    assert!(h.contains("not run: the privileged run stopped"), "{h}");
+    // JSON: the same exit, a cli error, and no manual commands.
+    let t = system_fixture("");
+    let out = crumbs(&t)
+        .env("CRUMBS_TEST_PRIV_RUNNER", "partial:1")
+        .args(["clean", "--system", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["data"].get("manual_commands").is_none(), "{v}");
+    let results = &v["data"]["report"][0]["results"];
+    assert_eq!(results[0]["ok"], true, "{v}");
+    assert_eq!(results[1]["ok"], false, "{v}");
+    let errors = v["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(|e| e["source"] == "cli"
+            && e["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("the privileged run stopped")),
+        "{v}"
+    );
+}
+
+#[test]
+fn clean_user_and_system_categories_in_one_run() {
+    let t = system_fixture("");
+    t.write("/home/user/.cache/foo/blob", &[b'y'; 9000]);
+    let (code, stdout, stderr) =
+        run_out(sh_runner(&t).args(["clean", "cache", "pkg-cache", "--yes"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        stderr.matches("crumbs-test: privileged batch").count(),
+        1,
+        "{stderr}"
+    );
+    assert_eq!(recorded(&t, "/paccache-args").as_deref(), Some("-rk2\n"));
+    assert!(!real(&t, "/home/user/.cache/foo").exists());
+    assert!(!trash_files(&t).is_empty(), "the cache went to the trash");
+    // Unnamed system categories did not run.
+    assert!(recorded(&t, "/journal-args").is_none());
+    assert!(real(&t, CORE).exists());
+}
+
+#[test]
+fn clean_user_and_system_without_rights_changes_nothing_exit_5() {
+    let t = system_fixture("");
+    t.write("/home/user/.cache/foo/blob", &[b'y'; 9000]);
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["clean", "cache", "pkg-cache", "--yes"]));
+    assert_eq!(code, 5, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("no way to get administrator rights"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("sudo '/usr/bin/paccache' '-rk2'"),
+        "{stderr}"
+    );
+    // The whole run stops before anything executes: user items too.
+    assert!(real(&t, "/home/user/.cache/foo/blob").exists());
+    assert!(trash_files(&t).is_empty());
+    assert!(recorded(&t, "/paccache-args").is_none());
+}

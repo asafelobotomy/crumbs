@@ -52,6 +52,8 @@ pub const NON_INTERACTIVE: &str = "refusing to act without --yes in a non-intera
 pub const NO_RIGHTS: &str = "no way to get administrator rights";
 pub const NOT_GRANTED: &str =
     "administrator rights were not granted; nothing that needs them was changed";
+pub const BATCH_STOPPED: &str = "the privileged run stopped before it finished; \
+     the step it was in may have partly run, and the steps after it did not run";
 /// Exit code when administrator rights were needed but not available.
 const EXIT_NO_RIGHTS: u8 = 5;
 
@@ -412,11 +414,21 @@ pub fn apply(
         .flatten()
         .all(|r| r.results.iter().all(|x| x.ok));
     let not_granted = reports.iter().flatten().any(|r| r.escalation_failed);
+    // The root shell ran and was stopped part-way: some privileged steps
+    // ran, so this is not "nothing changed"; the results say which.
+    let stopped = reports.iter().flatten().any(|r| r.batch_stopped);
     if act.json {
         let data = json!({ "plans": plans, "report": reports });
         if not_granted {
             let manual = failed_privileged(env, &plans, &reports);
             return out.no_rights(NOT_GRANTED, &manual, data, errors);
+        }
+        if stopped {
+            let mut all = errors.to_vec();
+            all.push(ErrorEntry::new("cli", BATCH_STOPPED.to_string()));
+            writeln!(anstream::stderr().lock(), "error: {BATCH_STOPPED}")?;
+            print_json_entries(out.command, &data, &all)?;
+            return Ok(ExitCode::from(3));
         }
         print_json_entries(out.command, &data, errors)?;
     } else {
@@ -430,6 +442,10 @@ pub fn apply(
         if not_granted {
             let manual = failed_privileged(env, &plans, &reports);
             return out.no_rights(NOT_GRANTED, &manual, serde_json::Value::Null, errors);
+        }
+        if stopped {
+            writeln!(anstream::stderr().lock(), "error: {BATCH_STOPPED}")?;
+            return Ok(ExitCode::from(3));
         }
     }
     Ok(ExitCode::from(if all_ok { 0 } else { 3 }))
@@ -529,8 +545,9 @@ impl Privilege {
     /// `CRUMBS_ALLOW_REAL_ESCALATION=1`. Under a fake root (`CRUMBS_ROOT`)
     /// only, `CRUMBS_TEST_PRIV_RUNNER=sh` runs the batch with `/bin/sh` as
     /// the current user (`deny`: nothing runs, as when the prompt is
-    /// dismissed); on the real root it is ignored. Release builds ignore
-    /// both.
+    /// dismissed; `partial:<n>`: like `sh`, but the shell stops before step
+    /// `n`, as if it were killed); on the real root it is ignored. Release
+    /// builds refuse to start when `CRUMBS_TEST_*` is set.
     fn for_run(env: &Env, needed: bool) -> Privilege {
         let system =
             || -> Box<dyn PrivilegedRunner> { Box::new(SystemPrivilegedRunner::new(&env.root)) };
@@ -598,6 +615,37 @@ mod test_runner {
         }
     }
 
+    /// [`Sh`] on the script cut just before step `n`'s line: the shell
+    /// ends after `n` steps, as if it had been killed during step `n`.
+    struct Partial(usize);
+
+    impl PrivilegedRunner for Partial {
+        fn run(&self, esc: &Escalation, script: &[u8]) -> Result<Vec<u8>, CoreError> {
+            let mut cut = Vec::new();
+            for line in script.split_inclusive(|&b| b == b'\n') {
+                if step_index(line) == Some(self.0) {
+                    break;
+                }
+                cut.extend_from_slice(line);
+            }
+            Sh.run(esc, &cut)
+        }
+    }
+
+    /// The index of a step line (`__c <i> …` or `__t<n> <i> …`).
+    fn step_index(line: &[u8]) -> Option<usize> {
+        let mut words = line.split(|&b| b == b' ');
+        let first = words.next()?;
+        let is_step = first == b"__c"
+            || first
+                .strip_prefix(b"__t")
+                .is_some_and(|n| !n.is_empty() && n.iter().all(u8::is_ascii_digit));
+        if !is_step {
+            return None;
+        }
+        std::str::from_utf8(words.next()?).ok()?.parse().ok()
+    }
+
     /// Runs nothing and prints nothing, like a dismissed prompt.
     struct Deny;
 
@@ -617,7 +665,10 @@ mod test_runner {
         match value? {
             "sh" => Some(Box::new(Sh)),
             "deny" => Some(Box::new(Deny)),
-            _ => None,
+            v => {
+                let n = v.strip_prefix("partial:")?.parse().ok()?;
+                Some(Box::new(Partial(n)))
+            }
         }
     }
 
@@ -641,7 +692,19 @@ mod test_runner {
             assert!(select(fake, Some("sh")).is_some());
             assert!(select(fake, Some("deny")).is_some());
             assert!(select(fake, Some("other")).is_none());
+            assert!(select(fake, Some("partial:2")).is_some());
+            assert!(select(fake, Some("partial:x")).is_none());
+            assert!(select(std::path::Path::new("/"), Some("partial:1")).is_none());
             assert!(select(fake, None).is_none());
+        }
+
+        #[test]
+        fn step_index_reads_step_lines_only() {
+            assert_eq!(step_index(b"__c 3 '/usr/bin/true'\n"), Some(3));
+            assert_eq!(step_index(b"__t12 40 'x'\n"), Some(40));
+            assert_eq!(step_index(b"__t0() { __c \"$1\" 'x' \"$2\"; }\n"), None);
+            assert_eq!(step_index(b"__c() { __i=$1; }\n"), None);
+            assert_eq!(step_index(b"export PATH=/usr/bin\n"), None);
         }
     }
 }
@@ -706,6 +769,16 @@ mod signals {
             fn raise(sig: c_int) -> c_int;
         }
 
+        /// Signal dispositions are process-wide and tests run in parallel:
+        /// every test that changes them holds this.
+        static SIGNAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        fn lock() -> std::sync::MutexGuard<'static, ()> {
+            SIGNAL_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
         /// The disposition of `sig`, briefly set to ignored to read it.
         fn current(sig: c_int) -> usize {
             // SAFETY: puts the old disposition straight back.
@@ -718,6 +791,7 @@ mod signals {
 
         #[test]
         fn held_signals_do_not_end_the_process() {
+            let _guard = lock();
             let before = current(SIGINT);
             let held = hold();
             // SAFETY: SIGINT and SIGQUIT have the no-op handler now.
@@ -729,6 +803,7 @@ mod signals {
 
         #[test]
         fn ignored_signal_stays_ignored() {
+            let _guard = lock();
             // SAFETY: sets SIGQUIT to ignored, restored at the end.
             let original = unsafe { signal(SIGQUIT, SIG_IGN) };
             let held = hold();

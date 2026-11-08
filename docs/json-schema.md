@@ -65,7 +65,7 @@ The exit code tells you which kind of failure it was (see below). `apps show` re
 | 0 | Success (including a dry run and "nothing to do"). |
 | 1 | Error, or `uninstall`/`orphans --clean`/`clean` refused because a source or scanner failed (override with `--force`) or an app is running, or `uninstall` refused an AppImage whose file fails the safety checks, or refused a package removal: pacman's simulation refused it (for example it would break a dependency), the pacman database is locked (`pacman is busy (database lock present)`), or the name is not a plain package name. |
 | 2 | Usage error: bad flags, a missing package tool (`pacman is not installed` when removing a pacman app), an unknown category name, `--user` together with `--system`, a named category of the other kind (`clean cache --system`, `scan --user --category journal`), ambiguous or not-found app, `--json` without `--yes` or `--dry-run`, a destructive command run non-interactively without `--yes`, removing an unmanaged app without `--leftovers-only`, or `restore` with no selector matching any history entry. |
-| 3 | Partial failure: some source failed while another worked, some actions/restores failed (privileged ones included, when administrator rights were granted but a step failed), or (`scan`) some category's scanner failed. |
+| 3 | Partial failure: some source failed while another worked, some actions/restores failed (privileged ones included, when administrator rights were granted but a step failed, or the privileged run stopped part-way), or (`scan`) some category's scanner failed. |
 | 4 | Aborted by the user at a prompt. |
 | 5 | Administrator rights were needed and not available: no escalation program (`run0` on systemd 256 or newer, `pkexec`, or `sudo` on a terminal) was found, or the prompt was cancelled or denied. Nothing that needs those rights was changed. The human output lists the commands to run by hand, and `--json` carries them in `data.manual_commands` (see `uninstall`). |
 
@@ -369,7 +369,7 @@ Orphans are never `high`:
 
 `freed` is the sum of the `size` of every action that succeeded. As in M2 it counts bytes moved to the trash as well as bytes deleted: a trashed item still takes disk space until the trash is emptied. Read it as "removed from where it was", not as "returned to the filesystem". An action skipped because the action it `depends_on` failed has `ok` false and the `error` text `skipped: <path> was not removed`.
 
-`escalation_failed` is `true` when a privileged step never got administrator rights: no escalation program was available, or the prompt was cancelled or denied. Those steps have `ok` false and the `error` `privilege escalation was cancelled or denied` or `no way to get administrator rights (install systemd ≥ 256, polkit or sudo)`. It is `false` for a step that ran and failed, and for an action refused before the batch (for example a system file that changed since the scan).
+`escalation_failed` is `true` when a privileged step never got administrator rights: no escalation program was available, or the prompt was cancelled or denied. Those steps have `ok` false and the `error` `privilege escalation was cancelled or denied` or `no way to get administrator rights (install systemd ≥ 256, polkit or sudo)`. It is `false` for a step that ran and failed, for an action refused before the batch (for example a system file that changed since the scan), and when the privileged run stopped part-way: some steps came back with a result, then none did (the root shell was killed). Then the step it was in has the `error` `the privileged run stopped during this step; it may have partly run`, each later step `not run: the privileged run stopped`, the exit code is 3 (not 5), there are no `manual_commands`, and the `errors` array ends with a `cli` entry `the privileged run stopped before it finished; the step it was in may have partly run, and the steps after it did not run`. Every step is recorded in the history as it ended.
 
 Exit 0 when every action succeeded, 3 when some failed, and 5 when `escalation_failed` is true in any report (see below).
 
@@ -544,7 +544,7 @@ to do it yourself, run:
 
 With `--json`, `data` is `{ "manual_commands": [...], "plans": [...], "report": null }` and the `errors` array ends with a `cli` entry whose `message` is `no way to get administrator rights`. Every privileged action of the plan is listed (a dependent leftover action is not).
 
-**(b) Prompt cancelled or denied.** An escalation program exists and ran, but no step came back with a result. The actions that depend on the privileged ones are skipped and the reports have `escalation_failed` true; the attempt is recorded in the history. The human output prints, after the report, the commands to run by hand:
+**(b) Prompt cancelled or denied.** An escalation program exists and ran, but no step came back with a result (when some did, the run stopped part-way: exit 3, see `escalation_failed` above). The actions that depend on the privileged ones are skipped and the reports have `escalation_failed` true; the attempt is recorded in the history. The human output prints, after the report, the commands to run by hand:
 
 ```
 error: administrator rights were not granted; nothing that needs them was changed
@@ -721,7 +721,7 @@ Selectors are batch IDs, entry IDs or absolute original paths. `data`: `outcomes
 | `ok` | boolean | |
 | `error` | string or null | For example `already restored`, `no matching history entry`. |
 
-A batch selector restores the batch's successful `trash` and `edit-file` entries; `delete`, `command`, `privileged-command` and `package-remove` entries are skipped, since nothing of them can be put back (an entry ID names one anyway, and its outcome says `permanently deleted; cannot be restored`, `commands cannot be undone` or `packages cannot be restored by crumbs`). A path selector names the newest successful trash entry for that path that has not been restored yet. `--dry-run` checks and reports without changing anything. Exit 0 when every outcome is `ok`; 2 when no selector matched any history entry (every outcome has an empty `entry_id`); otherwise 3.
+A batch selector restores the batch's successful `trash` and `edit-file` entries; `delete`, `command`, `privileged-command` and `package-remove` entries are skipped, since nothing of them can be put back (an entry ID names one anyway, and its outcome says `permanently deleted; cannot be restored`, `commands cannot be undone` or `packages cannot be restored by crumbs; reinstall with: pacman -S <app> && pacman -S --asdeps <deps>`, where the app is the one `app_id` names and the rest were removed with it; a removal that failed part-way still gives the commands for what it removed, prefixed with `the original removal only partly ran; `). A path selector names the newest successful trash entry for that path that has not been restored yet. `--dry-run` checks and reports without changing anything. Exit 0 when every outcome is `ok`; 2 when no selector matched any history entry (every outcome has an empty `entry_id`); otherwise 3.
 
 ```json
 {

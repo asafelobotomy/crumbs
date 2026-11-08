@@ -115,6 +115,8 @@ to do it yourself, run:
 
 With `--json` they are in `data.manual_commands`. Leftovers that depend on a removal that did not happen are left alone too, and never listed.
 
+If the root shell stops part-way (it was killed after some steps had finished), that is not exit 5: the steps that finished are reported as usual, the step it was in fails with `the privileged run stopped during this step; it may have partly run`, the later ones with `not run: the privileged run stopped`, and crumbs exits 3 with `error: the privileged run stopped before it finished; ...`. The history records what ran.
+
 Example of the preview for a pacman app (a throwaway test tree):
 
 ```
@@ -131,7 +133,7 @@ note: these steps run with administrator rights; you will be asked once
 will move 1 item (4.0 KiB) to the trash
 ```
 
-A removed package is recorded in `history`, but crumbs cannot restore packages; reinstall them with your package manager. The leftovers go to the trash as usual and `crumbs restore` brings them back.
+A removed package is recorded in `history`, but crumbs cannot restore packages; `crumbs restore <entry id>` prints the commands that reinstall what was removed (`pacman -S <app>`, and `pacman -S --asdeps <deps>` for the packages removed with it), also when the removal failed part-way. The leftovers go to the trash as usual and `crumbs restore` brings them back.
 
 ### Trash and freed space
 
@@ -170,14 +172,14 @@ Both must be at least 1; a smaller value is replaced by 1 with a warning (`confi
 
 A `..` in a `protect`, `exclude` or `appimage_dirs` entry is resolved as the system would: `/../x` is `/x`.
 
-Exit codes: 0 ok, 1 error, 2 usage error or ambiguous app, 3 partial failure, 4 aborted by the user, 5 administrator rights needed but unavailable or denied.
+Exit codes: 0 ok, 1 error, 2 usage error or ambiguous app, 3 partial failure (including a privileged run that stopped part-way), 4 aborted by the user, 5 administrator rights needed but unavailable or denied.
 
 ## Safety
 
 - **Trash first.** Files go to the freedesktop trash, not the void. Only `--permanent` deletes, and it says so in the preview. The exceptions are emptying the trash and clearing `/tmp` (`clean trash`, `clean temp`), which are always permanent and say so, as are the system categories and package removals (they run commands as root).
 - **Careful with `/tmp`.** `temp` only runs when `/tmp` is owned by root and has the sticky bit. Only your own files and folders directly in `/tmp` are considered, only when older than `temp_age_days`, and never sockets, pipes, devices, symlinks, names that look like live sessions (X, tmux, ssh, dbus, ...) or anything a running process has open. Each is checked again right before it is deleted, and `temp` refuses to run as root.
 - **Privileged steps are simulated, verified and quoted.** A pacman removal is first simulated as you with `pacman -Rs --print`; if pacman refuses (a dependency would break), crumbs refuses too. The real command then names exactly the packages the simulation showed (`-Rn --noconfirm <names>`, never `-s`), so it cannot remove more than the preview listed. A pacman database lock (`db.lck`) stops the run (`pacman is busy`) before anything is asked. Afterwards crumbs reads the pacman database again, and a package still installed is reported as a failure, whatever the command said. Every program runs by its absolute path from the system directories with a fixed `PATH` and `LD_PRELOAD`/`LD_LIBRARY_PATH` cleared, every argument is single-quoted, names are checked to be plain package or app names, and a system file is checked again right before it is deleted as root. Flatpak is always told which installation (`--user`, `--system` or `--installation=<name>`) and never `--delete-data`: an app's data in `~/.var/app/<id>` is trashed as a restorable leftover instead. In tests and fake roots crumbs never escalates at all.
-- **The history is private.** `history.jsonl` is opened without following symlinks; a symlinked directory or file is refused, and a looser mode is made owner-only (group and other bits cleared) with a warning.
+- **The history is private.** `history.jsonl` is opened without following symlinks; a symlinked directory or file is refused, and a looser mode is made owner-only (group and other bits cleared) with a warning; the owner's read and write (read, write and search for the directory) are restored when missing.
 - **Preview before anything happens.** `uninstall`, `orphans --clean` and `clean` show every path with its size and the reason it was chosen, then ask. `--dry-run` shows the plan and stops.
 - **No surprises in scripts.** Without a terminal, `--yes` is required (or `--dry-run`); `--json` needs one of the two as well.
 - **Protected paths.** crumbs refuses system locations, your home directory itself and other paths that should never be removed, re-checks every path right before acting, and skips anything that changed since the scan. Two keys in `~/.config/crumbs/config.toml` add your own (paths start with `/` or `~/`):

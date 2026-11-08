@@ -1472,20 +1472,92 @@ fn partial_markers_give_mixed_results() {
     let plan = plan_of(vec![
         priv_cmd("flatpak", &["a"]),
         priv_cmd("flatpak", &["b"]),
+        priv_cmd("flatpak", &["c"]),
     ]);
     let report = execute_full(
         &env,
         &Config::default(),
         &plan,
         &FakeRunner::new(),
-        &CannedRunner(b"|done\n@@crumbs 0 0\n".to_vec()),
+        &CannedRunner(b"|done\n@@crumbs 0 0\n|half\n".to_vec()),
         Some(&esc()),
         &no_post_check,
     );
     assert!(report.results[0].ok, "{:?}", report.results[0]);
     assert!(!report.results[1].ok);
-    assert_eq!(report.results[1].error.as_deref(), Some(ESCALATION_DENIED));
+    assert_eq!(report.results[1].error.as_deref(), Some(STOPPED_DURING));
+    assert_eq!(report.results[2].error.as_deref(), Some(STOPPED_BEFORE));
+    // The shell ran as root and was stopped: rights were not missing.
+    assert!(!report.escalation_failed);
+    assert!(report.batch_stopped);
+    assert!(report.results.iter().all(|r| !r.rights_missing));
+    // The history records what ran, and what did not.
+    let (hist, _) = read_history(&env).unwrap();
+    assert_eq!(hist.len(), 3);
+    let oks: Vec<bool> = hist.iter().map(|h| h.ok).collect();
+    assert_eq!(oks, [true, false, false]);
+}
+
+#[test]
+fn no_markers_is_a_denial() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "flatpak", &log, "", 0);
+    let env = t.env();
+    let plan = plan_of(vec![
+        priv_cmd("flatpak", &["a"]),
+        priv_cmd("flatpak", &["b"]),
+    ]);
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &CannedRunner(b"noise\n|not a marker\n".to_vec()),
+        Some(&esc()),
+        &no_post_check,
+    );
     assert!(report.escalation_failed);
+    assert!(!report.batch_stopped);
+    for r in &report.results {
+        assert_eq!(r.error.as_deref(), Some(ESCALATION_DENIED));
+        assert!(r.rights_missing);
+    }
+}
+
+#[test]
+fn stopped_package_removal_still_records_what_went() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "flatpak", &log, "", 0);
+    logging_program(&t, "pacman", &log, "", 0);
+    let env = t.env();
+    let plan = plan_of(vec![
+        priv_cmd("flatpak", &["a"]),
+        pkg_remove(&["foo", "bar"], &["1.0-1", "2.0-1"]),
+    ]);
+    // `bar` is gone, `foo` is still there: the step stopped part-way.
+    let post = |_: &Env, _: SourceKind, _: &[String]| Ok(vec!["foo".to_string()]);
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan,
+        &FakeRunner::new(),
+        &CannedRunner(b"@@crumbs 0 0\n".to_vec()),
+        Some(&esc()),
+        &post,
+    );
+    let err = report.results[1].error.as_deref().unwrap();
+    assert!(err.starts_with(STOPPED_DURING), "{err}");
+    assert!(err.contains("removed: bar"), "{err}");
+    assert!(err.contains("still installed: foo"), "{err}");
+    assert!(!report.escalation_failed);
+    let (hist, _) = read_history(&env).unwrap();
+    let text = serde_json::to_string(&hist[1]).unwrap();
+    assert!(
+        text.contains("\"packages\":[[\"bar\",\"2.0-1\"]]"),
+        "{text}"
+    );
 }
 
 #[test]
