@@ -140,10 +140,20 @@ fn expand_in_system(env: &Env, s: &str) -> PathBuf {
 }
 
 fn links(env: &Env, entry: &DesktopEntry, location: &Path, norm_name: &str) -> bool {
-    if let Some(prog) = entry.exec_program.as_deref()
-        && expand_in_system(env, prog) == location
-    {
-        return true;
+    if let Some(prog) = entry.exec_program.as_deref() {
+        let exec = expand_in_system(env, prog);
+        if exec == location {
+            return true;
+        }
+        if exec.is_absolute()
+            && let (Ok(a), Ok(b)) = (
+                env.sys(&exec.to_string_lossy()).canonicalize(),
+                env.sys(&location.to_string_lossy()).canonicalize(),
+            )
+            && a == b
+        {
+            return true;
+        }
     }
     if !entry.is_appimage_entry || norm_name.is_empty() {
         return false;

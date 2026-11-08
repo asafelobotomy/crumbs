@@ -323,6 +323,25 @@ mod tests {
     }
 
     #[test]
+    fn symlinked_exec_links_appimage_and_is_not_unmanaged() {
+        let t = FixtureTree::new();
+        pacman_db(&t);
+        t.appimage("/home/user/Applications/Foo-1.0-x86_64.AppImage");
+        t.symlink(
+            "/home/user/.local/share/foo/appimage",
+            "../../../Applications/Foo-1.0-x86_64.AppImage",
+        );
+        t.desktop(
+            "/home/user/.local/share/applications/foo.desktop",
+            "[Desktop Entry]\nType=Application\nName=Foo\nExec=~/.local/share/foo/appimage\n",
+        );
+        let inv = discover(&t.env(), &FakeRunner::new(), &ListOptions::default());
+        let ids: Vec<_> = inv.apps.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["appimage:Foo-1.0-x86_64.AppImage"]);
+        assert_eq!(inv.apps[0].desktop_ids, ["foo.desktop"]);
+    }
+
+    #[test]
     fn unmanaged_skipped_without_package_db() {
         let t = FixtureTree::new();
         t.write_exec("/opt/foo/foo", b"");

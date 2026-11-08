@@ -9,6 +9,7 @@ use crate::env::Env;
 use crate::error::CoreError;
 use crate::model::{App, Installation, SourceKind};
 
+use super::appimage::is_appimage;
 use super::{AppSource, SourceContext, SourceListing};
 
 pub struct UnmanagedSource;
@@ -60,15 +61,22 @@ fn unmanaged_app(
         || entry.no_display
         || entry.hidden
         || entry.is_appimage_entry
+        || entry.is_flatpak_entry
         || claimed.contains(&entry.id)
     {
         return None;
     }
     let program = entry.exec_program.as_deref()?;
-    if program == "flatpak" {
+    if Path::new(program)
+        .file_name()
+        .is_some_and(|n| n == "flatpak")
+    {
         return None;
     }
     let real = resolve_program(env, program)?;
+    if real.canonicalize().is_ok_and(|c| file_is_appimage(&c)) {
+        return None;
+    }
     let in_system = env.unsys(&real);
     if owned.contains(&in_system) {
         return None;
@@ -98,6 +106,15 @@ fn unmanaged_app(
     app.wm_classes.extend(entry.wm_class.clone());
     app.has_gui = true;
     Some(app)
+}
+
+fn file_is_appimage(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(16);
+    std::fs::File::open(path)
+        .and_then(|f| f.take(16).read_to_end(&mut head))
+        .is_ok()
+        && is_appimage(&head)
 }
 
 /// `/opt/<first component>` for programs under `/opt/`, else the program itself.
@@ -243,5 +260,36 @@ mod tests {
             l.apps[0].location.as_deref(),
             Some(Path::new("/home/user/tools/bar"))
         );
+    }
+
+    #[test]
+    fn flatpak_exports_excluded() {
+        let t = FixtureTree::new();
+        t.write_exec("/usr/bin/flatpak", b"");
+        t.desktop(
+            "/usr/share/applications/a.desktop",
+            &entry("/usr/bin/flatpak run --branch=stable org.x.Y"),
+        );
+        t.desktop(
+            "/usr/share/applications/b.desktop",
+            "[Desktop Entry]\nType=Application\nName=B\nExec=/opt/b/b\nX-Flatpak=org.x.Y\n",
+        );
+        t.write_exec("/opt/b/b", b"");
+        assert!(run(&t, &[], &[]).apps.is_empty());
+    }
+
+    #[test]
+    fn appimage_program_not_unmanaged() {
+        let t = FixtureTree::new();
+        t.appimage("/home/user/Applications/Foo-1.0-x86_64.AppImage");
+        t.symlink(
+            "/home/user/.local/share/foo/appimage",
+            "../../../Applications/Foo-1.0-x86_64.AppImage",
+        );
+        t.desktop(
+            "/home/user/.local/share/applications/foo.desktop",
+            &entry("~/.local/share/foo/appimage"),
+        );
+        assert!(run(&t, &[], &[]).apps.is_empty());
     }
 }

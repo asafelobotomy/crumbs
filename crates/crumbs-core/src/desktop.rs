@@ -20,6 +20,7 @@ pub struct DesktopEntry {
     pub is_application: bool,
     pub appimage_version: Option<String>,
     pub is_appimage_entry: bool,
+    pub is_flatpak_entry: bool,
 }
 
 const FIELD_CODES: &str = "fFuUdDnNickvm";
@@ -79,6 +80,7 @@ pub fn parse_desktop(id: &str, path: &Path, bytes: &[u8]) -> DesktopEntry {
         is_application: keys.get("Type") == Some(&"Application"),
         appimage_version: get("X-AppImage-Version"),
         is_appimage_entry: appimage_entry,
+        is_flatpak_entry: keys.contains_key("X-Flatpak"),
     }
 }
 
