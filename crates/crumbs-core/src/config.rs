@@ -162,7 +162,7 @@ pub fn load_config(env: &Env) -> Result<Config, CoreError> {
     };
     let journal_max = match raw.journal_max {
         None => "500M".to_string(),
-        Some(s) if journal_size_bytes(&s).is_some() => s,
+        Some(s) if journal_size_bytes(&s).is_some_and(|b| b > 0) => s,
         Some(s) => {
             warnings.push(format!(
                 "config.toml: ignoring journal_max '{s}' (use digits and an optional K, M, G or T); using 500M"
@@ -521,6 +521,11 @@ mod tests {
         let c = load_config(&t.env()).unwrap();
         assert_eq!((c.pkg_cache_keep, c.journal_max.as_str()), (0, "2G"));
         assert!(c.warnings.is_empty());
+
+        write("journal_max = \"0\"\n");
+        let c = load_config(&t.env()).unwrap();
+        assert_eq!(c.journal_max, "500M");
+        assert_eq!(c.warnings.len(), 1);
 
         write("pkg_cache_keep = -1\njournal_max = \"1.5G\"\n");
         let c = load_config(&t.env()).unwrap();

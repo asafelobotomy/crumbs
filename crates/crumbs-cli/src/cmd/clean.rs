@@ -43,6 +43,15 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
     if args.system {
         return out.fail(2, SYSTEM_UNAVAILABLE);
     }
+    if let Some(c) = args.categories.iter().find(|c| c.system()) {
+        return out.fail(
+            2,
+            &format!(
+                "category '{}' is a system category and needs --system (not available yet)",
+                c.as_str()
+            ),
+        );
+    }
     if let Some(code) = precheck(out, act)? {
         return Ok(code);
     }
@@ -52,7 +61,7 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
     let which: Vec<Category> = Category::ALL
         .into_iter()
         .filter(|c| {
-            // System categories need the privileged batch (not wired yet).
+            // System categories need --system (not wired yet).
             if c.system() {
                 return false;
             }

@@ -7,10 +7,6 @@ use crate::command::resolve_trusted;
 use crate::config::journal_size_bytes;
 use crate::error::CoreError;
 
-/// Used when the configured limit cannot be read (the loader already
-/// replaces an invalid one, but a hand-built `Config` might not).
-const DEFAULT_MAX: u64 = 500 << 20;
-
 pub struct JournalScanner;
 
 impl Scanner for JournalScanner {
@@ -28,6 +24,16 @@ impl Scanner for JournalScanner {
         let Some(journalctl) = resolve_trusted(cx.env, "journalctl") else {
             return Ok(Vec::new());
         };
+        // Fail closed: the value goes into an argument of a root command.
+        let max = journal_size_bytes(&cx.cfg.journal_max)
+            .filter(|&m| m > 0)
+            .ok_or_else(|| CoreError::Parse {
+                what: "journal_max".into(),
+                message: format!(
+                    "{:?} is not a size (digits and an optional K, M, G or T, above 0)",
+                    cx.cfg.journal_max
+                ),
+            })?;
         let out = cx.runner.run(&journalctl, &["--disk-usage"])?;
         if out.status != 0 {
             return Err(command_failed("journalctl", &out));
@@ -43,7 +49,6 @@ impl Scanner for JournalScanner {
                 what: "journalctl --disk-usage".into(),
                 message: "no `take up <size>` text".into(),
             })?;
-        let max = journal_size_bytes(&cx.cfg.journal_max).unwrap_or(DEFAULT_MAX);
         if usage <= max {
             return Ok(Vec::new());
         }

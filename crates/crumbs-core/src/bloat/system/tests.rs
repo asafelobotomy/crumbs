@@ -124,7 +124,9 @@ fn pkg_cache_without_paccache() {
     assert_eq!(i.action, priv_action("pacman", &["-Sc", "--noconfirm"]));
     assert_eq!(
         i.note.as_deref(),
-        Some("keeps only installed versions (pacman-contrib not installed)")
+        Some(
+            "keeps only installed versions and also removes unused repository sync databases (pacman-contrib not installed)"
+        )
     );
     assert!(runner.calls().is_empty());
 }
@@ -307,9 +309,16 @@ fn system_temp_item() {
     assert_eq!(rep.items.len(), 1);
     let i = &rep.items[0];
     assert_eq!(i.size, None);
-    assert_eq!(i.action, priv_action("systemd-tmpfiles", &["--clean"]));
+    assert_eq!(
+        i.action,
+        priv_action(
+            "systemd-tmpfiles",
+            &["--clean", "--prefix=/tmp", "--prefix=/var/tmp"]
+        )
+    );
     assert_eq!(i.scope, Scope::System);
     assert!(i.preselected);
+    assert!(i.note.as_deref().unwrap().contains("/tmp and /var/tmp"));
     assert!(runner.calls().is_empty());
 }
 
@@ -385,4 +394,52 @@ fn unavailable_category_note() {
 fn registry_follows_category_order() {
     let cats: Vec<Category> = scanners().iter().map(|s| s.category()).collect();
     assert_eq!(cats, Category::ALL);
+}
+
+#[test]
+fn journal_max_fails_closed_and_boundaries() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/journalctl", b"#!/bin/sh\n");
+    let mk = || FakeRunner::new().on("journalctl", &["--disk-usage"], out(0, JOURNAL, ""));
+    for bad in ["1;x", "-1M", "0", "0M", "", "$(id)"] {
+        let cfg = Config {
+            journal_max: bad.into(),
+            ..Config::default()
+        };
+        let rep = scan_cfg(&t, &mk(), &cfg, Category::Journal);
+        assert!(rep.items.is_empty(), "{bad:?}");
+        assert!(rep.error.is_some(), "{bad:?}");
+    }
+    // usage == max: nothing to vacuum.
+    let usage = out(
+        0,
+        "Archived and active journals take up 1M in the file system.\n",
+        "",
+    );
+    let runner = FakeRunner::new().on("journalctl", &["--disk-usage"], usage);
+    let cfg = Config {
+        journal_max: "1M".into(),
+        ..Config::default()
+    };
+    let rep = scan_cfg(&t, &runner, &cfg, Category::Journal);
+    assert!(rep.items.is_empty() && rep.error.is_none());
+    // A 1T limit works through the scanner (no item: usage is below it).
+    let cfg = Config {
+        journal_max: "1T".into(),
+        ..Config::default()
+    };
+    let rep = scan_cfg(&t, &mk(), &cfg, Category::Journal);
+    assert!(rep.items.is_empty() && rep.error.is_none());
+    let big = out(
+        0,
+        "Archived and active journals take up 2T in the file system.\n",
+        "",
+    );
+    let runner = FakeRunner::new().on("journalctl", &["--disk-usage"], big);
+    let rep = scan_cfg(&t, &runner, &cfg, Category::Journal);
+    assert_eq!(rep.items[0].size, Some(1 << 40));
+    assert_eq!(
+        rep.items[0].action,
+        priv_action("journalctl", &["--vacuum-size=1T"])
+    );
 }

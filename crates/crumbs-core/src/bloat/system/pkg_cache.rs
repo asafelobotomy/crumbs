@@ -26,7 +26,7 @@ impl Scanner for PkgCacheScanner {
                 Category::PkgCache,
                 "package cache".into(),
                 None,
-                Some("keeps only installed versions (pacman-contrib not installed)".into()),
+                Some("keeps only installed versions and also removes unused repository sync databases (pacman-contrib not installed)".into()),
                 "pacman",
                 vec!["-Sc".into(), "--noconfirm".into()],
             );

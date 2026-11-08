@@ -1,5 +1,5 @@
 //! `system-temp`: one item that has `systemd-tmpfiles` clean what its
-//! configuration says is stale. systemd decides what; crumbs cannot size it.
+//! age rules say is stale, limited to `/tmp` and `/var/tmp`. systemd decides what; crumbs cannot size it.
 
 use super::super::{BloatItem, Category, ScanContext, Scanner};
 use super::{not_installed, privileged_item};
@@ -27,9 +27,13 @@ impl Scanner for SystemTempScanner {
             Category::SystemTemp,
             "stale system temporary files".into(),
             None,
-            Some("decided by systemd-tmpfiles".into()),
+            Some("removes files past the tmpfiles.d age limits under /tmp and /var/tmp".into()),
             "systemd-tmpfiles",
-            vec!["--clean".into()],
+            vec![
+                "--clean".into(),
+                "--prefix=/tmp".into(),
+                "--prefix=/var/tmp".into(),
+            ],
         )])
     }
 }

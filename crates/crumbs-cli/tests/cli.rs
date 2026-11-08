@@ -2490,3 +2490,13 @@ fn doctor_sudo_without_terminal_is_unavailable() {
         .stdout(predicate::str::contains("needs a terminal"))
         .stdout(predicate::str::contains("privileged cleanup: unavailable"));
 }
+
+#[test]
+fn clean_system_category_without_system_is_usage_error() {
+    let t = fixture(FLATPAK_OK);
+    crumbs(&t)
+        .args(["clean", "journal", "--yes"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("'journal'").and(predicate::str::contains("--system")));
+}
