@@ -15,7 +15,7 @@ cargo build --release
 
 - `crumbs apps list [--source <source>] [--all] [--sort name|size] [--json]` lists installed apps.
 - `crumbs apps show <app> [--show-low] [--json]` shows one app and its leftovers.
-- `crumbs uninstall <app>... [--leftovers-only] [--keep-data] [--show-low] [-i] [--dry-run] [--yes] [--permanent] [--force] [--json]` removes an app and its leftovers.
+- `crumbs uninstall <app>... [--leftovers-only] [--keep-data] [--show-low] [-i] [--dry-run] [--yes] [--permanent] [--force] [--json]` removes an app and its leftovers. With `--leftovers-only` the app stays, and so do its launchers, icons and file-type associations.
 - `crumbs orphans [--show-low] [--json]` lists per-user files that belong to no installed app.
 - `crumbs orphans --clean (--select <path>... | -i) [--dry-run] [--yes] ...` removes chosen orphans. Nothing is removed unless you name it.
 - `crumbs history [--limit N] [--json]` lists past removals, newest first.

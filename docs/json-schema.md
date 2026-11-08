@@ -62,7 +62,7 @@ The exit code tells you which kind of failure it was (see below). `apps show` re
 | Code | Meaning |
 |---|---|
 | 0 | Success (including a dry run and "nothing to do"). |
-| 1 | Error, or `uninstall`/`orphans --clean` refused because a source failed (override with `--force`) or an app is running. |
+| 1 | Error, or `uninstall`/`orphans --clean` refused because a source failed (override with `--force`) or an app is running, or `uninstall` refused an AppImage whose file fails the safety checks. |
 | 2 | Usage error: bad flags, ambiguous or not-found app, `--json` without `--yes` or `--dry-run`, a destructive command run non-interactively without `--yes`, or removing a non-AppImage app without `--leftovers-only`. |
 | 3 | Partial failure: some source failed while another worked, or some actions/restores failed. |
 | 4 | Aborted by the user at a prompt. |
@@ -415,7 +415,9 @@ With `--yes` (the plan is as above; its `actions` are omitted here):
 }
 ```
 
-Only AppImage apps can be fully uninstalled in this version. Other sources need `--leftovers-only`; otherwise exit 2 with the error envelope shown earlier.
+Only AppImage apps can be fully uninstalled in this version. Other sources need `--leftovers-only`; otherwise exit 2 with the error envelope shown earlier. An AppImage whose file fails the safety checks (outside home, protected or excluded, or under a symlinked directory) is refused before anything is planned: exit 1 with `cannot remove <id>: <reason>; use --leftovers-only to remove only its leftovers`.
+
+With `--leftovers-only`, the plan leaves out what launches or opens the app: its launchers (named by its desktop IDs, or running its AppImage file), icons named after them, and `mimeapps.list` associations.
 
 ## `history`
 

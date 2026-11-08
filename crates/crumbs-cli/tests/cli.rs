@@ -953,21 +953,52 @@ fn uninstall_refuses_appimage_outside_home() {
 #[test]
 fn preview_lists_lines_an_edit_removes() {
     let t = fixture(FLATPAK_OK);
+    t.appimage("/home/user/Applications/GutCheck-0.19.0-x86_64.AppImage");
+    t.desktop(
+        "/home/user/.local/share/applications/gutcheck.desktop",
+        "[Desktop Entry]\nType=Application\nName=GutCheck\nExec=/home/user/Applications/GutCheck-0.19.0-x86_64.AppImage\n",
+    );
     t.write(
         "/home/user/.config/mimeapps.list",
-        b"[Default Applications]\ntext/html=firefox.desktop\nimage/png=other.desktop\n\n[Added Associations]\nx-scheme-handler/https=firefox.desktop;\n",
+        b"[Default Applications]\ntext/x-gut=gutcheck.desktop\nimage/png=other.desktop\n\n[Added Associations]\nx-scheme-handler/gut=gutcheck.desktop;\n",
     );
     let out = crumbs(&t)
-        .args(["uninstall", "firefox", "--leftovers-only", "--dry-run"])
+        .args(["uninstall", "GutCheck", "--dry-run"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(
         text.contains(
-            "~/.config/mimeapps.list  file-type associations\n    - text/html=firefox.desktop\n    - x-scheme-handler/https=firefox.desktop;\n"
+            "file-type associations\n    - text/x-gut=gutcheck.desktop\n    - x-scheme-handler/gut=gutcheck.desktop;\n"
         ),
         "{text}"
     );
     insta::assert_snapshot!(text);
+}
+
+/// With `--leftovers-only` the app stays, so do its file-type associations.
+#[test]
+fn uninstall_leftovers_only_keeps_mime_associations() {
+    let t = fixture(FLATPAK_OK);
+    let mime = b"[Default Applications]\ntext/html=firefox.desktop\n";
+    t.write("/home/user/.config/mimeapps.list", mime);
+    t.write("/home/user/.cache/firefox/blob", b"x");
+    let out = crumbs(&t)
+        .args(["uninstall", "firefox", "--leftovers-only", "--yes"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(!stdout.contains("mimeapps.list"), "{stdout}");
+    assert!(!real(&t, "/home/user/.cache/firefox").exists());
+    assert_eq!(
+        std::fs::read(real(&t, "/home/user/.config/mimeapps.list")).unwrap(),
+        mime
+    );
+    let names: Vec<String> = std::fs::read_dir(real(&t, "/home/user/.config"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(!names.iter().any(|n| n.contains("crumbs-bak")), "{names:?}");
 }

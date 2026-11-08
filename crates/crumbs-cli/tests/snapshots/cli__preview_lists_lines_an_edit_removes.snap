@@ -2,11 +2,13 @@
 source: crates/crumbs-cli/tests/cli.rs
 expression: text
 ---
-Firefox  pacman:firefox
-ACTION  SIZE  PATH                     REASON
-edit    0 B   ~/.config/mimeapps.list  file-type associations
-    - text/html=firefox.desktop
-    - x-scheme-handler/https=firefox.desktop;
-note: the app itself stays installed (leftovers only)
+GutCheck  appimage:~/Applications/GutCheck-0.19.0-x86_64.AppImage
+ACTION  SIZE     PATH                                            REASON
+trash   4.0 KiB  ~/Applications/GutCheck-0.19.0-x86_64.AppImage  AppImage file
+edit    0 B      ~/.config/mimeapps.list                         file-type associations
+    - text/x-gut=gutcheck.desktop
+    - x-scheme-handler/gut=gutcheck.desktop;
+trash   4.0 KiB  ~/.local/share/applications/gutcheck.desktop    launcher for gutcheck.desktop
 
+will move 2 items (8.0 KiB) to the trash
 will edit 1 files (a backup of each is kept)
