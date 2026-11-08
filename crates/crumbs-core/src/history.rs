@@ -54,6 +54,8 @@ fn history_path(env: &Env) -> PathBuf {
     env.state_home.join("crumbs/history.jsonl")
 }
 
+/// Known limitation: `PathBuf` fields holding non-UTF-8 paths cannot be
+/// serialised by serde, so appending such an entry returns an error.
 pub fn append(env: &Env, entries: &[HistoryEntry]) -> Result<(), CoreError> {
     let path = history_path(env);
     let dir = env.state_home.join("crumbs");

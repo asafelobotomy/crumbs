@@ -1,6 +1,7 @@
 //! Freedesktop trash (spec 1.0), implemented through `Env` so tests can use a
 //! fake root. Only `$topdir/.Trash-$uid` is ever created, never `.Trash/$uid`.
 
+use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -35,6 +36,46 @@ fn mkdir_private(path: &Path) -> Result<(), CoreError> {
         .map_err(|e| io_err(path, e))
 }
 
+/// The trash dir must be a real directory (not a symlink) owned by us with no
+/// group/other access.
+fn validate_private_dir(env: &Env, path: &Path) -> Result<(), CoreError> {
+    let m = fs::symlink_metadata(path).map_err(|e| io_err(path, e))?;
+    let bad = |msg: &str| {
+        io_err(
+            path,
+            io::Error::new(io::ErrorKind::PermissionDenied, msg.to_string()),
+        )
+    };
+    if !m.file_type().is_dir() {
+        return Err(bad("trash path is not a real directory"));
+    }
+    if m.uid() != env.uid {
+        return Err(bad("trash directory is not owned by the current user"));
+    }
+    if m.mode() & 0o077 != 0 {
+        return Err(bad("trash directory is accessible to other users"));
+    }
+    Ok(())
+}
+
+/// Creates (if needed) and validates a trash directory.
+fn ensure_private_dir(env: &Env, path: &Path) -> Result<(), CoreError> {
+    mkdir_private(path)?;
+    validate_private_dir(env, path)
+}
+
+/// Rename that never replaces an existing destination (RENAME_NOREPLACE),
+/// falling back to plain rename only where the filesystem lacks support.
+fn rename_noreplace(src: &Path, dst: &Path) -> io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    use rustix::io::Errno;
+    match renameat_with(CWD, src, CWD, dst, RenameFlags::NOREPLACE) {
+        Ok(()) => Ok(()),
+        Err(Errno::INVAL | Errno::NOSYS) => fs::rename(src, dst),
+        Err(e) => Err(io::Error::from(e)),
+    }
+}
+
 fn dev_of_real(p: &Path) -> Option<u64> {
     fs::symlink_metadata(p).ok().map(|m| m.dev())
 }
@@ -62,16 +103,16 @@ fn nearest_existing(p: &Path) -> Option<&Path> {
 /// The trash directory (real path) for an item at `in_system`, created with
 /// mode 0700 when missing.
 pub fn trash_dir_for(env: &Env, in_system: &Path) -> Result<PathBuf, CoreError> {
-    let item = env.sys(&in_system.to_string_lossy());
+    let item = env.sys_path(in_system);
     let home_trash = env.data_home.join("Trash");
     // A missing item cannot be moved anyway; let the rename report that.
     let Some(item_dev) = dev_of_real(&item) else {
-        mkdir_private(&home_trash)?;
+        ensure_private_dir(env, &home_trash)?;
         return Ok(home_trash);
     };
     let data_dev = nearest_existing(&env.data_home).and_then(dev_of_real);
     if data_dev == Some(item_dev) {
-        mkdir_private(&home_trash)?;
+        ensure_private_dir(env, &home_trash)?;
         return Ok(home_trash);
     }
     let fail = |msg: &str| io_err(in_system, io::Error::other(msg.to_string()));
@@ -80,7 +121,7 @@ pub fn trash_dir_for(env: &Env, in_system: &Path) -> Result<PathBuf, CoreError> 
         return Err(fail("refusing to use / as a trash topdir"));
     }
     let dir = top.join(format!(".Trash-{}", env.uid));
-    mkdir_private(&dir).map_err(|_| fail("cannot create trash directory on this device"))?;
+    ensure_private_dir(env, &dir)?;
     Ok(dir)
 }
 
@@ -97,9 +138,15 @@ fn encode_path(p: &Path) -> String {
     out
 }
 
-fn name_taken(files: &Path, info: &Path, name: &str) -> bool {
+fn info_name(info: &Path, name: &OsStr) -> PathBuf {
+    let mut f = name.to_os_string();
+    f.push(".trashinfo");
+    info.join(f)
+}
+
+fn name_taken(files: &Path, info: &Path, name: &OsStr) -> bool {
     fs::symlink_metadata(files.join(name)).is_ok()
-        || fs::symlink_metadata(info.join(format!("{name}.trashinfo"))).is_ok()
+        || fs::symlink_metadata(info_name(info, name)).is_ok()
 }
 
 /// Moves the item itself (never a symlink target) into the trash.
@@ -110,12 +157,12 @@ pub fn move_to_trash(env: &Env, in_system: &Path) -> Result<Trashed, CoreError> 
             io::Error::new(io::ErrorKind::InvalidInput, "path is not canonical"),
         ));
     }
-    let item = env.sys(&in_system.to_string_lossy());
+    let item = env.sys_path(in_system);
     let trash = trash_dir_for(env, in_system)?;
     let files = trash.join("files");
     let info = trash.join("info");
-    mkdir_private(&files)?;
-    mkdir_private(&info)?;
+    ensure_private_dir(env, &files)?;
+    ensure_private_dir(env, &info)?;
 
     let base = in_system
         .file_name()
@@ -125,8 +172,7 @@ pub fn move_to_trash(env: &Env, in_system: &Path) -> Result<Trashed, CoreError> 
                 io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"),
             )
         })?
-        .to_string_lossy()
-        .into_owned();
+        .to_os_string();
     let content = format!(
         "[Trash Info]\nPath={}\nDeletionDate={}\n",
         encode_path(in_system),
@@ -138,13 +184,15 @@ pub fn move_to_trash(env: &Env, in_system: &Path) -> Result<Trashed, CoreError> 
         let name = if n == 1 {
             base.clone()
         } else {
-            format!("{base}.{n}")
+            let mut s = base.clone();
+            s.push(format!(".{n}"));
+            s
         };
         n += 1;
         if name_taken(&files, &info, &name) {
             continue;
         }
-        let info_path = info.join(format!("{name}.trashinfo"));
+        let info_path = info_name(&info, &name);
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -165,7 +213,7 @@ pub fn move_to_trash(env: &Env, in_system: &Path) -> Result<Trashed, CoreError> 
     };
 
     let files_path = files.join(&name);
-    if let Err(e) = fs::rename(&item, &files_path) {
+    if let Err(e) = rename_noreplace(&item, &files_path) {
         let _ = fs::remove_file(&info_path);
         return Err(io_err(in_system, e));
     }
@@ -178,7 +226,19 @@ pub fn move_to_trash(env: &Env, in_system: &Path) -> Result<Trashed, CoreError> 
 
 /// Moves a trashed item back. Refuses when the original path is occupied.
 pub fn restore_from_trash(env: &Env, t: &Trashed) -> Result<(), CoreError> {
-    let dest = env.sys(&t.original.to_string_lossy());
+    let info = env.sys_path(&t.info_path);
+    let recorded = fs::read_to_string(&info).map_err(|e| io_err(&t.info_path, e))?;
+    let expected = encode_path(&t.original);
+    let matches = recorded
+        .lines()
+        .any(|l| l.strip_prefix("Path=") == Some(expected.as_str()));
+    if !matches {
+        return Err(io_err(
+            &t.info_path,
+            io::Error::new(io::ErrorKind::InvalidData, "trash entry no longer matches"),
+        ));
+    }
+    let dest = env.sys_path(&t.original);
     if fs::symlink_metadata(&dest).is_ok() {
         return Err(io_err(
             &t.original,
@@ -188,9 +248,8 @@ pub fn restore_from_trash(env: &Env, t: &Trashed) -> Result<(), CoreError> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| io_err(&t.original, e))?;
     }
-    let src = env.sys(&t.files_path.to_string_lossy());
-    fs::rename(&src, &dest).map_err(|e| io_err(&t.files_path, e))?;
-    let info = env.sys(&t.info_path.to_string_lossy());
+    let src = env.sys_path(&t.files_path);
+    rename_noreplace(&src, &dest).map_err(|e| io_err(&t.files_path, e))?;
     fs::remove_file(&info).map_err(|e| io_err(&t.info_path, e))
 }
 
@@ -220,12 +279,8 @@ mod tests {
             Path::new("/home/user/.local/share/Trash/info/My App.trashinfo")
         );
         assert!(!real(&env, "/home/user/.config/My App").exists());
-        assert!(
-            env.sys(got.files_path.to_str().unwrap())
-                .join("x.conf")
-                .exists()
-        );
-        let info = fs::read_to_string(env.sys(got.info_path.to_str().unwrap())).unwrap();
+        assert!(env.sys_path(&got.files_path).join("x.conf").exists());
+        let info = fs::read_to_string(env.sys_path(&got.info_path)).unwrap();
         let mut lines = info.lines();
         assert_eq!(lines.next(), Some("[Trash Info]"));
         assert_eq!(lines.next(), Some("Path=/home/user/.config/My%20App"));
@@ -251,9 +306,11 @@ mod tests {
     #[test]
     fn trash_skips_stale_info() {
         let t = FixtureTree::new();
-        t.write("home/user/.local/share/Trash/info/foo.trashinfo", b"stale");
         t.write("home/user/foo", b"x");
         let env = t.env();
+        let info = env.data_home.join("Trash/info");
+        mkdir_private(&info).unwrap();
+        fs::write(info.join("foo.trashinfo"), b"stale").unwrap();
         let got = move_to_trash(&env, Path::new("/home/user/foo")).unwrap();
         assert!(got.files_path.ends_with("files/foo.2"));
     }
@@ -266,7 +323,7 @@ mod tests {
         let env = t.env();
         let got = move_to_trash(&env, Path::new("/home/user/link")).unwrap();
         assert!(t.dir.path().join("home/user/target/keep").exists());
-        let moved = env.sys(got.files_path.to_str().unwrap());
+        let moved = env.sys_path(&got.files_path);
         assert!(
             fs::symlink_metadata(moved)
                 .unwrap()
@@ -305,8 +362,8 @@ mod tests {
             fs::read(real(&env, "/home/user/.config/app/x")).unwrap(),
             b"data"
         );
-        assert!(!env.sys(got.info_path.to_str().unwrap()).exists());
-        assert!(!env.sys(got.files_path.to_str().unwrap()).exists());
+        assert!(!env.sys_path(&got.info_path).exists());
+        assert!(!env.sys_path(&got.files_path).exists());
     }
 
     #[test]
@@ -334,8 +391,8 @@ mod tests {
             other => panic!("expected AlreadyExists, got {other:?}"),
         }
         assert_eq!(fs::read(real(&env, "/home/user/app")).unwrap(), b"new");
-        assert!(env.sys(got.files_path.to_str().unwrap()).exists());
-        assert!(env.sys(got.info_path.to_str().unwrap()).exists());
+        assert!(env.sys_path(&got.files_path).exists());
+        assert!(env.sys_path(&got.info_path).exists());
     }
 
     #[test]
@@ -385,5 +442,87 @@ mod tests {
         let env = t.env();
         let d = trash_dir_for(&env, Path::new("/home/user/a")).unwrap();
         assert_eq!(d, env.data_home.join("Trash"));
+    }
+
+    #[test]
+    fn restore_refuses_reused_trash_name() {
+        let t = FixtureTree::new();
+        t.write("home/user/a/config/x", b"A");
+        t.write("home/user/b/config/x", b"B");
+        let env = t.env();
+        let a = move_to_trash(&env, Path::new("/home/user/a/config")).unwrap();
+        fs::remove_dir_all(env.sys_path(&a.files_path)).unwrap();
+        fs::remove_file(env.sys_path(&a.info_path)).unwrap();
+        let b = move_to_trash(&env, Path::new("/home/user/b/config")).unwrap();
+        assert_eq!(a.files_path, b.files_path);
+        match restore_from_trash(&env, &a) {
+            Err(CoreError::Io { source, .. }) => {
+                assert_eq!(source.kind(), io::ErrorKind::InvalidData)
+            }
+            other => panic!("expected InvalidData, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read(env.sys_path(&b.files_path).join("x")).unwrap(),
+            b"B"
+        );
+        assert!(env.sys_path(&b.info_path).exists());
+    }
+
+    #[test]
+    fn restore_never_replaces_empty_dir_that_appears() {
+        let t = FixtureTree::new();
+        t.write("home/user/app/x", b"d");
+        let env = t.env();
+        let got = move_to_trash(&env, Path::new("/home/user/app")).unwrap();
+        // Simulates losing the check-then-rename race: the destination exists
+        // as an empty dir at rename time.
+        let dest = env.sys_path(Path::new("/home/user/app"));
+        fs::create_dir(&dest).unwrap();
+        let err = rename_noreplace(&env.sys_path(&got.files_path), &dest).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert!(env.sys_path(&got.files_path).join("x").exists());
+        assert!(restore_from_trash(&env, &got).is_err());
+        assert!(env.sys_path(&got.files_path).exists());
+    }
+
+    #[test]
+    fn trash_refuses_symlinked_trash_dir() {
+        let t = FixtureTree::new();
+        t.write("home/user/a", b"x");
+        t.mkdir("elsewhere");
+        t.symlink("home/user/.local/share/Trash", "/elsewhere");
+        let env = t.env();
+        assert!(move_to_trash(&env, Path::new("/home/user/a")).is_err());
+        assert!(real(&env, "/home/user/a").exists());
+    }
+
+    #[test]
+    fn trash_refuses_open_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = FixtureTree::new();
+        t.write("home/user/a", b"x");
+        let env = t.env();
+        let trash = env.data_home.join("Trash");
+        fs::create_dir_all(&trash).unwrap();
+        fs::set_permissions(&trash, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(move_to_trash(&env, Path::new("/home/user/a")).is_err());
+        assert!(real(&env, "/home/user/a").exists());
+    }
+
+    #[test]
+    fn non_utf8_name_round_trip() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let t = FixtureTree::new();
+        let env = t.env();
+        let mut name = b"/home/user/caf".to_vec();
+        name.push(0xE9);
+        let p = PathBuf::from(OsString::from_vec(name));
+        fs::create_dir_all(env.sys_path(&p)).unwrap();
+        let got = move_to_trash(&env, &p).unwrap();
+        let info = fs::read_to_string(env.sys_path(&got.info_path)).unwrap();
+        assert!(info.contains("Path=/home/user/caf%E9\n"));
+        restore_from_trash(&env, &got).unwrap();
+        assert!(env.sys_path(&p).is_dir());
     }
 }

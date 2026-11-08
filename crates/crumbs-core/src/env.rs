@@ -139,6 +139,15 @@ impl Env {
         self.root.join(abs.trim_start_matches('/'))
     }
 
+    /// Like `sys` but takes a `Path` and never converts through UTF-8, so
+    /// non-UTF-8 names survive.
+    pub fn sys_path(&self, in_system: &Path) -> PathBuf {
+        match in_system.strip_prefix("/") {
+            Ok(rest) => self.root.join(rest),
+            Err(_) => self.root.join(in_system),
+        }
+    }
+
     /// Inverse of `sys`: the absolute in-system path, for display and JSON.
     pub fn unsys(&self, p: &Path) -> PathBuf {
         match p.strip_prefix(&self.root) {
