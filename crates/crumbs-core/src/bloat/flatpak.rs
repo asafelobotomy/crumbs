@@ -41,7 +41,8 @@ impl Scanner for FlatpakUnusedScanner {
             label: "unused Flatpak runtimes (user)".into(),
             size: None,
             rebuildable: false,
-            preselected: true,
+            // The CLI preselects it when the category is named explicitly.
+            preselected: false,
             note: Some("decided by flatpak".into()),
             action: ItemAction::Command {
                 program: "flatpak".into(),
@@ -111,7 +112,7 @@ mod tests {
         assert_eq!(i.label, "unused Flatpak runtimes (user)");
         assert_eq!(i.size, None);
         assert_eq!(i.note.as_deref(), Some("decided by flatpak"));
-        assert!(!i.rebuildable && i.preselected);
+        assert!(!i.rebuildable && !i.preselected);
         assert_eq!(
             i.action,
             ItemAction::Command {

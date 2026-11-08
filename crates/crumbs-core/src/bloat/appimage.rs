@@ -19,9 +19,9 @@ use crate::sources::appimage::{normalize_name, split_appimage_name};
 
 /// Compares two versions component by component, splitting on `.`, `-` and
 /// `_`. Components that are both numbers compare numerically, others
-/// lexically. A missing component is less than a numeric one, but greater
+/// lexically; a number against a tag is incomparable (`None`). A missing component is less than a numeric one, but greater
 /// than a tag such as `beta`, so `2.0` is newer than `2.0-beta`. `None` when
-/// either version is empty.
+/// either version is empty or the two are incomparable.
 pub fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
     if a.is_empty() || b.is_empty() {
         return None;
@@ -40,6 +40,8 @@ pub fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
                 let (x, y) = (x.trim_start_matches('0'), y.trim_start_matches('0'));
                 x.len().cmp(&y.len()).then_with(|| x.cmp(y))
             }
+            // A number against a tag can't be ordered.
+            (Some(x), Some(y)) if is_num(x) != is_num(y) => return None,
             (Some(x), Some(y)) => x.cmp(y),
             (Some(x), None) => {
                 if is_num(x) {
@@ -67,7 +69,8 @@ pub fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
 /// An AppImage in a group: app, file name, and its version if comparable.
 type Member<'a> = (&'a App, String, Option<&'a str>);
 
-/// In-system programs that menu or autostart entries execute.
+/// In-system programs that menu or autostart entries execute, plus their
+/// canonical (symlink-resolved) in-system forms.
 fn launcher_targets(cx: &ScanContext) -> HashSet<PathBuf> {
     let home = cx.env.unsys(&cx.env.home);
     let mut programs: Vec<String> = discover_desktop_entries(cx.env)
@@ -87,13 +90,20 @@ fn launcher_targets(cx: &ScanContext) -> HashSet<PathBuf> {
             }
         }
     }
-    programs
-        .into_iter()
-        .map(|p| match p.strip_prefix("~/") {
+    let mut targets = HashSet::new();
+    for p in programs {
+        let target = match p.strip_prefix("~/") {
             Some(rest) => home.join(rest),
             None => PathBuf::from(p),
-        })
-        .collect()
+        };
+        if target.is_absolute()
+            && let Ok(real) = cx.env.sys_path(&target).canonicalize()
+        {
+            targets.insert(cx.env.unsys(&real));
+        }
+        targets.insert(target);
+    }
+    targets
 }
 
 pub struct AppimageOldScanner;
@@ -133,23 +143,24 @@ impl Scanner for AppimageOldScanner {
         let targets = launcher_targets(cx);
         let mut out = Vec::new();
         for members in groups.values() {
-            let newest = members.iter().filter_map(|(_, _, v)| *v).reduce(|best, v| {
-                if compare_versions(v, best) == Some(Ordering::Greater) {
-                    v
-                } else {
-                    best
-                }
-            });
-            let Some(newest) = newest else { continue };
             for (app, file, version) in members {
                 let Some(version) = version else { continue };
-                if compare_versions(version, newest) != Some(Ordering::Less) {
+                // Old only when some comparable sibling is strictly newer.
+                let superseded = members.iter().any(|(_, _, other)| {
+                    other.and_then(|o| compare_versions(version, o)) == Some(Ordering::Less)
+                });
+                if !superseded {
                     continue;
                 }
                 let Some(location) = app.location.clone() else {
                     continue;
                 };
-                if targets.contains(&location) {
+                let canonical = cx
+                    .env
+                    .sys_path(&location)
+                    .canonicalize()
+                    .map(|p| cx.env.unsys(&p));
+                if targets.contains(&location) || canonical.is_ok_and(|c| targets.contains(&c)) {
                     continue;
                 }
                 if !running_processes(cx.env, app).is_empty() {
@@ -191,6 +202,9 @@ mod tests {
         assert_eq!(compare_versions("1.0", "1.0.1"), Some(Less));
         assert_eq!(compare_versions("1_2-3", "1.2.3"), Some(Equal));
         assert_eq!(compare_versions("1.0-alpha", "1.0-beta"), Some(Less));
+        // A number against a tag is incomparable.
+        assert_eq!(compare_versions("v1.2", "1.3"), None);
+        assert_eq!(compare_versions("nightly", "1.0"), None);
         assert_eq!(compare_versions("", "1.0"), None);
         assert_eq!(compare_versions("1.0", ""), None);
     }
@@ -319,5 +333,90 @@ mod tests {
             ],
         );
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn incomparable_versions_are_never_old() {
+        let t = FixtureTree::new();
+        let mut nightly = app(&t, "Applications", "Foo-nightly.AppImage");
+        nightly.version = Some("nightly".into());
+        let items = scan(
+            &t,
+            vec![
+                nightly,
+                app(&t, "Applications", "Foo-1.0.AppImage"),
+                app(&t, "Applications", "Foo-2.0.AppImage"),
+            ],
+        );
+        assert_eq!(labels(&items), ["Foo-1.0.AppImage"]);
+        // Same with the tag-bearing app listed last.
+        let t2 = FixtureTree::new();
+        let mut v = app(&t2, "Applications", "Foo-v1.2.AppImage");
+        v.version = Some("v1.2".into());
+        let items = scan(&t2, vec![app(&t2, "Applications", "Foo-1.3.AppImage"), v]);
+        assert!(items.is_empty(), "{items:?}");
+    }
+
+    #[test]
+    fn launcher_through_symlinked_file_keeps_target() {
+        let t = FixtureTree::new();
+        let apps = vec![
+            app(&t, "Applications", "Foo-1.0.AppImage"),
+            app(&t, "Applications", "Foo-2.0.AppImage"),
+            app(&t, "Applications", "Foo-0.1.AppImage"),
+        ];
+        // Relative, so the link stays inside the fake root.
+        t.symlink("home/user/Applications/Foo.AppImage", "Foo-1.0.AppImage");
+        t.desktop(
+            "home/user/.local/share/applications/foo.desktop",
+            "[Desktop Entry]\nType=Application\nName=Foo\nExec=~/Applications/Foo.AppImage\n",
+        );
+        let items = scan(&t, apps);
+        assert_eq!(labels(&items), ["Foo-0.1.AppImage"]);
+    }
+
+    #[test]
+    fn launcher_through_symlinked_dir_keeps_target() {
+        let t = FixtureTree::new();
+        let apps = vec![
+            app(&t, "Applications", "Foo-1.0.AppImage"),
+            app(&t, "Applications", "Foo-2.0.AppImage"),
+            app(&t, "Applications", "Foo-0.1.AppImage"),
+        ];
+        t.symlink("home/user/apps", "Applications");
+        t.desktop(
+            "home/user/.config/autostart/foo.desktop",
+            "[Desktop Entry]\nType=Application\nName=Foo\nExec=/home/user/apps/Foo-1.0.AppImage\n",
+        );
+        let items = scan(&t, apps);
+        assert_eq!(labels(&items), ["Foo-0.1.AppImage"]);
+    }
+
+    #[test]
+    fn names_differing_only_in_case_or_separators_share_a_group() {
+        // Grouping uses normalize_name, so Tool-1.0 and tool-2.0 are one app.
+        let t = FixtureTree::new();
+        let items = scan(
+            &t,
+            vec![
+                app(&t, "Applications", "Tool-1.0.AppImage"),
+                app(&t, "Applications", "tool-2.0.AppImage"),
+            ],
+        );
+        assert_eq!(labels(&items), ["Tool-1.0.AppImage"]);
+    }
+
+    #[test]
+    fn equal_max_versions_in_two_dirs_are_both_kept() {
+        let t = FixtureTree::new();
+        let items = scan(
+            &t,
+            vec![
+                app(&t, "Applications", "Foo-2.0.AppImage"),
+                app(&t, "Downloads", "Foo-2.0.AppImage"),
+                app(&t, "Downloads", "Foo-1.0.AppImage"),
+            ],
+        );
+        assert_eq!(labels(&items), ["Foo-1.0.AppImage"]);
     }
 }
