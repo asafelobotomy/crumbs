@@ -510,3 +510,45 @@ fn dependents_run_when_dependency_succeeds() {
     let report = execute(&env, &Config::default(), &plan);
     assert!(report.results.iter().all(|r| r.ok), "{report:?}");
 }
+
+#[test]
+fn invalid_dependencies_fail_closed_and_skips_are_transitive() {
+    if rustix::process::getuid().is_root() {
+        return; // root ignores directory permissions
+    }
+    let t = FixtureTree::new();
+    t.write("home/user/.config/a/x", b"a");
+    t.write("home/user/.config/b/x", b"b");
+    t.write("home/user/.config/c/x", b"c");
+    t.write("home/user/.config/d/x", b"d");
+    t.write("home/user/.config/e/x", b"e");
+    t.mkdir("home/user/.local/share/Trash/files");
+    let info = t.mkdir("home/user/.local/share/Trash/info");
+    let env = t.env();
+    // 0 fails; 1 depends on 0; 2 on 1 (transitive); 3 on itself; 4 forward.
+    let mut actions: Vec<PlannedAction> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|n| planned(&env, trash(&format!("/home/user/.config/{n}"))))
+        .collect();
+    actions[1].depends_on = Some(0);
+    actions[2].depends_on = Some(1);
+    actions[3].depends_on = Some(3);
+    actions[4].depends_on = Some(9);
+    let plan = plan_of(actions);
+    fs::set_permissions(&info, fs::Permissions::from_mode(0o500)).unwrap();
+    let report = execute(&env, &Config::default(), &plan);
+    fs::set_permissions(&info, fs::Permissions::from_mode(0o700)).unwrap();
+    let errs: Vec<&str> = report
+        .results
+        .iter()
+        .map(|r| r.error.as_deref().unwrap())
+        .collect();
+    assert!(report.results.iter().all(|r| !r.ok));
+    assert_eq!(errs[1], "skipped: ~/.config/a was not removed");
+    assert_eq!(errs[2], "skipped: ~/.config/b was not removed");
+    assert_eq!(errs[3], "skipped: ~/.config/d was not removed");
+    assert_eq!(errs[4], "skipped: action 9 was not removed");
+    for n in ["a", "b", "c", "d", "e"] {
+        assert!(env.sys(&format!("/home/user/.config/{n}/x")).exists());
+    }
+}

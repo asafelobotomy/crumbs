@@ -10,7 +10,7 @@ use crumbs_core::env::display_path;
 use crumbs_core::executor::{ExecReport, execute, running_processes};
 use crumbs_core::inventory::Inventory;
 use crumbs_core::leftovers::{Finding, FindingKind};
-use crumbs_core::plan::{Action, Plan};
+use crumbs_core::plan::{Action, Plan, PlannedAction};
 use crumbs_core::{App, Env};
 use serde_json::json;
 
@@ -193,17 +193,26 @@ pub fn drop_overlaps(targets: &mut [Target]) {
     for i in 1..targets.len() {
         let (earlier, rest) = targets.split_at_mut(i);
         let Some(t) = rest.first_mut() else { continue };
-        let mut kept = Vec::with_capacity(t.plan.actions.len());
-        for pa in t.plan.actions.drain(..) {
+        let mut kept: Vec<PlannedAction> = Vec::with_capacity(t.plan.actions.len());
+        // Old index -> new index of the actions that stay.
+        let mut new_index: Vec<Option<usize>> = Vec::with_capacity(t.plan.actions.len());
+        for mut pa in t.plan.actions.drain(..) {
             let path = pa.action.path().to_path_buf();
             let covered = earlier
                 .iter()
                 .flat_map(|e| &e.plan.actions)
                 .any(|e| path.starts_with(e.action.path()));
             if !covered {
+                // A dropped dependency was covered by an earlier plan, which
+                // runs first in the batch, so there is nothing to wait for.
+                pa.depends_on = pa
+                    .depends_on
+                    .and_then(|d| new_index.get(d).copied().flatten());
+                new_index.push(Some(kept.len()));
                 kept.push(pa);
                 continue;
             }
+            new_index.push(None);
             if let Action::EditFile { remove_lines, .. } = &pa.action {
                 let first = earlier
                     .iter_mut()
@@ -327,7 +336,6 @@ pub fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crumbs_core::plan::PlannedAction;
     use crumbs_core::safety::{Fingerprint, Scope};
     use std::path::PathBuf;
 
@@ -418,5 +426,36 @@ mod tests {
                 remove_lines: vec!["a=a.desktop".into(), "b=b.desktop".into()],
             }
         );
+    }
+
+    #[test]
+    fn drop_overlaps_remaps_depends_on() {
+        let mut dependent = trash("/home/user/.config/Bar", 4);
+        dependent.depends_on = Some(0);
+        let mut kept_dep = trash("/home/user/.cache/Bar", 2);
+        kept_dep.depends_on = Some(0);
+        let mut ts = [
+            target(vec![trash("/home/user/.local/share/foo", 10)]),
+            target(vec![
+                trash("/home/user/.local/share/foo/Bar.AppImage", 1),
+                dependent,
+                kept_dep,
+            ]),
+            // The file stays here; indexes shift when an earlier action goes.
+            target(vec![
+                trash("/home/user/.local/share/foo/Baz", 1),
+                trash("/home/user/Apps/Q.AppImage", 1),
+                {
+                    let mut a = trash("/home/user/.config/Q", 1);
+                    a.depends_on = Some(1);
+                    a
+                },
+            ]),
+        ];
+        drop_overlaps(&mut ts);
+        assert_eq!(ts[1].plan.actions.len(), 2);
+        assert!(ts[1].plan.actions.iter().all(|a| a.depends_on.is_none()));
+        assert_eq!(ts[2].plan.actions.len(), 2);
+        assert_eq!(ts[2].plan.actions[1].depends_on, Some(0));
     }
 }
