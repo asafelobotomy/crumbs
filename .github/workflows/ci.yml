@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+
+  arch:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install toolchain
+        run: pacman -Syu --noconfirm rust jq gcc
+      - uses: actions/checkout@v4
+      - name: Test
+        run: cargo test --workspace --all-features
+      - name: Build
+        run: cargo build --workspace
+      - name: Smoke test
+        run: |
+          set -u
+          for args in "doctor --json" "apps list --all --json"; do
+            rc=0
+            out=$(./target/debug/crumbs $args) || rc=$?
+            echo "crumbs $args exited $rc"
+            case "$rc" in 0|3) ;; *) echo "unexpected exit code $rc"; exit 1 ;; esac
+            echo "$out" | jq -e '.schema_version == 1'
+          done
