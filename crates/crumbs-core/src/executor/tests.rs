@@ -359,7 +359,8 @@ fn running_processes_without_proc_is_empty() {
 #[test]
 fn execute_passes_scope_to_verify() {
     let t = FixtureTree::new();
-    t.write("tmp/a", b"a");
+    let a = t.write("tmp/a", b"a");
+    age_days(&a, 30);
     t.write("tmp/b", b"b");
     let env = t.env();
     let mut temp = planned(&env, delete("/tmp/a"));
@@ -551,4 +552,61 @@ fn invalid_dependencies_fail_closed_and_skips_are_transitive() {
     for n in ["a", "b", "c", "d", "e"] {
         assert!(env.sys(&format!("/home/user/.config/{n}/x")).exists());
     }
+}
+
+/// Sets atime and mtime of `p` to `days` ago without following a symlink.
+fn age_days(p: &Path, days: u64) {
+    use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, utimensat};
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - days * 86_400;
+    let ts = Timespec {
+        tv_sec: secs as i64,
+        tv_nsec: 0,
+    };
+    let times = Timestamps {
+        last_access: ts,
+        last_modification: ts,
+    };
+    utimensat(CWD, p, &times, AtFlags::SYMLINK_NOFOLLOW).unwrap();
+}
+
+/// A `/tmp` dir that was stale when scanned but gained a fresh file
+/// before execution is refused and left intact.
+#[test]
+fn execute_rechecks_temp_staleness() {
+    let t = FixtureTree::new();
+    let f = t.write("tmp/work/old", b"x");
+    let dir = env_dir(&t, "tmp/work");
+    age_days(&f, 30);
+    age_days(&dir, 30);
+    let g = t.write("tmp/gone/old", b"x");
+    let gone = env_dir(&t, "tmp/gone");
+    age_days(&g, 30);
+    age_days(&gone, 30);
+    let env = t.env();
+    let mut stale = planned(&env, delete("/tmp/work"));
+    stale.scope = Scope::UserTemp;
+    let mut ok = planned(&env, delete("/tmp/gone"));
+    ok.scope = Scope::UserTemp;
+    // Someone starts using the dir between scan and clean; the dir's own
+    // inode is unchanged, so `verify` alone would pass.
+    t.write("tmp/work/new", b"fresh");
+    age_days(&dir, 30);
+    let report = execute(&env, &Config::default(), &plan_of(vec![stale, ok]));
+    assert!(!report.results[0].ok);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("refusing: /tmp/work is no longer an old temporary file")
+    );
+    assert!(env.sys("/tmp/work/old").exists());
+    assert!(env.sys("/tmp/work/new").exists());
+    assert!(report.results[1].ok, "{:?}", report.results[1]);
+    assert!(!env.sys("/tmp/gone").exists());
+}
+
+fn env_dir(t: &FixtureTree, rel: &str) -> PathBuf {
+    t.dir.path().join(rel)
 }

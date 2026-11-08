@@ -9,6 +9,9 @@ pub enum CoreError {
     UnsafeRoot(PathBuf),
     #[error("command {program} failed: {message}")]
     Command { program: String, message: String },
+    /// A feature that refuses to run in this situation; the message says why.
+    #[error("{0}")]
+    Unavailable(&'static str),
     #[error("failed to parse {what}: {message}")]
     Parse { what: String, message: String },
 }

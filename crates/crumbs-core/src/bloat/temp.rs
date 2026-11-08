@@ -1,20 +1,24 @@
 //! `temp`: the user's old entries directly in `/tmp`. Items are deleted
 //! permanently, so anything that might be live is left alone.
 
-use std::ffi::OsStr;
-use std::fs::{self, FileType};
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, FileType, Metadata};
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use super::{BloatItem, Category, ItemAction, ScanContext, Scanner};
-use crate::env::display_path;
+use crate::config::Config;
+use crate::env::{Env, display_path};
 use crate::error::CoreError;
 use crate::safety::{Scope, fingerprint, is_allowed_target};
 
-/// Name prefixes of live session and service entries (Review Focus #2).
-const LIVE_PREFIXES: [&[u8]; 9] = [
+/// Name prefixes of live session and service entries (Review Focus #2,
+/// extended by controller ruling R2).
+const LIVE_PREFIXES: [&[u8]; 24] = [
     b".X",
     b".ICE-unix",
     b".font-unix",
@@ -24,6 +28,21 @@ const LIVE_PREFIXES: [&[u8]; 9] = [
     b"pulse-",
     b"krb5cc",
     b".s.PGSQL",
+    b"xauth",
+    b".xauth",
+    b"serverauth",
+    b"sddm",
+    b"gdm",
+    b"lightdm",
+    b"kde",
+    b"plasma",
+    b"dbus",
+    b".wine",
+    b"nvidia",
+    b"mozilla",
+    b"vscode",
+    b"pyright",
+    b"jetbrains",
 ];
 
 /// Most entries walked inside one directory; a bigger one is skipped.
@@ -31,55 +50,159 @@ const WALK_CAP: usize = 10_000;
 
 const NOTE: &str = "deleted permanently (temporary file)";
 
-fn is_old(mtime: SystemTime, now: SystemTime, max_age: Duration) -> bool {
-    now.duration_since(mtime).is_ok_and(|age| age > max_age)
+/// The scanner's error when run as root (review finding I1).
+pub(crate) const ROOT_REFUSAL: &str = "temp cleanup is not available as root";
+
+/// The lstat data the candidate rule looks at.
+#[derive(Clone, Copy)]
+pub(crate) struct EntryStat {
+    pub owner_uid: u32,
+    pub file_type: FileType,
+    pub mtime: SystemTime,
+    pub atime: SystemTime,
+}
+
+impl EntryStat {
+    fn of(m: &Metadata) -> Option<Self> {
+        Some(EntryStat {
+            owner_uid: m.uid(),
+            file_type: m.file_type(),
+            mtime: m.modified().ok()?,
+            atime: m.accessed().ok()?,
+        })
+    }
+}
+
+fn is_old(t: SystemTime, now: SystemTime, max_age: Duration) -> bool {
+    now.duration_since(t).is_ok_and(|age| age > max_age)
 }
 
 /// Whether a direct child of `/tmp` may be listed, judged from its own
 /// lstat data: owned by the user, a regular file or directory (never a
-/// symlink, socket, fifo or device), no live-entry name prefix, and older
-/// than `max_age`. A directory's contents are checked separately.
+/// symlink, socket, fifo or device), no live-entry name prefix, and both
+/// modified and accessed longer than `max_age` ago. A directory's contents
+/// are checked separately.
 pub(crate) fn temp_candidate(
     name: &OsStr,
-    owner_uid: u32,
+    st: &EntryStat,
     user_uid: u32,
-    file_type: FileType,
-    mtime: SystemTime,
     now: SystemTime,
     max_age: Duration,
 ) -> bool {
     let bytes = name.as_bytes();
-    owner_uid == user_uid
-        && (file_type.is_file() || file_type.is_dir())
+    st.owner_uid == user_uid
+        && (st.file_type.is_file() || st.file_type.is_dir())
         && !LIVE_PREFIXES.iter().any(|p| bytes.starts_with(p))
-        && is_old(mtime, now, max_age)
+        && is_old(st.mtime, now, max_age)
+        && is_old(st.atime, now, max_age)
 }
 
-/// Whether everything below `dir` (real path) is old, owned by the user,
-/// a file, directory or symlink, and on device `dev`, within [`WALK_CAP`]
-/// entries. Never follows symlinks; any read error fails closed.
-fn contents_old(dir: &Path, dev: u64, user_uid: u32, now: SystemTime, max_age: Duration) -> bool {
+/// `(dev, ino)` of every file a process has open, mapped, or as its
+/// working directory or executable, from `/proc` (under the env root).
+/// Processes that can't be read are skipped.
+fn open_inodes(env: &Env) -> HashSet<(u64, u64)> {
+    let mut set = HashSet::new();
+    let Ok(procs) = fs::read_dir(env.sys_path(Path::new("/proc"))) else {
+        return set;
+    };
+    for p in procs.flatten() {
+        let name = p.file_name();
+        if name.is_empty() || !name.as_bytes().iter().all(u8::is_ascii_digit) {
+            continue;
+        }
+        let dir = p.path();
+        let mut links: Vec<PathBuf> = vec![dir.join("cwd"), dir.join("exe")];
+        if let Ok(fds) = fs::read_dir(dir.join("fd")) {
+            links.extend(fds.flatten().map(|e| e.path()));
+        }
+        // Stat through the link: the open file itself.
+        for link in links {
+            if let Ok(m) = fs::metadata(&link) {
+                set.insert((m.dev(), m.ino()));
+            }
+        }
+        if let Ok(maps) = fs::read_to_string(dir.join("maps")) {
+            set.extend(maps.lines().filter_map(parse_maps_line));
+        }
+    }
+    set
+}
+
+/// `(dev, ino)` of a file-backed `/proc/<pid>/maps` line.
+fn parse_maps_line(line: &str) -> Option<(u64, u64)> {
+    let mut f = line.split_ascii_whitespace();
+    let dev = f.nth(3)?;
+    let ino: u64 = f.next()?.parse().ok()?;
+    if ino == 0 {
+        return None;
+    }
+    let (maj, min) = dev.split_once(':')?;
+    let maj = u32::from_str_radix(maj, 16).ok()?;
+    let min = u32::from_str_radix(min, 16).ok()?;
+    Some((rustix::fs::makedev(maj, min), ino))
+}
+
+/// Names in `dir` (real path), read without following a symlink and
+/// without updating the directory's access time.
+fn list_dir_noatime(dir: &Path) -> io::Result<Vec<OsString>> {
+    use rustix::fs::{CWD, Dir, Mode, OFlags, openat};
+    let fd = openat(
+        CWD,
+        dir,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::NOATIME | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let mut d = Dir::read_from(&fd)?;
+    let mut out = Vec::new();
+    while let Some(entry) = d.read() {
+        let entry = entry?;
+        let n = entry.file_name().to_bytes();
+        if n != b"." && n != b".." {
+            out.push(OsStr::from_bytes(n).to_os_string());
+        }
+    }
+    Ok(out)
+}
+
+/// What the stale checks need besides the entry itself.
+struct Ctx<'a> {
+    user_uid: u32,
+    tmp_dev: u64,
+    now: SystemTime,
+    max_age: Duration,
+    open: &'a HashSet<(u64, u64)>,
+}
+
+/// Whether everything below `dir` (real path) is old (modified and
+/// accessed), owned by the user, a file, directory or symlink, on device
+/// `dev`, and not open in any process, within [`WALK_CAP`] entries. Never
+/// follows symlinks; any read error fails closed.
+fn contents_old(dir: &Path, dev: u64, cx: &Ctx) -> bool {
     let mut seen = 0usize;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(rd) = fs::read_dir(&d) else {
+        let Ok(names) = list_dir_noatime(&d) else {
             return false;
         };
-        for entry in rd {
-            let Ok(entry) = entry else { return false };
+        for name in names {
             seen += 1;
             if seen > WALK_CAP {
                 return false;
             }
-            let path = entry.path();
+            let path = d.join(name);
             let Ok(meta) = fs::symlink_metadata(&path) else {
                 return false;
             };
-            let ft = meta.file_type();
-            if meta.uid() != user_uid
+            let Some(st) = EntryStat::of(&meta) else {
+                return false;
+            };
+            let ft = st.file_type;
+            if st.owner_uid != cx.user_uid
                 || meta.dev() != dev
                 || !(ft.is_file() || ft.is_dir() || ft.is_symlink())
-                || !meta.modified().is_ok_and(|m| is_old(m, now, max_age))
+                || !is_old(st.mtime, cx.now, cx.max_age)
+                || !is_old(st.atime, cx.now, cx.max_age)
+                || cx.open.contains(&(meta.dev(), meta.ino()))
             {
                 return false;
             }
@@ -91,6 +214,62 @@ fn contents_old(dir: &Path, dev: u64, user_uid: u32, now: SystemTime, max_age: D
     true
 }
 
+/// Why the `/tmp` child `name` (real path `real`) must not be removed now,
+/// or `Ok` when it is a stale temporary entry.
+fn stale_check(real: &Path, name: &OsStr, cx: &Ctx) -> Result<(), &'static str> {
+    const NOT_STALE: &str = "is no longer an old temporary file";
+    let meta = fs::symlink_metadata(real).map_err(|_| NOT_STALE)?;
+    let st = EntryStat::of(&meta).ok_or(NOT_STALE)?;
+    if !temp_candidate(name, &st, cx.user_uid, cx.now, cx.max_age) {
+        return Err(NOT_STALE);
+    }
+    if cx.open.contains(&(meta.dev(), meta.ino())) {
+        return Err("is open in a running process");
+    }
+    if st.file_type.is_dir() && (meta.dev() != cx.tmp_dev || !contents_old(real, meta.dev(), cx)) {
+        return Err(NOT_STALE);
+    }
+    Ok(())
+}
+
+fn max_age(cfg: &Config) -> Duration {
+    Duration::from_secs(cfg.temp_age_days.saturating_mul(86_400))
+}
+
+/// `/tmp` (real path) and its device, when it is a real directory.
+fn tmp_dir(env: &Env) -> Option<(PathBuf, u64)> {
+    let real = env.sys("/tmp");
+    let m = fs::symlink_metadata(&real).ok()?;
+    m.file_type().is_dir().then_some((real, m.dev()))
+}
+
+/// Re-runs the scan's rules for one `/tmp` child (in-system `path`) right
+/// before it is deleted: still a stale candidate, its contents still old,
+/// and nothing in it open. `Err` holds the reason, to follow the path in
+/// `refusing: <path> <reason>`.
+pub(crate) fn still_stale(
+    env: &Env,
+    cfg: &Config,
+    path: &Path,
+    now: SystemTime,
+) -> Result<(), String> {
+    let not_temp = || "is not a direct child of /tmp".to_string();
+    if path.parent() != Some(Path::new("/tmp")) {
+        return Err(not_temp());
+    }
+    let name = path.file_name().ok_or_else(not_temp)?;
+    let (tmp_real, tmp_dev) = tmp_dir(env).ok_or_else(not_temp)?;
+    let open = open_inodes(env);
+    let cx = Ctx {
+        user_uid: env.uid,
+        tmp_dev,
+        now,
+        max_age: max_age(cfg),
+        open: &open,
+    };
+    stale_check(&tmp_real.join(name), name, &cx).map_err(str::to_string)
+}
+
 pub struct TempScanner;
 
 impl Scanner for TempScanner {
@@ -99,36 +278,29 @@ impl Scanner for TempScanner {
     }
 
     fn scan(&self, cx: &ScanContext) -> Result<Vec<BloatItem>, CoreError> {
-        let tmp_real = cx.env.sys("/tmp");
-        // `/tmp` itself must be a real directory; verify refuses otherwise.
-        let Ok(tmp_meta) = fs::symlink_metadata(&tmp_real) else {
-            return Ok(Vec::new());
-        };
-        if !tmp_meta.file_type().is_dir() {
-            return Ok(Vec::new());
+        if cx.env.uid == 0 {
+            return Err(CoreError::Unavailable(ROOT_REFUSAL));
         }
-        let Ok(rd) = fs::read_dir(&tmp_real) else {
+        // `/tmp` itself must be a real directory; verify refuses otherwise.
+        let Some((tmp_real, tmp_dev)) = tmp_dir(cx.env) else {
             return Ok(Vec::new());
         };
-        let max_age = Duration::from_secs(cx.cfg.temp_age_days.saturating_mul(86_400));
-        let mut names: Vec<_> = rd.flatten().map(|e| e.file_name()).collect();
+        let Ok(mut names) = list_dir_noatime(&tmp_real) else {
+            return Ok(Vec::new());
+        };
         names.sort();
+        let open = open_inodes(cx.env);
+        let rules = Ctx {
+            user_uid: cx.env.uid,
+            tmp_dev,
+            now: cx.now,
+            max_age: max_age(cx.cfg),
+            open: &open,
+        };
 
         let mut out = Vec::new();
         for name in names {
-            let real = tmp_real.join(&name);
-            let Ok(meta) = fs::symlink_metadata(&real) else {
-                continue;
-            };
-            let Ok(mtime) = meta.modified() else { continue };
-            let ft = meta.file_type();
-            if !temp_candidate(&name, meta.uid(), cx.env.uid, ft, mtime, cx.now, max_age) {
-                continue;
-            }
-            if ft.is_dir()
-                && (meta.dev() != tmp_meta.dev()
-                    || !contents_old(&real, meta.dev(), cx.env.uid, cx.now, max_age))
-            {
+            if stale_check(&tmp_real.join(&name), &name, &rules).is_err() {
                 continue;
             }
             let path = PathBuf::from("/tmp").join(&name);
@@ -154,5 +326,35 @@ impl Scanner for TempScanner {
             });
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::time::UNIX_EPOCH;
+
+    #[test]
+    fn maps_lines() {
+        let dev = rustix::fs::makedev(0x103, 0x2);
+        assert_eq!(
+            parse_maps_line("7f00-7f10 r-xp 00000000 103:02 4242 /usr/lib/libc.so.6"),
+            Some((dev, 4242))
+        );
+        assert_eq!(
+            parse_maps_line("7f00-7f10 rw-p 00000000 00:00 0 [heap]"),
+            None
+        );
+        assert_eq!(parse_maps_line("garbage"), None);
+    }
+
+    #[test]
+    fn epoch_is_old() {
+        assert!(is_old(
+            UNIX_EPOCH,
+            SystemTime::now(),
+            Duration::from_secs(1)
+        ));
     }
 }

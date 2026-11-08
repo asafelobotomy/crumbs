@@ -8,7 +8,7 @@ mod logs;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod scanner_tests;
-mod temp;
+pub(crate) mod temp;
 mod trash;
 
 use std::path::PathBuf;

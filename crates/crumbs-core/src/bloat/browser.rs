@@ -60,7 +60,7 @@ const BROWSERS: [Browser; 6] = [
         name: "Brave",
         profile: &[Seg::Lit("BraveSoftware"), Seg::Any, Seg::Any],
         leaves: CHROMIUM_LEAVES,
-        exes: &["brave"],
+        exes: &["brave", "brave-origin"],
         flatpak_id: "com.brave.Browser",
     },
     Browser {
@@ -195,15 +195,16 @@ impl Scanner for BrowserCacheScanner {
                         .map(|p| p.to_string_lossy())
                         .collect::<Vec<_>>()
                         .join("/");
-                    let label = format!("{} ({profile})", b.name);
+                    let profile_label = format!("{} ({profile})", b.name);
                     for leaf in b.leaves {
                         let real = profile_dir.join(leaf);
                         if !is_real_dir(&real) {
                             continue;
                         }
                         let path = cx.env.unsys(&real);
+                        let label = format!("{profile_label} {leaf}");
                         let Some(mut item) =
-                            new_item(cx, Category::BrowserCache, path, label.clone(), true)
+                            new_item(cx, Category::BrowserCache, path, label, true)
                         else {
                             continue;
                         };

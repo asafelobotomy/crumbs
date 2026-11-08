@@ -12,6 +12,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::Serialize;
 
@@ -20,7 +21,7 @@ use crate::env::{Env, display_path};
 use crate::history::{self, HistoryAction, HistoryEntry};
 use crate::model::App;
 use crate::plan::{Action, Plan};
-use crate::safety::{self, Fingerprint};
+use crate::safety::{self, Fingerprint, Scope};
 use crate::size;
 use crate::trash::{self, Trashed};
 
@@ -65,6 +66,7 @@ pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
             Some(reason) => Err(reason),
             None => safety::verify(env, cfg, pa.scope, path, &pa.fingerprint)
                 .map_err(|e| e.to_string())
+                .and_then(|()| recheck_scope(env, cfg, pa.scope, path))
                 .and_then(|()| act(env, &pa.action, &pa.fingerprint, &batch)),
         };
         let (ok, error, done) = match outcome {
@@ -114,6 +116,16 @@ pub fn execute(env: &Env, cfg: &Config, plan: &Plan) -> ExecReport {
         results,
         freed,
     }
+}
+
+/// Scope rules beyond `verify` that are re-run right before acting: a
+/// `UserTemp` entry must still be stale (old, unused, nothing open).
+fn recheck_scope(env: &Env, cfg: &Config, scope: Scope, path: &Path) -> Result<(), String> {
+    if scope != Scope::UserTemp {
+        return Ok(());
+    }
+    crate::bloat::temp::still_stale(env, cfg, path, SystemTime::now())
+        .map_err(|reason| format!("refusing: {} {reason}", display_path(env, path)))
 }
 
 /// Why an action must not run: the earlier action it depends on failed or

@@ -125,15 +125,24 @@ impl Scanner for TrashScanner {
             let (Ok(file), Ok(meta)) = (checked(cx, &file_real), checked(cx, &info_real)) else {
                 continue;
             };
+            let info_only = file.is_none();
             let (path, fp, extra_paths) = match (file, meta) {
                 (Some((p, fp)), Some(extra)) => (p, fp, vec![extra]),
                 (Some((p, fp)), None) | (None, Some((p, fp))) => (p, fp, Vec::new()),
                 (None, None) => continue,
             };
-            let label = match original_path(&info_real) {
-                Some(orig) if orig.is_absolute() => display_path(cx.env, &orig),
-                Some(orig) => orig.to_string_lossy().into_owned(),
-                None => format!("{} (no trash info)", name.to_string_lossy()),
+            let original = original_path(&info_real).map(|orig| {
+                if orig.is_absolute() {
+                    display_path(cx.env, &orig)
+                } else {
+                    orig.to_string_lossy().into_owned()
+                }
+            });
+            let label = match (original, info_only) {
+                (Some(orig), false) => orig,
+                (Some(orig), true) => format!("{orig} (trash info only)"),
+                (None, true) => format!("{} (trash info only)", name.to_string_lossy()),
+                (None, false) => format!("{} (no trash info)", name.to_string_lossy()),
             };
             out.push(BloatItem {
                 category: Category::Trash,

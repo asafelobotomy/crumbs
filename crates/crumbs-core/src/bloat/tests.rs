@@ -378,23 +378,23 @@ fn browser_profiles_found() {
         [
             (
                 PathBuf::from(format!("{c}/BraveSoftware/Brave-Origin/Default/Cache")),
-                "Brave (Brave-Origin/Default)".to_string()
+                "Brave (Brave-Origin/Default) Cache".to_string()
             ),
             (
                 PathBuf::from(format!("{c}/BraveSoftware/Brave-Origin/Default/Code Cache")),
-                "Brave (Brave-Origin/Default)".to_string()
+                "Brave (Brave-Origin/Default) Code Cache".to_string()
             ),
             (
                 PathBuf::from(format!("{c}/BraveSoftware/Brave-Origin/Default/GPUCache")),
-                "Brave (Brave-Origin/Default)".to_string()
+                "Brave (Brave-Origin/Default) GPUCache".to_string()
             ),
             (
                 PathBuf::from(format!("{c}/google-chrome/Profile 1/Cache")),
-                "Chrome (Profile 1)".to_string()
+                "Chrome (Profile 1) Cache".to_string()
             ),
             (
                 PathBuf::from(format!("{c}/mozilla/firefox/ab12.default-release/cache2")),
-                "Firefox (ab12.default-release)".to_string()
+                "Firefox (ab12.default-release) cache2".to_string()
             ),
         ]
     );
@@ -431,6 +431,23 @@ fn browser_running_not_preselected() {
         .unwrap();
     assert!(ff.preselected && ff.note.is_none());
     check_browser(&t, &items);
+
+    // Brave-Origin runs as `brave-origin`.
+    let t2 = FixtureTree::new();
+    t2.write(
+        "home/user/.cache/BraveSoftware/Brave-Origin/Default/Cache/x",
+        b"x",
+    );
+    t2.symlink("proc/90/exe", "/opt/brave.com/brave-origin/brave-origin");
+    let items = scan_one(
+        &t2,
+        &Config::default(),
+        &FakeRunner::new(),
+        Category::BrowserCache,
+    )
+    .unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].note.as_deref(), Some("Brave is running"));
 
     // A browser whose binary was replaced by an update still counts.
     t.symlink("proc/79/exe", "/usr/lib/firefox/firefox (deleted)");
@@ -479,14 +496,14 @@ fn flatpak_browser_cache_found() {
         ]
     );
     let brave = items.iter().find(|i| i.label.starts_with("Brave")).unwrap();
-    assert_eq!(brave.label, "Brave (Brave-Browser/Default)");
+    assert_eq!(brave.label, "Brave (Brave-Browser/Default) GPUCache");
     assert!(!brave.preselected);
     assert_eq!(brave.note.as_deref(), Some("Brave is running"));
     let fox = items
         .iter()
         .find(|i| i.label.starts_with("Firefox"))
         .unwrap();
-    assert_eq!(fox.label, "Firefox (xy.default)");
+    assert_eq!(fox.label, "Firefox (xy.default) cache2");
     assert!(fox.preselected && fox.note.is_none());
     check_browser(&t, &items);
     // Asked once, however many Flatpak items there are.
@@ -508,6 +525,7 @@ fn flatpak_browser_cache_found() {
         for i in &items {
             assert!(!i.preselected);
             let browser = i.label.split(' ').next().unwrap();
+            assert!(i.label.ends_with(" cache2") || i.label.ends_with(" GPUCache"));
             assert_eq!(
                 i.note.as_deref(),
                 Some(format!("could not check whether {browser} is running").as_str())
@@ -660,8 +678,28 @@ fn temp_owner_rule() {
     let week = Duration::from_secs(7 * 86_400);
     let old = now - Duration::from_secs(30 * 86_400);
     let ok = |name: &str, owner: u32, ft: fs::FileType, mtime: SystemTime| {
-        super::temp::temp_candidate(std::ffi::OsStr::new(name), owner, me, ft, mtime, now, week)
+        let st = super::temp::EntryStat {
+            owner_uid: owner,
+            file_type: ft,
+            mtime,
+            atime: old,
+        };
+        super::temp::temp_candidate(std::ffi::OsStr::new(name), &st, me, now, week)
     };
+    // Accessed recently, though modified long ago: kept.
+    let recent = super::temp::EntryStat {
+        owner_uid: me,
+        file_type: fm.file_type(),
+        mtime: old,
+        atime: now,
+    };
+    assert!(!super::temp::temp_candidate(
+        std::ffi::OsStr::new("a"),
+        &recent,
+        me,
+        now,
+        week
+    ));
     assert!(ok("a", me, fm.file_type(), old));
     assert!(ok("a", me, dm.file_type(), old));
     // Someone else's file or dir.
@@ -672,6 +710,7 @@ fn temp_owner_rule() {
     // mtime in the future is not old.
     assert!(!ok("a", me, fm.file_type(), now + week));
     assert!(!ok("tmux-1000", me, dm.file_type(), old));
+    assert!(!ok("xauth_XYZ", me, fm.file_type(), old));
 }
 
 fn check_trash(t: &FixtureTree, items: &[BloatItem]) {
@@ -740,8 +779,8 @@ fn trash_pairs_and_orphans() {
             ),
             (pb("files/d"), vec![pb("info/d.trashinfo")], "/srv/café"),
             (pb("files/x"), vec![], "x (no trash info)"),
-            (pb("info/y.trashinfo"), vec![], "~/y"),
-            (pb("info/z.trashinfo"), vec![], "z (no trash info)"),
+            (pb("info/y.trashinfo"), vec![], "~/y (trash info only)"),
+            (pb("info/z.trashinfo"), vec![], "z (trash info only)"),
         ]
     );
     check_trash(&t, &items);
@@ -785,4 +824,139 @@ fn registry_follows_category_order() {
     for c in [Category::Trash, Category::Temp, Category::BrowserCache] {
         assert!(cats.contains(&c), "{c:?}");
     }
+}
+
+/// Sets `p`'s atime to now and its mtime to `days` ago (no-follow).
+fn fresh_atime_old_mtime(p: &Path, days: u64) {
+    use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, utimensat};
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let old = now - days * 86_400 - 3600;
+    utimensat(
+        CWD,
+        p,
+        &Timestamps {
+            last_access: Timespec {
+                tv_sec: now as i64,
+                tv_nsec: 0,
+            },
+            last_modification: Timespec {
+                tv_sec: old as i64,
+                tv_nsec: 0,
+            },
+        },
+        AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .unwrap();
+}
+
+#[test]
+fn temp_recent_access_extra_prefixes_and_scan_keeps_atime() {
+    let t = FixtureTree::new();
+    let tmp = t.mkdir("tmp");
+    // Recently read, though not modified: kept.
+    let read = t.write("tmp/read-recently", b"x");
+    fresh_atime_old_mtime(&read, 30);
+    let inner = t.write("tmp/dir-read/inner", b"x");
+    fresh_atime_old_mtime(&inner, 30);
+    age_nofollow(&tmp.join("dir-read"), 30);
+    let mut old = vec![];
+    for name in [
+        "xauth_abc",
+        ".xauth123",
+        "serverauth.x",
+        "sddm-auth",
+        "gdm-x",
+        "lightdm-x",
+        "kdeinit5__0",
+        "plasma-csd-x",
+        "dbus-abc",
+        ".wine-1000",
+        "nvidia-x",
+        "mozilla_user0",
+        "vscode-ipc",
+        "pyright-x",
+        "jetbrains-x",
+    ] {
+        old.push(t.write(&format!("tmp/{name}"), b"x"));
+    }
+    old.push(t.write("tmp/plain/sub/f", b"x"));
+    old.push(tmp.join("plain/sub"));
+    old.push(tmp.join("plain"));
+    for p in &old {
+        age_nofollow(p, 30);
+    }
+    let cfg = Config::default();
+    let items = scan_one(&t, &cfg, &FakeRunner::new(), Category::Temp).unwrap();
+    assert_eq!(paths(&items), [PathBuf::from("/tmp/plain")]);
+    // Scanning reads the dirs without touching their access times, so a
+    // second scan (and the executor's re-check) still finds it stale.
+    let again = scan_one(&t, &cfg, &FakeRunner::new(), Category::Temp).unwrap();
+    assert_eq!(paths(&again), [PathBuf::from("/tmp/plain")]);
+    super::temp::still_stale(&t.env(), &cfg, Path::new("/tmp/plain"), SystemTime::now()).unwrap();
+}
+
+#[test]
+fn temp_open_files_kept() {
+    let t = FixtureTree::new();
+    let tmp = t.mkdir("tmp");
+    let lock = t.write("tmp/app.lock", b"x");
+    let mapped = t.write("tmp/mapdir/lib.so", b"x");
+    let cwd = t.mkdir("tmp/shell-here");
+    let free = t.write("tmp/free", b"x");
+    for p in [&lock, &mapped, &tmp.join("mapdir"), &cwd, &free] {
+        age_nofollow(p, 30);
+    }
+    t.symlink("proc/50/fd/3", lock.to_str().unwrap());
+    t.symlink("proc/50/fd/4", "/nonexistent/ignored");
+    t.symlink("proc/52/cwd", cwd.to_str().unwrap());
+    let m = fs::metadata(&mapped).unwrap();
+    use std::os::unix::fs::MetadataExt;
+    let line = format!(
+        "7f00-7f10 r-xp 00000000 {:02x}:{:02x} {} /tmp/mapdir/lib.so\n00400000-00401000 r--p 00000000 00:00 0 [heap]\n",
+        rustix::fs::major(m.dev()),
+        rustix::fs::minor(m.dev()),
+        m.ino()
+    );
+    t.write("proc/51/maps", line.as_bytes());
+    let items = scan_one(&t, &Config::default(), &FakeRunner::new(), Category::Temp).unwrap();
+    assert_eq!(paths(&items), [PathBuf::from("/tmp/free")]);
+    let env = t.env();
+    let err = super::temp::still_stale(
+        &env,
+        &Config::default(),
+        Path::new("/tmp/app.lock"),
+        SystemTime::now(),
+    )
+    .unwrap_err();
+    assert_eq!(err, "is open in a running process");
+}
+
+#[test]
+fn temp_refused_as_root() {
+    let t = FixtureTree::new();
+    let f = t.write("tmp/old", b"x");
+    age_nofollow(&f, 30);
+    let mut env = t.env();
+    env.uid = 0;
+    let cfg = Config::default();
+    let i = inv(vec![]);
+    let runner = FakeRunner::new();
+    let cx = ScanContext {
+        env: &env,
+        cfg: &cfg,
+        inv: &i,
+        runner: &runner,
+        now: SystemTime::now(),
+    };
+    let err = super::temp::TempScanner.scan(&cx).unwrap_err();
+    assert_eq!(err.to_string(), "temp cleanup is not available as root");
+    let fp = crate::safety::fingerprint(&env, Path::new("/tmp/old")).unwrap();
+    let err = verify(&env, &cfg, Scope::UserTemp, Path::new("/tmp/old"), &fp).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "refusing: /tmp/old temp cleanup is not available as root"
+    );
 }

@@ -312,6 +312,13 @@ pub fn verify_now(
         Err(_) => return Err(SafetyError::Changed(shown)),
     };
     if scope == Scope::UserTemp {
+        // Root could remove other users' files; temp cleanup is per user.
+        if env.uid == 0 {
+            return Err(SafetyError::Ineligible(
+                shown,
+                "temp cleanup is not available as root",
+            ));
+        }
         let ft = meta.file_type();
         if !(ft.is_file() || ft.is_dir()) {
             return Err(SafetyError::Ineligible(
