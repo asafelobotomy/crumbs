@@ -682,24 +682,9 @@ fn temp_owner_rule() {
             owner_uid: owner,
             file_type: ft,
             mtime,
-            atime: old,
         };
         super::temp::temp_candidate(std::ffi::OsStr::new(name), &st, me, now, week)
     };
-    // Accessed recently, though modified long ago: kept.
-    let recent = super::temp::EntryStat {
-        owner_uid: me,
-        file_type: fm.file_type(),
-        mtime: old,
-        atime: now,
-    };
-    assert!(!super::temp::temp_candidate(
-        std::ffi::OsStr::new("a"),
-        &recent,
-        me,
-        now,
-        week
-    ));
     assert!(ok("a", me, fm.file_type(), old));
     assert!(ok("a", me, dm.file_type(), old));
     // Someone else's file or dir.
@@ -826,42 +811,10 @@ fn registry_follows_category_order() {
     }
 }
 
-/// Sets `p`'s atime to now and its mtime to `days` ago (no-follow).
-fn fresh_atime_old_mtime(p: &Path, days: u64) {
-    use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, utimensat};
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let old = now - days * 86_400 - 3600;
-    utimensat(
-        CWD,
-        p,
-        &Timestamps {
-            last_access: Timespec {
-                tv_sec: now as i64,
-                tv_nsec: 0,
-            },
-            last_modification: Timespec {
-                tv_sec: old as i64,
-                tv_nsec: 0,
-            },
-        },
-        AtFlags::SYMLINK_NOFOLLOW,
-    )
-    .unwrap();
-}
-
 #[test]
-fn temp_recent_access_extra_prefixes_and_scan_keeps_atime() {
+fn temp_extra_prefixes_kept() {
     let t = FixtureTree::new();
     let tmp = t.mkdir("tmp");
-    // Recently read, though not modified: kept.
-    let read = t.write("tmp/read-recently", b"x");
-    fresh_atime_old_mtime(&read, 30);
-    let inner = t.write("tmp/dir-read/inner", b"x");
-    fresh_atime_old_mtime(&inner, 30);
-    age_nofollow(&tmp.join("dir-read"), 30);
     let mut old = vec![];
     for name in [
         "xauth_abc",
@@ -891,10 +844,6 @@ fn temp_recent_access_extra_prefixes_and_scan_keeps_atime() {
     let cfg = Config::default();
     let items = scan_one(&t, &cfg, &FakeRunner::new(), Category::Temp).unwrap();
     assert_eq!(paths(&items), [PathBuf::from("/tmp/plain")]);
-    // Scanning reads the dirs without touching their access times, so a
-    // second scan (and the executor's re-check) still finds it stale.
-    let again = scan_one(&t, &cfg, &FakeRunner::new(), Category::Temp).unwrap();
-    assert_eq!(paths(&again), [PathBuf::from("/tmp/plain")]);
     super::temp::still_stale(&t.env(), &cfg, Path::new("/tmp/plain"), SystemTime::now()).unwrap();
 }
 
@@ -959,4 +908,55 @@ fn temp_refused_as_root() {
         err.to_string(),
         "refusing: /tmp/old temp cleanup is not available as root"
     );
+}
+
+/// Through the real scan pipeline, size pass included: a stale dir item
+/// still passes the execute-time recheck afterwards.
+#[test]
+fn temp_scan_pipeline_then_still_stale() {
+    let t = FixtureTree::new();
+    let mut old = vec![
+        t.write("tmp/build-1/a/b/c.o", &[1u8; 3000]),
+        t.write("tmp/build-1/d.o", &[1u8; 5000]),
+        t.write("tmp/old.txt", b"x"),
+    ];
+    let tmp = t.dir.path().join("tmp");
+    old.push(tmp.join("build-1/a/b"));
+    old.push(tmp.join("build-1/a"));
+    old.push(tmp.join("build-1"));
+    for p in &old {
+        age_nofollow(p, 30);
+    }
+    let env = t.env();
+    let cfg = Config::default();
+    let i = inv(vec![]);
+    let runner = FakeRunner::new();
+    let cx = ScanContext {
+        env: &env,
+        cfg: &cfg,
+        inv: &i,
+        runner: &runner,
+        now: SystemTime::now(),
+    };
+    let rep = scan_all(&cx, &[Category::Temp]);
+    assert_eq!(rep.categories.len(), 1);
+    let cat = &rep.categories[0];
+    assert!(cat.error.is_none(), "{:?}", cat.error);
+    assert_eq!(
+        paths(&cat.items),
+        [PathBuf::from("/tmp/build-1"), PathBuf::from("/tmp/old.txt")]
+    );
+    assert!(cat.items[0].size.unwrap() >= 8000);
+    for item in &cat.items {
+        let p = item.path.as_ref().unwrap();
+        super::temp::still_stale(&env, &cfg, p, SystemTime::now()).unwrap();
+        verify(
+            &env,
+            &cfg,
+            Scope::UserTemp,
+            p,
+            item.fingerprint.as_ref().unwrap(),
+        )
+        .unwrap();
+    }
 }

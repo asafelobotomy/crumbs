@@ -59,7 +59,6 @@ pub(crate) struct EntryStat {
     pub owner_uid: u32,
     pub file_type: FileType,
     pub mtime: SystemTime,
-    pub atime: SystemTime,
 }
 
 impl EntryStat {
@@ -68,7 +67,6 @@ impl EntryStat {
             owner_uid: m.uid(),
             file_type: m.file_type(),
             mtime: m.modified().ok()?,
-            atime: m.accessed().ok()?,
         })
     }
 }
@@ -79,8 +77,8 @@ fn is_old(t: SystemTime, now: SystemTime, max_age: Duration) -> bool {
 
 /// Whether a direct child of `/tmp` may be listed, judged from its own
 /// lstat data: owned by the user, a regular file or directory (never a
-/// symlink, socket, fifo or device), no live-entry name prefix, and both
-/// modified and accessed longer than `max_age` ago. A directory's contents
+/// symlink, socket, fifo or device), no live-entry name prefix, and
+/// modified longer than `max_age` ago. A directory's contents
 /// are checked separately.
 pub(crate) fn temp_candidate(
     name: &OsStr,
@@ -94,7 +92,6 @@ pub(crate) fn temp_candidate(
         && (st.file_type.is_file() || st.file_type.is_dir())
         && !LIVE_PREFIXES.iter().any(|p| bytes.starts_with(p))
         && is_old(st.mtime, now, max_age)
-        && is_old(st.atime, now, max_age)
 }
 
 /// `(dev, ino)` of every file a process has open, mapped, or as its
@@ -142,26 +139,11 @@ fn parse_maps_line(line: &str) -> Option<(u64, u64)> {
     Some((rustix::fs::makedev(maj, min), ino))
 }
 
-/// Names in `dir` (real path), read without following a symlink and
-/// without updating the directory's access time.
-fn list_dir_noatime(dir: &Path) -> io::Result<Vec<OsString>> {
-    use rustix::fs::{CWD, Dir, Mode, OFlags, openat};
-    let fd = openat(
-        CWD,
-        dir,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::NOATIME | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?;
-    let mut d = Dir::read_from(&fd)?;
-    let mut out = Vec::new();
-    while let Some(entry) = d.read() {
-        let entry = entry?;
-        let n = entry.file_name().to_bytes();
-        if n != b"." && n != b".." {
-            out.push(OsStr::from_bytes(n).to_os_string());
-        }
-    }
-    Ok(out)
+/// Names in `dir` (real path).
+fn list_dir(dir: &Path) -> io::Result<Vec<OsString>> {
+    fs::read_dir(dir)?
+        .map(|e| e.map(|e| e.file_name()))
+        .collect()
 }
 
 /// What the stale checks need besides the entry itself.
@@ -173,15 +155,14 @@ struct Ctx<'a> {
     open: &'a HashSet<(u64, u64)>,
 }
 
-/// Whether everything below `dir` (real path) is old (modified and
-/// accessed), owned by the user, a file, directory or symlink, on device
+/// Whether everything below `dir` (real path) is old (by mtime), owned by the user, a file, directory or symlink, on device
 /// `dev`, and not open in any process, within [`WALK_CAP`] entries. Never
 /// follows symlinks; any read error fails closed.
 fn contents_old(dir: &Path, dev: u64, cx: &Ctx) -> bool {
     let mut seen = 0usize;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(names) = list_dir_noatime(&d) else {
+        let Ok(names) = list_dir(&d) else {
             return false;
         };
         for name in names {
@@ -201,7 +182,6 @@ fn contents_old(dir: &Path, dev: u64, cx: &Ctx) -> bool {
                 || meta.dev() != dev
                 || !(ft.is_file() || ft.is_dir() || ft.is_symlink())
                 || !is_old(st.mtime, cx.now, cx.max_age)
-                || !is_old(st.atime, cx.now, cx.max_age)
                 || cx.open.contains(&(meta.dev(), meta.ino()))
             {
                 return false;
@@ -285,7 +265,7 @@ impl Scanner for TempScanner {
         let Some((tmp_real, tmp_dev)) = tmp_dir(cx.env) else {
             return Ok(Vec::new());
         };
-        let Ok(mut names) = list_dir_noatime(&tmp_real) else {
+        let Ok(mut names) = list_dir(&tmp_real) else {
             return Ok(Vec::new());
         };
         names.sort();
