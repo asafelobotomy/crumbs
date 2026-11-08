@@ -404,6 +404,29 @@ fn generic_basenames_never_match() {
 }
 
 #[test]
+fn running_detects_script_launched_electron_app() {
+    let t = FixtureTree::new();
+    let env = t.env();
+    let mut app = App::new(SourceKind::Unmanaged, "claude");
+    app.exec_names = vec!["claude".into()];
+    app.program = Some("/usr/lib/claude/claude".into());
+    app.program_link = Some("/usr/bin/claude".into());
+    // A launcher script run by the shell: argv1 is the script.
+    t.symlink("proc/30/exe", "/usr/bin/bash");
+    t.write("proc/30/cmdline", b"/bin/sh\0/usr/bin/claude\0--flag\0");
+    // An interpreter running the canonical program.
+    t.symlink("proc/31/exe", "/usr/bin/node");
+    t.write("proc/31/cmdline", b"node\0/usr/lib/claude/claude\0");
+    // A generic interpreter running something else, or the name only as a
+    // later argument, never matches.
+    t.symlink("proc/32/exe", "/usr/bin/node");
+    t.write("proc/32/cmdline", b"node\0/usr/lib/other/cli.js\0");
+    t.write("proc/33/cmdline", b"node\0x.js\0/usr/bin/claude\0");
+    t.write("proc/34/cmdline", b"/bin/sh\0/home/user/claude\0");
+    assert_eq!(running_processes(&env, &app), [30, 31]);
+}
+
+#[test]
 fn running_processes_without_proc_is_empty() {
     let t = FixtureTree::new();
     let env = t.env();

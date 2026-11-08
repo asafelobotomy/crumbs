@@ -275,6 +275,50 @@ fn valid_target(env: &Env, cfg: &Config, p: &Path) -> bool {
     is_canonical(p) && is_allowed_user_target(env, cfg, p)
 }
 
+/// Whether `root` (in-system) is a trash directory of ours on the topdir
+/// above `original`: `<topdir>/.Trash-<uid>`, or the shared
+/// `<topdir>/.Trash/<uid>` under a sticky, non-symlink `.Trash`. The root is
+/// a real directory with mode 0700 and its `files` and `info` are real
+/// directories, all owned by us; the topdir is never `/`.
+fn valid_topdir_trash(env: &Env, root: &Path, original: &Path) -> bool {
+    let uid = env.uid.to_string();
+    let parent = root.parent();
+    let own = format!(".Trash-{uid}");
+    let (topdir, shared) = if root.file_name().is_some_and(|n| n == own.as_str()) {
+        (parent, None)
+    } else if root.file_name().is_some_and(|n| n == uid.as_str())
+        && parent
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == ".Trash")
+    {
+        (parent.and_then(Path::parent), parent)
+    } else {
+        return false;
+    };
+    let Some(topdir) = topdir else {
+        return false;
+    };
+    if topdir == Path::new("/") || !original.starts_with(topdir) {
+        return false;
+    }
+    let owned_dir = |p: &Path| {
+        fs::symlink_metadata(env.sys_path(p))
+            .ok()
+            .filter(|m| m.file_type().is_dir() && m.uid() == env.uid)
+    };
+    if let Some(shared) = shared {
+        // `symlink_metadata` does not follow, so a symlinked `.Trash` fails.
+        let sticky = fs::symlink_metadata(env.sys_path(shared))
+            .is_ok_and(|m| m.file_type().is_dir() && m.mode() & 0o1000 != 0);
+        if !sticky {
+            return false;
+        }
+    }
+    owned_dir(root).is_some_and(|m| m.mode() & 0o777 == 0o700)
+        && owned_dir(&root.join("files")).is_some()
+        && owned_dir(&root.join("info")).is_some()
+}
+
 /// The entry's `trashed` record, when it is shaped like something
 /// `move_to_trash` produced for `e.path`.
 fn valid_trash(env: &Env, cfg: &Config, e: &HistoryEntry) -> Option<Trashed> {
@@ -292,8 +336,8 @@ fn valid_trash(env: &Env, cfg: &Config, e: &HistoryEntry) -> Option<Trashed> {
     }
     let root = files_dir.parent()?;
     let home_trash = env.unsys(&env.data_home).join("Trash");
-    let topdir_trash = format!(".Trash-{}", env.uid);
-    if root != home_trash && root.file_name()? != topdir_trash.as_str() {
+    let is_home = root == home_trash && home_trash.starts_with(env.unsys(&env.home));
+    if !is_home && !valid_topdir_trash(env, root, &t.original) {
         return None;
     }
     let mut info_name = name.to_os_string();
@@ -809,6 +853,105 @@ mod tests {
         // The genuine entry still restores.
         let out = restore(&env, &Config::default(), &sel(&rep.batch), false).unwrap();
         assert!(out[0].ok, "{out:?}");
+    }
+
+    /// A genuine trash entry rewritten to point into `root` (in-system).
+    fn entry_in(env: &Env, root: &str) -> HistoryEntry {
+        let mut e = read_history(env).unwrap().0[0].clone();
+        let tr = e.trashed.as_mut().unwrap();
+        let name = tr.files_path.file_name().unwrap().to_os_string();
+        let mut info = name.clone();
+        info.push(".trashinfo");
+        tr.files_path = Path::new(root).join("files").join(&name);
+        tr.info_path = Path::new(root).join("info").join(info);
+        e
+    }
+
+    fn mode(t: &FixtureTree, rel: &str, m: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(t.dir.path().join(rel), fs::Permissions::from_mode(m)).unwrap();
+    }
+
+    fn topdir_fixture() -> (FixtureTree, Env) {
+        let t = FixtureTree::new();
+        t.write("home/user/.config/a/x", b"A");
+        let env = t.env();
+        run(&env, vec![trash("/home/user/.config/a")]);
+        let uid = env.uid;
+        t.mkdir(&format!("home/.Trash-{uid}/files"));
+        t.mkdir(&format!("home/.Trash-{uid}/info"));
+        mode(&t, &format!("home/.Trash-{uid}"), 0o700);
+        (t, env)
+    }
+
+    #[test]
+    fn topdir_trash_needs_private_owner_dir() {
+        let (t, env) = topdir_fixture();
+        let cfg = Config::default();
+        let uid = env.uid;
+        let root = format!("/home/.Trash-{uid}");
+        let e = entry_in(&env, &root);
+        assert!(valid_trash(&env, &cfg, &e).is_some());
+        // Mode 0755.
+        mode(&t, &format!("home/.Trash-{uid}"), 0o755);
+        assert!(valid_trash(&env, &cfg, &e).is_none());
+        mode(&t, &format!("home/.Trash-{uid}"), 0o700);
+        assert!(valid_trash(&env, &cfg, &e).is_some());
+        // Wrong owner.
+        let mut other = env.clone();
+        other.uid = uid.wrapping_add(1);
+        let e2 = entry_in(&other, &format!("/home/.Trash-{}", other.uid));
+        assert!(valid_trash(&other, &cfg, &e2).is_none());
+        // `files` a symlink.
+        let files = t.dir.path().join(format!("home/.Trash-{uid}/files"));
+        fs::remove_dir(&files).unwrap();
+        t.mkdir("home/elsewhere");
+        std::os::unix::fs::symlink(t.dir.path().join("home/elsewhere"), &files).unwrap();
+        assert!(valid_trash(&env, &cfg, &e).is_none());
+        fs::remove_file(&files).unwrap();
+        t.mkdir(&format!("home/.Trash-{uid}/files"));
+        assert!(valid_trash(&env, &cfg, &e).is_some());
+        // The root itself a symlink.
+        let real = t.dir.path().join(format!("home/.Trash-{uid}"));
+        fs::rename(&real, t.dir.path().join("home/moved")).unwrap();
+        std::os::unix::fs::symlink(t.dir.path().join("home/moved"), &real).unwrap();
+        assert!(valid_trash(&env, &cfg, &e).is_none());
+        // A name that merely looks like a trash dir, with no directory.
+        let e3 = entry_in(&env, "/home/user/.Trash-0");
+        assert!(valid_trash(&env, &cfg, &e3).is_none());
+    }
+
+    #[test]
+    fn shared_dot_trash_needs_sticky() {
+        let (t, env) = topdir_fixture();
+        let cfg = Config::default();
+        let uid = env.uid;
+        t.mkdir(&format!("home/.Trash/{uid}/files"));
+        t.mkdir(&format!("home/.Trash/{uid}/info"));
+        mode(&t, &format!("home/.Trash/{uid}"), 0o700);
+        let e = entry_in(&env, &format!("/home/.Trash/{uid}"));
+        // `.Trash` without the sticky bit.
+        mode(&t, "home/.Trash", 0o777);
+        assert!(valid_trash(&env, &cfg, &e).is_none());
+        mode(&t, "home/.Trash", 0o1777);
+        assert!(valid_trash(&env, &cfg, &e).is_some());
+        // A symlinked `.Trash`.
+        let real = t.dir.path().join("home/.Trash");
+        fs::rename(&real, t.dir.path().join("home/.Trash-real")).unwrap();
+        std::os::unix::fs::symlink(t.dir.path().join("home/.Trash-real"), &real).unwrap();
+        assert!(valid_trash(&env, &cfg, &e).is_none());
+    }
+
+    #[test]
+    fn home_trash_outside_home_not_restorable() {
+        let t = FixtureTree::new();
+        t.write("home/user/.config/a/x", b"A");
+        let env = t.env();
+        run(&env, vec![trash("/home/user/.config/a")]);
+        let mut env2 = env.clone();
+        env2.data_home = t.dir.path().join("data");
+        let e = entry_in(&env, "/data/Trash");
+        assert!(valid_trash(&env2, &Config::default(), &e).is_none());
     }
 
     #[test]

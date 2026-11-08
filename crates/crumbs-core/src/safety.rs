@@ -293,6 +293,11 @@ fn scope_roots(env: &Env, scope: Scope) -> Vec<PathBuf> {
         Scope::UserTemp => vec![PathBuf::from("/tmp")],
         Scope::HomeTrash => {
             let trash = env.unsys(&env.data_home).join("Trash");
+            // A `data_home` outside home must not make the trash a way to
+            // reach other places.
+            if !trash.starts_with(env.unsys(&env.home)) {
+                return Vec::new();
+            }
             vec![trash.join("files"), trash.join("info")]
         }
         Scope::System => vec![PathBuf::from(COREDUMP_DIR)],
@@ -1064,6 +1069,22 @@ mod tests {
                 ),
                 "{s}"
             );
+        }
+    }
+
+    #[test]
+    fn home_trash_outside_home_refused() {
+        let (t, mut env, cfg) = setup();
+        t.write("data/Trash/files/x", b"x");
+        t.write("data/Trash/info/x.trashinfo", b"i");
+        env.data_home = t.dir.path().join("data");
+        for s in ["/data/Trash/files/x", "/data/Trash/info/x.trashinfo"] {
+            let target = p(s);
+            assert!(!is_allowed_target(&env, &cfg, Scope::HomeTrash, &target));
+            assert!(matches!(
+                verify_now(&env, &cfg, Scope::HomeTrash, &target),
+                Err(SafetyError::OutsideAllowedRoots(_))
+            ));
         }
     }
 

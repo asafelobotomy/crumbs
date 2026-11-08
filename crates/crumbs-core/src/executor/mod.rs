@@ -1033,7 +1033,8 @@ const COMM_LEN: usize = 15;
 
 /// PIDs (sorted) of processes that look like `app`: the basename of the
 /// `exe` link (without the kernel's ` (deleted)` suffix), of `comm` or of
-/// `cmdline`'s first argument is one of `exec_names`; the `exe` link is the
+/// `cmdline`'s first argument is one of `exec_names`; `cmdline`'s first
+/// or second argument is the app's `program` (or `program_link`) path; the `exe` link is the
 /// root-joined `location`; or `environ` holds `APPIMAGE=<location>`. Names
 /// in [`GENERIC_BASENAMES`] never match by basename. Unreadable entries
 /// are skipped.
@@ -1052,6 +1053,10 @@ pub fn running_processes(env: &Env, app: &App) -> Vec<u32> {
         .iter()
         .filter_map(|e| Path::new(e).file_name())
         .filter(|n| !is_generic(n))
+        .collect();
+    let programs: Vec<&Path> = [app.program.as_deref(), app.program_link.as_deref()]
+        .into_iter()
+        .flatten()
         .collect();
     let named = |n: &OsStr| exec_names.contains(&n);
     let comm_named = |comm: &[u8]| {
@@ -1089,13 +1094,23 @@ pub fn running_processes(env: &Env, app: &App) -> Vec<u32> {
                         .is_some_and(named)
                 })
             };
+            let by_script = || {
+                fs::read(dir.join("cmdline")).is_ok_and(|c| {
+                    // A launcher script or interpreter names the program as
+                    // argv0 or argv1; only its exact path counts, never the
+                    // interpreter's name.
+                    c.split(|&b| b == 0)
+                        .take(2)
+                        .any(|arg| programs.iter().any(|p| p.as_os_str().as_bytes() == arg))
+                })
+            };
             let by_env = || {
                 appimage_var.as_deref().is_some_and(|var| {
                     fs::read(dir.join("environ"))
                         .is_ok_and(|bytes| bytes.split(|&b| b == 0).any(|kv| kv == var))
                 })
             };
-            (by_exe || by_comm() || by_argv0() || by_env()).then_some(pid)
+            (by_exe || by_comm() || by_argv0() || by_script() || by_env()).then_some(pid)
         })
         .collect();
     pids.sort_unstable();
