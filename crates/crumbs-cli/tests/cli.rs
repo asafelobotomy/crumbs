@@ -184,3 +184,37 @@ fn flatpak_failure_json_has_errors_and_no_stderr_warning() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["errors"][0]["source"], "flatpak");
 }
+
+#[test]
+fn apps_show_not_found_json_envelope() {
+    let t = fixture(FLATPAK_OK);
+    let out = crumbs(&t)
+        .args(["apps", "show", "nope", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["command"], "apps show");
+    assert!(v["data"]["app"].is_null());
+    assert_eq!(v["data"]["query"], "nope");
+    assert_eq!(v["data"]["candidates"], serde_json::json!([]));
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("no installed app matches 'nope'")
+    );
+}
+
+#[test]
+fn apps_show_ambiguous_json_envelope() {
+    let t = fixture("#!/bin/sh\nprintf 'org.mozilla.firefox\\tFirefox\\t1.0\\tsystem\\t1 MB\\n'\n");
+    t.appimage("/home/user/Applications/Firefox-1.0-x86_64.AppImage");
+    let out = crumbs(&t)
+        .args(["apps", "show", "FIREFOX", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(v["data"]["app"].is_null());
+    assert_eq!(v["data"]["candidates"].as_array().unwrap().len(), 3);
+}

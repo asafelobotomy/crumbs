@@ -120,10 +120,18 @@ fn show(env: &Env, query: &str, json: bool) -> anyhow::Result<ExitCode> {
         }
         Resolved::NotFound => {
             writeln!(err, "error: no installed app matches '{query}'")?;
+            if json {
+                let data = json!({ "app": null, "query": query, "candidates": [] });
+                print_json("apps show", &data, &inv.errors)?;
+            }
             Ok(ExitCode::from(2))
         }
         Resolved::Ambiguous(candidates) => {
             writeln!(err, "error: '{query}' matches several apps:")?;
+            if json {
+                let data = json!({ "app": null, "query": query, "candidates": candidates });
+                print_json("apps show", &data, &inv.errors)?;
+            }
             for a in candidates {
                 writeln!(err, "  {}  {}  {}", a.id, a.display_name, a.source.as_str())?;
             }
