@@ -147,6 +147,10 @@ pub struct CategoryReport {
     pub total: u64,
     pub unknown_sizes: usize,
     pub error: Option<String>,
+    /// Listed but not scanned (a disabled category nobody asked for).
+    /// Always false from [`scan_all`]; the CLI sets it.
+    #[serde(default)]
+    pub skipped: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -191,6 +195,7 @@ fn scan_with(cx: &ScanContext, scanners: &[Box<dyn Scanner>], which: &[Category]
                 total: 0,
                 unknown_sizes: 0,
                 error,
+                skipped: false,
             }
         })
         .collect();

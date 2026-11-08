@@ -54,6 +54,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Find reclaimable space: caches, trash, temp files and more (read-only)
+    Scan(cmd::scan::ScanArgs),
     /// Check which sources and tools crumbs can use
     Doctor {
         /// Machine-readable output
@@ -80,6 +82,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             dry_run,
             json,
         } => cmd::restore::run(&env, &selectors, dry_run, json),
+        Command::Scan(args) => cmd::scan::run(&env, &args),
         Command::Doctor { json } => cmd::doctor::run(&env, json),
     }
 }
@@ -93,6 +96,7 @@ fn json_command(command: &Command) -> Option<&'static str> {
         Command::Orphans(a) if a.act.json => Some("orphans"),
         Command::History { json: true, .. } => Some("history"),
         Command::Restore { json: true, .. } => Some("restore"),
+        Command::Scan(a) if a.json => Some("scan"),
         Command::Doctor { json: true } => Some("doctor"),
         _ => None,
     }

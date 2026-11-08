@@ -51,6 +51,23 @@ pub struct Context {
     pub notes: Vec<ErrorEntry>,
 }
 
+/// What `scan` needs: config and an `include_all` inventory, without the
+/// leftover index.
+pub struct ScanSetup {
+    pub cfg: Config,
+    pub inv: Inventory,
+    /// Config warnings; they never change the exit code.
+    pub notes: Vec<ErrorEntry>,
+}
+
+impl ScanSetup {
+    pub fn load(env: &Env) -> anyhow::Result<ScanSetup> {
+        let (cfg, notes) = load_cfg(env)?;
+        let inv = discover(env, &SystemRunner, &ListOptions { include_all: true }, &cfg);
+        Ok(ScanSetup { cfg, inv, notes })
+    }
+}
+
 impl Context {
     /// Builds the index from an `include_all` inventory so sharing sees
     /// every package.

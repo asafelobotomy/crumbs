@@ -20,7 +20,7 @@ fn verb(a: &Action) -> &'static str {
 
 /// Control characters other than tab would act on the terminal; show them
 /// as U+FFFD instead. Used for text that comes from files.
-fn sanitise(line: &str) -> String {
+pub fn sanitise(line: &str) -> String {
     line.chars()
         .map(|c| {
             if c != '\t' && c.is_control() {

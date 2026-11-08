@@ -1,0 +1,20 @@
+---
+source: crates/crumbs-cli/tests/cli.rs
+expression: text
+---
+CATEGORY        ITEMS  SIZE     NOTE
+cache           1      4.0 KiB  rebuildable
+    - 4.0 KiB  foo
+thumbnails      1      4.0 KiB  rebuildable
+    - 4.0 KiB  thumbnails
+trash           1      8.0 KiB
+    - 8.0 KiB  ~/docs/old.txt
+temp            0      0 B
+browser-cache   0      0 B
+dev-cache       -      -        off (enable with --category or config)
+flatpak-unused  1      0 B+
+    - ?  unused Flatpak runtimes (user)  decided by flatpak
+appimage-old    0      0 B
+logs            0      0 B
+
+reclaimable: 16.0 KiB+ across 4 items

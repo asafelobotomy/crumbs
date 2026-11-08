@@ -1255,3 +1255,206 @@ fn preview_sanitises_control_bytes() {
     let v = stdout_json(crumbs(&t).args(["uninstall", "GutCheck", "--dry-run", "--json"]));
     assert!(v.to_string().contains("\\u0007"), "{v}");
 }
+
+// ---- scan ----
+
+fn scan_fixture(flatpak_script: &str) -> FixtureTree {
+    let t = fixture(flatpak_script);
+    t.write("/home/user/.cache/foo/blob", &[1u8; 3000]);
+    t.write("/home/user/.cache/thumbnails/a.png", &[1u8; 2000]);
+    t.write("/home/user/.local/share/Trash/files/old.txt", &[1u8; 5000]);
+    t.write(
+        "/home/user/.local/share/Trash/info/old.txt.trashinfo",
+        b"[Trash Info]\nPath=/home/user/docs/old.txt\nDeletionDate=2026-01-01T00:00:00\n",
+    );
+    t.write("/home/user/.cargo/registry/cache/crate.bin", &[1u8; 7000]);
+    t
+}
+
+/// Every file and symlink under the tree with its bytes.
+fn tree_state(t: &FixtureTree) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let p = e.path();
+            let rel = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+            let ft = e.file_type().unwrap();
+            if ft.is_symlink() {
+                let target = std::fs::read_link(&p).unwrap();
+                out.push((rel, target.to_string_lossy().into_owned().into_bytes()));
+            } else if ft.is_dir() {
+                out.push((format!("{rel}/"), Vec::new()));
+                walk(&p, root, out);
+            } else {
+                out.push((rel, std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    let mut v = Vec::new();
+    walk(t.dir.path(), t.dir.path(), &mut v);
+    v.into_iter().collect()
+}
+
+#[test]
+fn scan_table_snapshot() {
+    let t = scan_fixture(FLATPAK_OK);
+    let out = crumbs(&t).args(["scan", "--details"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let root = regex_escape(&t.dir.path().to_string_lossy());
+    insta::with_settings!({ filters => vec![(root.as_str(), "[ROOT]")] }, {
+        insta::assert_snapshot!(text);
+    });
+}
+
+#[test]
+fn scan_json_shape() {
+    let t = scan_fixture(FLATPAK_OK);
+    let v = stdout_json(crumbs(&t).args(["scan", "--json"]));
+    assert_eq!(v["schema_version"], 1);
+    assert_eq!(v["command"], "scan");
+    assert!(v["errors"].as_array().unwrap().is_empty());
+    let cats = v["data"]["categories"].as_array().unwrap();
+    let names: Vec<_> = cats
+        .iter()
+        .map(|c| c["category"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "cache",
+            "thumbnails",
+            "trash",
+            "temp",
+            "browser-cache",
+            "dev-cache",
+            "flatpak-unused",
+            "appimage-old",
+            "logs"
+        ]
+    );
+    let cache = &cats[0];
+    assert_eq!(cache["skipped"], false);
+    assert!(cache["error"].is_null());
+    assert!(cache["total"].as_u64().unwrap() > 0);
+    let item = &cache["items"][0];
+    assert!(item["path"].is_string() && item["action"] == "trash");
+    assert!(item.get("fingerprint").is_none());
+    let dev = &cats[5];
+    assert_eq!(dev["skipped"], true);
+    assert_eq!(dev["items"].as_array().unwrap().len(), 0);
+    assert!(dev["error"].is_null());
+}
+
+#[test]
+fn scan_category_filter() {
+    let t = scan_fixture(FLATPAK_OK);
+    let v = stdout_json(crumbs(&t).args(["scan", "--json", "--category", "trash"]));
+    let cats = v["data"]["categories"].as_array().unwrap();
+    assert_eq!(cats.len(), 1);
+    assert_eq!(cats[0]["category"], "trash");
+    assert_eq!(cats[0]["items"].as_array().unwrap().len(), 1);
+    let out = crumbs(&t)
+        .args(["scan", "--category", "trash", "--category", "cache"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("cache") && text.contains("trash"), "{text}");
+    assert!(!text.contains("thumbnails"), "{text}");
+    crumbs(&t)
+        .args(["scan", "--category", "nope"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unknown category"));
+}
+
+#[test]
+fn scan_off_category_listed_not_scanned() {
+    let t = scan_fixture(FLATPAK_OK);
+    let out = crumbs(&t).arg("scan").output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    let line = text.lines().find(|l| l.starts_with("dev-cache")).unwrap();
+    assert!(
+        line.ends_with("off (enable with --category or config)"),
+        "{line}"
+    );
+    let v = stdout_json(crumbs(&t).args(["scan", "--json", "--category", "dev-cache"]));
+    let dev = &v["data"]["categories"][0];
+    assert_eq!(dev["skipped"], false);
+    assert_eq!(dev["items"].as_array().unwrap().len(), 1);
+    // Config can switch a default category off too.
+    t.write(
+        "/home/user/.config/crumbs/config.toml",
+        b"categories_off = [\"trash\"]\n",
+    );
+    let v = stdout_json(crumbs(&t).args(["scan", "--json"]));
+    let trash = &v["data"]["categories"][2];
+    assert_eq!(trash["category"], "trash");
+    assert_eq!(trash["skipped"], true);
+}
+
+#[test]
+fn scan_scanner_error_exit_3() {
+    let t = scan_fixture(FLATPAK_FAIL);
+    let out = crumbs(&t).arg("scan").output().unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("flatpak-unused"))
+        .unwrap();
+    assert!(line.contains("boom"), "{line}");
+    assert!(text.contains("reclaimable:"), "{text}");
+    let v = stdout_json(crumbs(&t).args(["scan", "--json"]));
+    let flat = &v["data"]["categories"][6];
+    assert!(flat["error"].as_str().unwrap().contains("boom"));
+    assert!(
+        v["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["source"] == "flatpak-unused")
+    );
+}
+
+#[test]
+fn scan_system_exit_2() {
+    let t = scan_fixture(FLATPAK_OK);
+    crumbs(&t)
+        .args(["scan", "--system"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "system cleanup needs privileged support (coming in a later version)",
+        ));
+    let v = json_error(&t, &["scan", "--system", "--json"], 2);
+    assert_eq!(v["command"], "scan");
+}
+
+#[test]
+fn scan_writes_nothing() {
+    let t = scan_fixture(FLATPAK_OK);
+    let before = tree_state(&t);
+    for args in [
+        &["scan", "--details"][..],
+        &["scan", "--json", "--category", "dev-cache"],
+    ] {
+        crumbs(&t).args(args).assert().code(0);
+    }
+    assert_eq!(tree_state(&t), before);
+}
+
+#[test]
+fn scan_sanitises_labels() {
+    let t = scan_fixture(FLATPAK_OK);
+    t.write(
+        "/home/user/.local/share/Trash/info/bad.trashinfo",
+        b"[Trash Info]\nPath=/home/user/\x07evil\nDeletionDate=2026-01-01T00:00:00\n",
+    );
+    t.write("/home/user/.local/share/Trash/files/bad", b"x");
+    let out = crumbs(&t).args(["scan", "--details"]).output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(!text.contains('\u{7}'), "{text:?}");
+    assert!(text.contains("\u{FFFD}evil"), "{text:?}");
+}

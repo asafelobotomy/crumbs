@@ -6,4 +6,5 @@ pub mod history;
 pub mod orphans;
 pub mod render;
 pub mod restore;
+pub mod scan;
 pub mod uninstall;
