@@ -287,6 +287,18 @@ fn with_orphans(t: &FixtureTree) {
     t.write("/home/user/.thunderbird/profiles.ini", b"x");
     t.mkdir("/home/user/.var/app/org.gone.App");
     t.mkdir("/home/user/.config/zzquux-thing");
+    // Orphans modified in the last 30 days are capped at low: make them old.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 86_400);
+    for d in [
+        "/home/user/.thunderbird",
+        "/home/user/.var/app/org.gone.App",
+        "/home/user/.config/zzquux-thing",
+    ] {
+        std::fs::File::open(t.mkdir(d))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
 }
 
 fn snapshot_text(t: &FixtureTree, args: &[&str]) -> String {
@@ -317,7 +329,7 @@ fn apps_show_json_leftovers() {
 }
 
 #[test]
-fn orphans_lists_high_and_medium() {
+fn orphans_lists_medium() {
     let t = fixture(FLATPAK_OK);
     with_orphans(&t);
     insta::assert_snapshot!(snapshot_text(&t, &["orphans"]));
@@ -331,7 +343,11 @@ fn orphans_show_low_includes_low() {
     assert!(!plain.contains("zzquux-thing"), "{plain}");
     let all = snapshot_text(&t, &["orphans", "--show-low"]);
     assert!(all.contains("zzquux-thing"), "{all}");
-    assert!(all.contains("low"), "{all}");
+    assert!(
+        all.lines()
+            .any(|l| l.starts_with("low") && l.contains("zzquux-thing")),
+        "{all}"
+    );
 }
 
 #[test]
