@@ -20,20 +20,26 @@ use crate::command::{CHILD_PATH, ENV_ALLOWLIST};
 use crate::error::CoreError;
 use crate::privilege::{Escalation, EscalationKind};
 
-/// First line of every script: a fixed `PATH` and locale, no preloads, no
+/// Start of every script: a fixed `PATH` and locale, no preloads, no
 /// inherited `IFS`/`CDPATH`, and no functions shadowing the builtins the
-/// script uses. `command unset` keeps bash in POSIX mode (`/bin/sh`) from
-/// exiting on the readonly `BASHOPTS`.
+/// script uses (`command unset` keeps bash in POSIX mode (`/bin/sh`) from
+/// exiting on the readonly `BASHOPTS`). Then, defined only after those
+/// unsets, `__c <i> <program> <arg>…`, the body of every step: it runs the
+/// program with stdin from `/dev/null` and stderr folded into stdout,
+/// re-emits the captured output with each line prefixed by `|` (empty
+/// output emits nothing), and prints `@@crumbs <i> <status>`. The program
+/// is an absolute path, so it is never a function or builtin, and it runs
+/// in a `$( )` subshell as its own process: nothing a step does can
+/// redefine `__c` or the step templates for the steps after it.
 const HEADER: &[u8] = b"export PATH=/usr/bin:/usr/sbin:/bin:/sbin LC_ALL=C; \
 unset LD_PRELOAD LD_LIBRARY_PATH; \
 unset -f printf read command 2>/dev/null || true; \
-command unset IFS CDPATH BASHOPTS 2>/dev/null || true\n";
-/// Runs after `__o=$(<step>` and re-emits the captured output, each line
-/// prefixed with `|`; empty output emits nothing.
-const STEP_TAIL: &[u8] = b" </dev/null 2>&1); __s=$?; case $__o in '') ;; *) \
+command unset IFS CDPATH BASHOPTS 2>/dev/null || true\n\
+__c() { __i=$1; shift; __o=$(\"$@\" </dev/null 2>&1); __s=$?; \
+case $__o in '') ;; *) \
 command printf '%s\\n' \"$__o\" | while IFS= read -r __l; do \
 command printf '|%s\\n' \"$__l\"; done ;; esac; \
-command printf '@@crumbs %d %d\\n' ";
+command printf '@@crumbs %d %d\\n' \"$__i\" \"$__s\"; }\n";
 const OUTPUT_PREFIX: u8 = b'|';
 /// Largest script accepted; Linux limits one argv string to 128 KiB.
 const MAX_SCRIPT_BYTES: usize = 120 * 1024;
@@ -65,9 +71,8 @@ pub enum BatchError {
     InvalidArgument(String),
     #[error("program path is not absolute: {}", .0.display())]
     RelativeProgram(PathBuf),
-    #[error(
-        "too many items for one privileged run ({bytes} bytes); clean fewer categories at once"
-    )]
+    /// `bytes` is the script's size when it went past the limit.
+    #[error("too many items for one privileged run; select fewer items with -i")]
     TooLarge { bytes: usize },
 }
 
@@ -87,28 +92,72 @@ pub struct Step {
 /// captured, re-emitted with a `|` before every line (trailing newlines are
 /// dropped), and followed by `@@crumbs <i> <status>`. There is no `set -e`;
 /// a failing step does not stop the next.
+///
+/// Steps that share their program, every argument but the last, and the
+/// last argument's directory (everything up to its last `/`) share a
+/// template, `__t<n>() { __c "$1" <program> <args…> <dir>"$2"; }`, defined
+/// just before its first use, so each step line is `__t<n> <i> <rest>`:
+/// many deletions in one directory stay small.
 pub fn build_script(steps: &[Step]) -> Result<Vec<u8>, BatchError> {
     let mut script = HEADER.to_vec();
+    // The quoted template body (program, leading args, dir) of each
+    // template defined so far; its index is its number.
+    let mut templates: Vec<Vec<u8>> = Vec::new();
     for (i, step) in steps.iter().enumerate() {
         if !step.program.is_absolute() {
             return Err(BatchError::RelativeProgram(step.program.clone()));
         }
-        script.extend_from_slice(b"__o=$(");
-        script.extend(quote_checked(step.program.as_os_str())?);
-        for arg in &step.args {
-            script.push(b' ');
-            script.extend(quote_checked(arg)?);
+        let mut body = quote_checked(step.program.as_os_str())?;
+        let Some((last, leading)) = step.args.split_last() else {
+            script.extend_from_slice(format!("__c {i} ").as_bytes());
+            script.extend(body);
+            script.push(b'\n');
+            check_size(&script)?;
+            continue;
+        };
+        for arg in leading {
+            body.push(b' ');
+            body.extend(quote_checked(arg)?);
         }
-        script.extend_from_slice(STEP_TAIL);
-        script.extend_from_slice(i.to_string().as_bytes());
-        script.extend_from_slice(b" \"$__s\"\n");
-        if script.len() > MAX_SCRIPT_BYTES {
-            return Err(BatchError::TooLarge {
-                bytes: script.len(),
-            });
+        let last = last.as_bytes();
+        if last.contains(&0) {
+            return Err(BatchError::InvalidArgument(
+                String::from_utf8_lossy(last).into_owned(),
+            ));
         }
+        let cut = last.iter().rposition(|&b| b == b'/').map_or(0, |p| p + 1);
+        let (dir, rest) = last.split_at(cut);
+        body.push(b' ');
+        if !dir.is_empty() {
+            body.extend(sh_quote(OsStr::from_bytes(dir)));
+        }
+        let n = match templates.iter().position(|t| *t == body) {
+            Some(n) => n,
+            None => {
+                let n = templates.len();
+                script.extend_from_slice(format!("__t{n}() {{ __c \"$1\" ").as_bytes());
+                script.extend_from_slice(&body);
+                script.extend_from_slice(b"\"$2\"; }\n");
+                templates.push(body);
+                n
+            }
+        };
+        script.extend_from_slice(format!("__t{n} {i} ").as_bytes());
+        script.extend(sh_quote(OsStr::from_bytes(rest)));
+        script.push(b'\n');
+        check_size(&script)?;
     }
     Ok(script)
+}
+
+/// Refuses a script past [`MAX_SCRIPT_BYTES`].
+fn check_size(script: &[u8]) -> Result<(), BatchError> {
+    if script.len() > MAX_SCRIPT_BYTES {
+        return Err(BatchError::TooLarge {
+            bytes: script.len(),
+        });
+    }
+    Ok(())
 }
 
 /// Quotes `s`, refusing a NUL byte (it cannot be passed in argv).
@@ -504,9 +553,7 @@ mod tests {
         assert!(bytes > MAX_SCRIPT_BYTES);
         assert_eq!(
             err.to_string(),
-            format!(
-                "too many items for one privileged run ({bytes} bytes); clean fewer categories at once"
-            )
+            "too many items for one privileged run; select fewer items with -i"
         );
         // Just under the limit is fine.
         let ok = vec![b'x'; 100 * 1024];
@@ -562,28 +609,83 @@ mod tests {
     #[test]
     fn step_line_form() {
         let script = build_script(&[
-            step(Path::new("/usr/bin/rm"), &[b"-f", b"--", b"/var/x y"]),
+            step(Path::new("/usr/bin/rm"), &[b"-f", b"--", b"/var/x y/a'b"]),
             step(Path::new("/usr/bin/true"), &[]),
+            step(Path::new("/usr/bin/rm"), &[b"-f", b"--", b"/var/x y/c"]),
+            step(Path::new("/usr/bin/rm"), &[b"-f", b"--", b"/var/z"]),
+            step(Path::new("/usr/bin/echo"), &[b"plain"]),
         ])
         .unwrap();
         let body = &script[HEADER.len()..];
-        let tail: &[u8] = b" </dev/null 2>&1); __s=$?; case $__o in '') ;; *) \
-            command printf '%s\\n' \"$__o\" | while IFS= read -r __l; do \
-            command printf '|%s\\n' \"$__l\"; done ;; esac; \
-            command printf '@@crumbs %d %d\\n' ";
-        let want = [
-            b"__o=$('/usr/bin/rm' '-f' '--' '/var/x y'".as_slice(),
-            tail,
-            b"0 \"$__s\"\n",
-            b"__o=$('/usr/bin/true'",
-            tail,
-            b"1 \"$__s\"\n",
+        let want = "__t0() { __c \"$1\" '/usr/bin/rm' '-f' '--' '/var/x y/'\"$2\"; }\n\
+                    __t0 0 'a'\\''b'\n\
+                    __c 1 '/usr/bin/true'\n\
+                    __t0 2 'c'\n\
+                    __t1() { __c \"$1\" '/usr/bin/rm' '-f' '--' '/var/'\"$2\"; }\n\
+                    __t1 3 'z'\n\
+                    __t2() { __c \"$1\" '/usr/bin/echo' \"$2\"; }\n\
+                    __t2 4 'plain'\n";
+        assert_eq!(String::from_utf8_lossy(body), want);
+    }
+
+    #[test]
+    fn templated_steps_get_their_exact_args() {
+        let t = FixtureTree::new();
+        let out = t.dir.path().join("argv");
+        let body = [
+            b"#!/bin/sh\nfor a in \"$@\"; do printf '%s\\0' \"$a\"; done >> ".as_slice(),
+            &sh_quote(out.as_os_str()),
+            b"\n",
         ]
         .concat();
+        let prog = t.write_exec("/usr/bin/argv-dump", &body);
+        let outcomes = run(&[
+            step(&prog, &[b"-f", b"/d i r/a'b $(x)"]),
+            step(&prog, &[b"-f", b"/d i r/"]),
+            step(&prog, &[b"-f", b"no-slash"]),
+            step(&prog, &[b"-f", b"/d i r/\xff\n"]),
+            step(&prog, &[]),
+        ]);
+        assert_eq!(outcomes, vec![outcome(Some(0), ""); 5]);
+        let got = std::fs::read(&out).unwrap();
         assert_eq!(
-            String::from_utf8_lossy(body),
-            String::from_utf8_lossy(&want)
+            got,
+            b"-f\0/d i r/a'b $(x)\0-f\0/d i r/\0-f\0no-slash\0-f\0/d i r/\xff\n\0"
         );
+    }
+
+    #[test]
+    fn a_thousand_core_dumps_fit() {
+        // Core dump paths as systemd-coredump names them (~110 bytes).
+        let steps: Vec<Step> = (0..1000)
+            .map(|k| {
+                let path = format!(
+                    "/var/lib/systemd/coredump/core.chrome_crashpad.1000.\
+                     215a3aff80554b6dbe10ed300f45e4a7.{:07}.1793828890000000.zst",
+                    k
+                );
+                Step {
+                    program: PathBuf::from("/usr/bin/rm"),
+                    args: vec!["-f".into(), "--".into(), path.into()],
+                }
+            })
+            .collect();
+        let script = build_script(&steps).unwrap();
+        assert!(script.len() <= MAX_SCRIPT_BYTES, "{}", script.len());
+    }
+
+    #[test]
+    fn a_step_cannot_redefine_the_step_body() {
+        let t = FixtureTree::new();
+        // Tries to replace `__c` and the template for the steps after it;
+        // the step is its own process, so it cannot.
+        let hijack = t.write_exec(
+            "/usr/bin/hijack",
+            b"#!/bin/sh\n__c() { echo '@@crumbs 1 0'; }\n__t0() { :; }\nexit 4\n",
+        );
+        let fail = t.write_exec("/usr/bin/fail", b"#!/bin/sh\nexit 6\n");
+        let outcomes = run(&[step(&hijack, &[b"x"]), step(&fail, &[b"x"])]);
+        assert_eq!(outcomes, [outcome(Some(4), ""), outcome(Some(6), "")]);
     }
 
     #[test]

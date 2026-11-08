@@ -862,10 +862,17 @@ fn no_post_check(_: &Env, _: SourceKind, _: &[String]) -> Result<Vec<String>, St
     Ok(Vec::new())
 }
 
-/// Steps in a script: one marker `printf` per step.
+/// Steps in a script: one `__c <i>` or `__t<n> <i>` line per step.
 fn step_count(script: &[u8]) -> usize {
     String::from_utf8_lossy(script)
-        .matches("printf '@@crumbs %d %d\\n' ")
+        .lines()
+        .filter(|l| {
+            let word = l.split(' ').next().unwrap_or_default();
+            word == "__c"
+                || word
+                    .strip_prefix("__t")
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
         .count()
 }
 
@@ -1112,7 +1119,7 @@ fn no_escalation_tool_reports_and_flags() {
     assert!(report.results[1].ok, "{:?}", report.results[1]);
     assert!(!log.exists());
 
-    // `execute_with` detects escalation itself; the fixture has none.
+    // `execute_with` never escalates.
     let t = FixtureTree::new();
     logging_program(&t, "pacman", &log, "", 0);
     let env = t.env();
