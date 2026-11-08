@@ -1,4 +1,8 @@
 pub mod apps;
 pub mod context;
 pub mod doctor;
+pub mod history;
 pub mod orphans;
+pub mod render;
+pub mod restore;
+pub mod uninstall;

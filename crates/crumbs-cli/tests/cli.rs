@@ -364,3 +364,337 @@ fn bad_user_rule_warns_but_succeeds() {
     let v = stdout_json(crumbs(&t).args(["orphans", "--json"]));
     assert_eq!(v["errors"][0]["source"], "rules");
 }
+
+// ---- uninstall, orphans --clean, history, restore (all inside the fixture) ----
+
+fn real(t: &FixtureTree, in_system: &str) -> std::path::PathBuf {
+    t.dir.path().join(in_system.trim_start_matches('/'))
+}
+
+fn trash_files(t: &FixtureTree) -> Vec<String> {
+    let dir = real(t, "/home/user/.local/share/Trash/files");
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+fn gutcheck(t: &FixtureTree) {
+    t.appimage("/home/user/Applications/GutCheck-0.19.0-x86_64.AppImage");
+    t.write("/home/user/.config/GutCheck/settings.json", &[b'x'; 5000]);
+    t.write("/home/user/.cache/GutCheck/blob", &[b'y'; 9000]);
+}
+
+fn history_json(t: &FixtureTree) -> serde_json::Value {
+    stdout_json(crumbs(t).args(["history", "--json"]))
+}
+
+#[test]
+fn uninstall_appimage_trashes_file_and_leftovers() {
+    let t = fixture(FLATPAK_OK);
+    gutcheck(&t);
+    let out = crumbs(&t)
+        .args(["uninstall", "GutCheck", "--yes"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(!real(&t, "/home/user/.config/GutCheck").exists());
+    assert!(
+        !real(
+            &t,
+            "/home/user/Applications/GutCheck-0.19.0-x86_64.AppImage"
+        )
+        .exists()
+    );
+    let trash = trash_files(&t);
+    assert!(trash.contains(&"GutCheck".to_string()), "{trash:?}");
+    assert!(
+        trash.contains(&"GutCheck-0.19.0-x86_64.AppImage".to_string()),
+        "{trash:?}"
+    );
+    assert!(stdout.contains("✓ trashed ~/.config/GutCheck"), "{stdout}");
+    assert!(stdout.contains("will move 3 items"), "{stdout}");
+    let h = history_json(&t);
+    let batches = h["data"]["batches"].as_array().unwrap();
+    assert_eq!(batches.len(), 1, "{h}");
+    let batch = batches[0]["batch"].as_str().unwrap();
+    assert!(
+        stdout.contains(&format!("· undo with: crumbs restore {batch}")),
+        "{stdout}"
+    );
+    assert_eq!(batches[0]["items"], 3);
+}
+
+#[test]
+fn uninstall_dry_run_changes_nothing() {
+    let t = fixture(FLATPAK_OK);
+    gutcheck(&t);
+    let out = crumbs(&t)
+        .args(["uninstall", "GutCheck", "--dry-run"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("will move 3 items"), "{stdout}");
+    assert!(stdout.contains("~/.config/GutCheck"), "{stdout}");
+    assert!(real(&t, "/home/user/.config/GutCheck").exists());
+    assert!(
+        real(
+            &t,
+            "/home/user/Applications/GutCheck-0.19.0-x86_64.AppImage"
+        )
+        .exists()
+    );
+    assert!(trash_files(&t).is_empty());
+    assert!(!real(&t, "/home/user/.local/state/crumbs/history.jsonl").exists());
+}
+
+#[test]
+fn uninstall_pacman_requires_leftovers_only_exit_2() {
+    let t = fixture(FLATPAK_OK);
+    t.write("/home/user/.cache/firefox/blob", b"x");
+    crumbs(&t)
+        .args(["uninstall", "firefox", "--yes"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "removing pacman apps needs privileged support (coming in a later version); use --leftovers-only",
+        ));
+    assert!(real(&t, "/home/user/.cache/firefox/blob").exists());
+}
+
+#[test]
+fn uninstall_leftovers_only_pacman_keeps_package() {
+    let t = fixture(FLATPAK_OK);
+    t.write("/home/user/.cache/firefox/blob", b"x");
+    let out = crumbs(&t)
+        .args(["uninstall", "firefox", "--leftovers-only", "--yes"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("leftovers only"), "{stdout}");
+    assert!(!real(&t, "/home/user/.cache/firefox").exists());
+    assert!(trash_files(&t).contains(&"firefox".to_string()));
+    assert!(real(&t, "/usr/bin/firefox").exists());
+    assert!(real(&t, "/var/lib/pacman/local/firefox-159.0.1-1/desc").exists());
+}
+
+#[test]
+fn uninstall_normalized_match_exit_2_with_suggestion() {
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    crumbs(&t)
+        .args(["uninstall", "T-o-o-l", "--yes"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "did you mean 'appimage:~/Applications/Tool-1.0-x86_64.AppImage'?",
+        ));
+    assert!(real(&t, "/home/user/.config/Tool").exists());
+    assert!(real(&t, "/home/user/Applications/Tool-1.0-x86_64.AppImage").exists());
+}
+
+#[test]
+fn uninstall_refuses_on_source_errors_without_force() {
+    let t = fixture(FLATPAK_FAIL);
+    with_leftovers(&t);
+    crumbs(&t)
+        .args(["uninstall", "Tool", "--yes"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "refusing: some sources failed (flatpak); re-run with --force to continue",
+        ));
+    assert!(real(&t, "/home/user/.config/Tool").exists());
+    crumbs(&t)
+        .args(["uninstall", "Tool", "--yes", "--force"])
+        .assert()
+        .code(0);
+    assert!(!real(&t, "/home/user/.config/Tool").exists());
+}
+
+#[test]
+fn uninstall_non_interactive_without_yes_exit_2() {
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    crumbs(&t)
+        .args(["uninstall", "Tool"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "refusing to act without --yes in a non-interactive session",
+        ));
+    assert!(real(&t, "/home/user/.config/Tool").exists());
+}
+
+#[test]
+fn uninstall_keep_data_only_cache() {
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    crumbs(&t)
+        .args([
+            "uninstall",
+            "Tool",
+            "--leftovers-only",
+            "--keep-data",
+            "--yes",
+        ])
+        .assert()
+        .code(0);
+    assert!(!real(&t, "/home/user/.cache/Tool").exists());
+    assert!(real(&t, "/home/user/.config/Tool/settings.json").exists());
+    assert!(real(&t, "/home/user/Applications/Tool-1.0-x86_64.AppImage").exists());
+    assert_eq!(trash_files(&t), ["Tool"]);
+}
+
+#[test]
+fn uninstall_json_requires_yes_or_dry_run() {
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    crumbs(&t)
+        .args(["uninstall", "Tool", "--json"])
+        .assert()
+        .code(2);
+    assert!(real(&t, "/home/user/.config/Tool").exists());
+    let v = stdout_json(crumbs(&t).args(["uninstall", "Tool", "--json", "--dry-run"]));
+    assert_eq!(v["command"], "uninstall");
+    assert_eq!(
+        v["data"]["plans"][0]["actions"].as_array().unwrap().len(),
+        3
+    );
+    assert!(v["data"]["report"].is_null());
+    assert!(real(&t, "/home/user/.config/Tool").exists());
+    let v = stdout_json(crumbs(&t).args(["uninstall", "Tool", "--json", "--yes"]));
+    let results = v["data"]["report"][0]["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3);
+    assert!(results.iter().all(|r| r["ok"] == true), "{v}");
+    assert!(!real(&t, "/home/user/.config/Tool").exists());
+}
+
+#[test]
+fn orphans_clean_select() {
+    let t = fixture(FLATPAK_OK);
+    with_orphans(&t);
+    // Never cleans implicitly.
+    crumbs(&t)
+        .args(["orphans", "--clean", "--yes"])
+        .assert()
+        .code(2);
+    assert!(real(&t, "/home/user/.thunderbird").exists());
+    let out = crumbs(&t)
+        .args(["orphans", "--clean", "--select", "~/.thunderbird", "--yes"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("✓ trashed ~/.thunderbird"), "{stdout}");
+    assert!(!real(&t, "/home/user/.thunderbird").exists());
+    assert!(real(&t, "/home/user/.var/app/org.gone.App").exists());
+    assert_eq!(trash_files(&t), [".thunderbird"]);
+    // A path that is not an orphan is refused.
+    crumbs(&t)
+        .args([
+            "orphans",
+            "--clean",
+            "--select",
+            "/home/user/.bashrc",
+            "--yes",
+        ])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn history_lists_batch() {
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    crumbs(&t)
+        .args(["uninstall", "Tool", "--yes"])
+        .assert()
+        .code(0);
+    let h = history_json(&t);
+    let batch = h["data"]["batches"][0]["batch"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let out = crumbs(&t).arg("history").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let line = text.lines().find(|l| l.starts_with(&batch)).unwrap();
+    assert!(
+        line.contains("appimage:~/Applications/Tool-1.0-x86_64.AppImage"),
+        "{line}"
+    );
+    assert!(line.contains("3 items"), "{line}");
+    assert!(!line.contains("restored"), "{line}");
+    crumbs(&t).args(["restore", &batch]).assert().code(0);
+    let text = String::from_utf8(crumbs(&t).arg("history").output().unwrap().stdout).unwrap();
+    let line = text.lines().find(|l| l.starts_with(&batch)).unwrap();
+    assert!(line.ends_with("[restored 3]"), "{text}");
+}
+
+#[test]
+fn restore_batch_round_trip() {
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    crumbs(&t)
+        .args(["uninstall", "Tool", "--yes"])
+        .assert()
+        .code(0);
+    assert!(!real(&t, "/home/user/.config/Tool").exists());
+    let batch = history_json(&t)["data"]["batches"][0]["batch"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    crumbs(&t)
+        .args(["restore", &batch, "--dry-run"])
+        .assert()
+        .code(0);
+    assert!(!real(&t, "/home/user/.config/Tool").exists());
+    let out = crumbs(&t).args(["restore", &batch]).output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("✓ restored ~/.config/Tool"), "{stdout}");
+    assert!(real(&t, "/home/user/.config/Tool/settings.json").exists());
+    assert!(real(&t, "/home/user/.cache/Tool/blob").exists());
+    assert!(real(&t, "/home/user/Applications/Tool-1.0-x86_64.AppImage").exists());
+    assert!(trash_files(&t).is_empty());
+}
+
+#[test]
+fn restore_occupied_exit_3() {
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    crumbs(&t)
+        .args(["uninstall", "Tool", "--yes"])
+        .assert()
+        .code(0);
+    t.write("/home/user/.config/Tool/new.json", b"new");
+    let batch = history_json(&t)["data"]["batches"][0]["batch"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let out = crumbs(&t).args(["restore", &batch]).output().unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(3), "{stdout}");
+    assert!(stdout.contains("✗ ~/.config/Tool: "), "{stdout}");
+    assert!(stdout.contains("✓ restored ~/.cache/Tool"), "{stdout}");
+    // The occupant is untouched and the trashed copy is still there.
+    assert_eq!(
+        std::fs::read(real(&t, "/home/user/.config/Tool/new.json")).unwrap(),
+        b"new"
+    );
+    let left = trash_files(&t);
+    assert_eq!(left.len(), 1, "{left:?}");
+    let kept = real(&t, "/home/user/.local/share/Trash/files")
+        .join(&left[0])
+        .join("settings.json");
+    assert!(kept.exists(), "{left:?}");
+}

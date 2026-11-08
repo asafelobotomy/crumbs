@@ -1,5 +1,6 @@
 mod cmd;
 mod output;
+mod prompt;
 
 #[cfg(debug_assertions)]
 use std::path::PathBuf;
@@ -28,11 +29,27 @@ enum Command {
     /// List and inspect installed apps
     #[command(subcommand)]
     Apps(cmd::apps::AppsCmd),
-    /// List per-user files that belong to no installed app
-    Orphans {
-        /// Include low-confidence findings
+    /// Remove apps and their leftovers (to the trash by default)
+    Uninstall(cmd::uninstall::UninstallArgs),
+    /// List per-user files that belong to no installed app, or clean them
+    Orphans(cmd::orphans::OrphansArgs),
+    /// Show past removals, newest first
+    History {
+        /// Number of batches to show
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Machine-readable output
         #[arg(long)]
-        show_low: bool,
+        json: bool,
+    },
+    /// Undo removals: a batch id, an entry id or an original path
+    Restore {
+        /// Batch ids, entry ids or absolute original paths
+        #[arg(required = true)]
+        selectors: Vec<String>,
+        /// Check what would be restored and stop
+        #[arg(long)]
+        dry_run: bool,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -55,7 +72,14 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     let env = Env::from_system()?;
     match cli.command {
         Command::Apps(c) => cmd::apps::run(c, &env),
-        Command::Orphans { show_low, json } => cmd::orphans::run(&env, show_low, json),
+        Command::Uninstall(args) => cmd::uninstall::run(&env, &args),
+        Command::Orphans(args) => cmd::orphans::run(&env, &args),
+        Command::History { limit, json } => cmd::history::run(&env, limit, json),
+        Command::Restore {
+            selectors,
+            dry_run,
+            json,
+        } => cmd::restore::run(&env, &selectors, dry_run, json),
         Command::Doctor { json } => cmd::doctor::run(&env, json),
     }
 }

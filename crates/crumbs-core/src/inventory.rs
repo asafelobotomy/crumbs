@@ -171,6 +171,16 @@ pub enum Resolved<'a> {
 /// Finds an app by id, name, desktop ID, rDNS ID, display name or loose name.
 /// The first matching rule decides; several matches in it are ambiguous.
 pub fn find_app<'a>(inv: &'a Inventory, query: &str) -> Resolved<'a> {
+    resolve(inv, query, true)
+}
+
+/// Like [`find_app`] without the last (normalized-name) rule: only exact
+/// matches. Destructive commands use this.
+pub fn find_app_exact<'a>(inv: &'a Inventory, query: &str) -> Resolved<'a> {
+    resolve(inv, query, false)
+}
+
+fn resolve<'a>(inv: &'a Inventory, query: &str, loose: bool) -> Resolved<'a> {
     let with_ext = if query.ends_with(".desktop") {
         query.to_string()
     } else {
@@ -190,7 +200,8 @@ pub fn find_app<'a>(inv: &'a Inventory, query: &str) -> Resolved<'a> {
                 && (normalize_name(&a.name) == norm || normalize_name(&a.display_name) == norm)
         },
     ];
-    for rule in rules {
+    let count = if loose { rules.len() } else { rules.len() - 1 };
+    for rule in &rules[..count] {
         let mut hits: Vec<&App> = inv.apps.iter().filter(|a| rule(a)).collect();
         match hits.len() {
             0 => continue,
@@ -482,6 +493,29 @@ mod tests {
         );
         assert_eq!(found(find_app(&inv, "mytool")).id, "appimage:Tool.AppImage");
         assert_eq!(found(find_app(&inv, "org.x.y")).id, "flatpak:org.x.Y");
+    }
+
+    #[test]
+    fn find_app_exact_skips_normalized() {
+        let tool = app(SourceKind::AppImage, "Tool.AppImage", "My-Tool");
+        let inv = inv(vec![tool]);
+        assert!(matches!(
+            find_app_exact(&inv, "my tool"),
+            Resolved::NotFound
+        ));
+        assert!(matches!(find_app_exact(&inv, "mytool"), Resolved::NotFound));
+        assert_eq!(
+            found(find_app_exact(&inv, "MY-TOOL")).id,
+            "appimage:Tool.AppImage"
+        );
+        assert_eq!(
+            found(find_app_exact(&inv, "appimage:Tool.AppImage")).id,
+            "appimage:Tool.AppImage"
+        );
+        assert_eq!(
+            found(find_app(&inv, "my tool")).id,
+            "appimage:Tool.AppImage"
+        );
     }
 
     #[test]

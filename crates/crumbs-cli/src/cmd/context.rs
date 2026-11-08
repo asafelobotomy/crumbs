@@ -30,6 +30,7 @@ pub fn load_cfg(env: &Env) -> anyhow::Result<(Config, Vec<ErrorEntry>)> {
 }
 
 pub struct Context {
+    pub cfg: Config,
     pub inv: Inventory,
     pub idx: LeftoverIndex,
     /// Config warnings and rule errors; they never change the exit code.
@@ -49,7 +50,12 @@ impl Context {
         );
         let inv = discover(env, &SystemRunner, &ListOptions { include_all: true }, &cfg);
         let idx = LeftoverIndex::build(env, &cfg, &rules, &inv);
-        Ok(Context { inv, idx, notes })
+        Ok(Context {
+            cfg,
+            inv,
+            idx,
+            notes,
+        })
     }
 }
 
