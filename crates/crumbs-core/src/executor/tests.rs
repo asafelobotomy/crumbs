@@ -377,6 +377,7 @@ fn generic_basenames_never_match() {
     app.exec_names = ["sh", "bash", "env", "python", "python3", "node"]
         .into_iter()
         .chain(["electron", "java", "flatpak", "bwrap", "/usr/bin/bash"])
+        .chain(["dash", "zsh", "fish", "perl", "ruby", "python3.12"])
         .map(String::from)
         .collect();
     for (pid, name) in [(1, "sh"), (2, "bash"), (3, "python3"), (4, "flatpak")] {
@@ -385,6 +386,16 @@ fn generic_basenames_never_match() {
     t.write("proc/5/comm", b"node\n");
     t.write("proc/6/cmdline", b"/usr/bin/java\0-jar\0x.jar\0");
     t.write("proc/7/cmdline", b"bwrap\0--x\0");
+    for (pid, name) in [
+        (20, "dash"),
+        (21, "zsh"),
+        (22, "fish"),
+        (23, "perl"),
+        (24, "ruby"),
+        (25, "python3.12"),
+    ] {
+        t.symlink(&format!("proc/{pid}/exe"), &format!("/usr/bin/{name}"));
+    }
     assert!(running_processes(&env, &app).is_empty());
     // The exact location still matches.
     let loc = t.dir.path().join("home/user/Apps/Foo.AppImage");

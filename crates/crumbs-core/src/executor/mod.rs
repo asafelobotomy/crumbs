@@ -865,9 +865,18 @@ fn edit_file(
 
 /// Names too common to say which app a process belongs to: never matched
 /// by basename (exe, comm or argv0).
-const GENERIC_BASENAMES: [&str; 10] = [
-    "sh", "bash", "env", "python", "python3", "node", "electron", "java", "flatpak", "bwrap",
+const GENERIC_BASENAMES: [&str; 15] = [
+    "sh", "bash", "dash", "zsh", "fish", "env", "python", "python3", "perl", "ruby", "node",
+    "electron", "java", "flatpak", "bwrap",
 ];
+
+/// Whether `n` is a [`GENERIC_BASENAMES`] name or `python3.<digits>`.
+fn is_generic(n: &OsStr) -> bool {
+    GENERIC_BASENAMES.iter().any(|g| OsStr::new(g) == n)
+        || n.as_bytes()
+            .strip_prefix(b"python3.")
+            .is_some_and(|v| !v.is_empty() && v.iter().all(u8::is_ascii_digit))
+}
 
 /// The kernel cuts `comm` at 15 bytes.
 const COMM_LEN: usize = 15;
@@ -892,7 +901,7 @@ pub fn running_processes(env: &Env, app: &App) -> Vec<u32> {
         .exec_names
         .iter()
         .filter_map(|e| Path::new(e).file_name())
-        .filter(|n| !GENERIC_BASENAMES.iter().any(|g| OsStr::new(g) == *n))
+        .filter(|n| !is_generic(n))
         .collect();
     let named = |n: &OsStr| exec_names.contains(&n);
     let comm_named = |comm: &[u8]| {

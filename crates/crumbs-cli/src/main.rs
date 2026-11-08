@@ -75,7 +75,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     #[cfg(not(debug_assertions))]
     let env = Env::from_system()?;
     for w in crumbs_core::history::harden_files(&env) {
-        eprintln!("warning: history: {w}");
+        eprintln!("warning: history: {}", cmd::render::sanitise(&w));
     }
     match cli.command {
         Command::Apps(c) => cmd::apps::run(c, &env),

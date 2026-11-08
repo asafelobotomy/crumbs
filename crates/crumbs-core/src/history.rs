@@ -1,6 +1,9 @@
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::unix::fs::{DirBuilderExt, FileExt, OpenOptionsExt};
+
+use rustix::fs::{FileType, Mode as RawMode, OFlags};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -117,8 +120,11 @@ pub fn append(env: &Env, entries: &[HistoryEntry]) -> Result<(), CoreError> {
         .mode(0o700)
         .create(&dir)
         .map_err(|e| io_err(&dir, e))?;
+    // Opened without following a symlink, then everything goes through this
+    // descriptor: a swapped path cannot redirect the chmod or the log.
+    let dirfd = open_dir_nofollow(&dir).map_err(|e| io_err(&dir, e))?;
     // Warnings go out through `harden_files`, which the CLI calls at start-up.
-    let _ = tighten(&dir, &path);
+    let _ = tighten_fds(&dirfd, &dir);
     let mut buf = Vec::new();
     for e in entries {
         serde_json::to_writer(&mut buf, e).map_err(|e| CoreError::Parse {
@@ -128,14 +134,14 @@ pub fn append(env: &Env, entries: &[HistoryEntry]) -> Result<(), CoreError> {
         buf.push(b'\n');
     }
     // Never follows a symlink: a planted link must not redirect the log.
-    let f = OpenOptions::new()
-        .read(true)
-        .append(true)
-        .create(true)
-        .mode(0o600)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(&path)
-        .map_err(|e| io_err(&path, e))?;
+    let fd = rustix::fs::openat(
+        &dirfd,
+        HISTORY_FILE,
+        OFlags::RDWR | OFlags::APPEND | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        RawMode::from_raw_mode(0o600),
+    )
+    .map_err(|e| io_err(&path, e.into()))?;
+    let f = fs::File::from(fd);
     // A torn last line (no newline) must not swallow the next entry.
     let len = f.metadata().map_err(|e| io_err(&path, e))?.len();
     if len > 0 {
@@ -150,48 +156,93 @@ pub fn append(env: &Env, entries: &[HistoryEntry]) -> Result<(), CoreError> {
     f.sync_data().map_err(|e| io_err(&path, e))
 }
 
-/// Tightens the history directory and file to `0o700` / `0o600` when they
-/// carry more permission bits. Returns what was changed, one message each,
-/// for the caller to show as warnings. A symlink is left alone (opening
-/// it for append fails instead).
-fn tighten(dir: &Path, file: &Path) -> Vec<String> {
+const HISTORY_FILE: &str = "history.jsonl";
+
+/// Opens a directory without following a symlink at its last component.
+fn open_dir_nofollow(dir: &Path) -> io::Result<OwnedFd> {
+    rustix::fs::open(
+        dir,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        RawMode::empty(),
+    )
+    .map_err(io::Error::from)
+}
+
+/// `mode` with group and other bits removed and the owner's `owner` bits
+/// forced on.
+fn tightened(mode: u32, owner: u32) -> u32 {
+    (mode & owner) | owner
+}
+
+/// chmod on the open `fd` (of `shown`) down to owner-only when it carries more.
+fn tighten_one(fd: impl AsFd, shown: &Path, owner: u32, changed: &mut Vec<String>) {
+    let Ok(st) = rustix::fs::fstat(&fd) else {
+        return;
+    };
+    let mode = st.st_mode & 0o7777;
+    let want = tightened(mode, owner);
+    if want == mode {
+        return;
+    }
+    // `fd` is an `O_PATH` descriptor (opened without needing any permission
+    // bit, so a mode like 0o044 can be repaired), which `fchmod` rejects;
+    // chmod through /proc/self/fd still acts on that exact inode.
+    let via_proc = format!("/proc/self/fd/{}", fd.as_fd().as_raw_fd());
+    match rustix::fs::chmod(&via_proc, RawMode::from_raw_mode(want)) {
+        Ok(()) => changed.push(format!(
+            "{} had mode {mode:o}; tightened to {want:o}",
+            shown.display()
+        )),
+        Err(e) => changed.push(format!(
+            "{} has mode {mode:o} and could not be tightened: {e}",
+            shown.display()
+        )),
+    }
+}
+
+/// Tightens the history directory (open as `dirfd`) and the file in it to
+/// owner-only, keeping the owner's bits (`0o700` / `0o600`). Returns what
+/// was changed, one message each. A symlinked file is left alone.
+fn tighten_fds(dirfd: &OwnedFd, dir: &Path) -> Vec<String> {
     let mut changed = Vec::new();
-    for (p, want) in [(dir, 0o700u32), (file, 0o600u32)] {
-        let Ok(m) = fs::symlink_metadata(p) else {
-            continue;
-        };
-        if m.file_type().is_symlink() {
-            continue;
-        }
-        let mode = m.mode() & 0o7777;
-        if mode & !want != 0 {
-            match fs::set_permissions(p, fs::Permissions::from_mode(mode & want)) {
-                Ok(()) => changed.push(format!(
-                    "{} had mode {mode:o}; tightened to {:o}",
-                    p.display(),
-                    mode & want
-                )),
-                Err(e) => changed.push(format!(
-                    "{} has mode {mode:o} and could not be tightened: {e}",
-                    p.display()
-                )),
-            }
-        }
+    tighten_one(dirfd, dir, 0o700, &mut changed);
+    let file = dir.join(HISTORY_FILE);
+    if let Ok(fd) = rustix::fs::openat(
+        dirfd,
+        HISTORY_FILE,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        RawMode::empty(),
+    ) && rustix::fs::fstat(&fd)
+        .is_ok_and(|st| FileType::from_raw_mode(st.st_mode) == FileType::RegularFile)
+    {
+        tighten_one(&fd, &file, 0o600, &mut changed);
     }
     changed
 }
 
-/// Tightens loose modes on the history directory and file (see `tighten`)
-/// and returns a message for each change, to be shown as
-/// `warning: history: <message>`.
+/// Tightens loose modes on the history directory and file and returns a
+/// message for each change, to be shown as `warning: history: <message>`.
+/// Does nothing under a symlinked directory.
 pub fn harden_files(env: &Env) -> Vec<String> {
-    tighten(&env.state_home.join("crumbs"), &history_path(env))
+    let dir = env.state_home.join("crumbs");
+    match open_dir_nofollow(&dir) {
+        Ok(fd) => tighten_fds(&fd, &dir),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Entries in file order plus the number of unparseable (non-blank) lines.
 pub fn read_history(env: &Env) -> Result<(Vec<HistoryEntry>, usize), CoreError> {
     let path = history_path(env);
-    let bytes = match fs::read(&path) {
+    // A symlinked history file is an error, as for `append`.
+    let bytes = match OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlags::NOFOLLOW.bits() as i32)
+        .open(&path)
+        .and_then(|mut f| {
+            let mut b = Vec::new();
+            io::Read::read_to_end(&mut f, &mut b).map(|_| b)
+        }) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((vec![], 0)),
         Err(e) => return Err(io_err(&path, e)),
@@ -293,6 +344,62 @@ mod tests {
         fs::set_permissions(&file, fs::Permissions::from_mode(0o666)).unwrap();
         append(&env, &[entry(1, "1")]).unwrap();
         assert_eq!(mode(&file), 0o600);
+    }
+
+    #[test]
+    fn history_refuses_symlinked_dir() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        let elsewhere = t.dir.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::create_dir_all(&env.state_home).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, env.state_home.join("crumbs")).unwrap();
+        assert!(append(&env, &[entry(0, "1")]).is_err());
+        assert!(!elsewhere.join("history.jsonl").exists());
+    }
+
+    #[test]
+    fn harden_skips_symlinked_dir() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        let elsewhere = t.dir.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o755)).unwrap();
+        let f = elsewhere.join("history.jsonl");
+        fs::write(&f, b"").unwrap();
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::create_dir_all(&env.state_home).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, env.state_home.join("crumbs")).unwrap();
+        assert!(harden_files(&env).is_empty());
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&f), 0o644);
+        assert_eq!(mode(&elsewhere), 0o755);
+    }
+
+    #[test]
+    fn tightening_keeps_owner_bits() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        append(&env, &[entry(0, "1")]).unwrap();
+        let dir = env.state_home.join("crumbs");
+        let file = dir.join("history.jsonl");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o044)).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o055)).unwrap();
+        assert_eq!(harden_files(&env).len(), 2);
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&file), 0o600);
+        assert_eq!(mode(&dir), 0o700);
+    }
+
+    #[test]
+    fn history_read_refuses_symlink() {
+        let t = FixtureTree::new();
+        let env = t.env();
+        let dir = env.state_home.join("crumbs");
+        fs::create_dir_all(&dir).unwrap();
+        let target = t.write("home/user/elsewhere", b"");
+        std::os::unix::fs::symlink(&target, dir.join("history.jsonl")).unwrap();
+        assert!(read_history(&env).is_err());
     }
 
     #[test]
