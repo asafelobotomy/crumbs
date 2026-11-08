@@ -38,7 +38,7 @@ All three go through the M4 pipeline: preview, confirm, one privileged batch, hi
 2. **Where system leftovers come from.** Only direct children of in-system `/etc` and `/opt`. Never:
    - deeper paths;
    - symlinks;
-   - anything named in `ETC_NEVER`, a built-in list of names that are never offered even when unowned: `passwd shadow group gshadow sudoers sudoers.d ssh ssl ca-certificates pam.d security systemd fstab crypttab hosts hostname machine-id locale.conf localtime vconsole.conf adjtime ld.so.cache ld.so.conf ld.so.conf.d os-release pacman.conf pacman.d mkinitcpio.conf mkinitcpio.d modprobe.d modules-load.d sysctl.d udev X11 NetworkManager polkit-1 dbus-1 default skel profile profile.d environment`;
+   - anything named in `ETC_NEVER`, a built-in list of names that are never offered even when unowned: `passwd shadow group gshadow sudoers sudoers.d ssh ssl ca-certificates pam.d security systemd fstab crypttab hosts hostname machine-id locale.conf localtime vconsole.conf adjtime ld.so.cache ld.so.conf ld.so.conf.d os-release pacman.conf pacman.d mkinitcpio.conf mkinitcpio.d modprobe.d modules-load.d sysctl.d udev X11 NetworkManager polkit-1 dbus-1 default skel profile profile.d environment subuid subgid kernel cmdline.d secureboot crypttab.initramfs machine-info resolv.conf`;
    - names ending in `-` (`passwd-`, `shadow-` and the like);
    - names ending in `.bak`, `.old`, `.pacnew` or `.pacsave`. These files are the admin's, so crumbs never offers them, as a leftover or as an orphan.
 
