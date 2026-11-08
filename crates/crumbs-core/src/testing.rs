@@ -1,10 +1,15 @@
 //! Fixture helpers for tests. Not part of the production API.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
+use crate::command::{CmdOutput, CommandRunner};
 use crate::env::Env;
+use crate::error::CoreError;
 
 pub struct FixtureTree {
     pub dir: tempfile::TempDir,
@@ -36,6 +41,13 @@ impl FixtureTree {
         let p = self.real(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(&p, contents).unwrap();
+        p
+    }
+
+    /// Like `write`, but marks the file executable (mode 0755).
+    pub fn write_exec(&self, rel: &str, contents: &[u8]) -> PathBuf {
+        let p = self.write(rel, contents);
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
         p
     }
 
@@ -80,5 +92,54 @@ impl FixtureTree {
         let mut b = vec![0x7f, b'E', b'L', b'F', 0, 0, 0, 0, b'A', b'I', 0x02];
         b.resize(256, 0);
         self.write(rel_path, &b);
+    }
+}
+
+/// A `CommandRunner` that returns canned output keyed by program basename
+/// and exact args, and records every call as `"basename arg1 arg2"`.
+#[derive(Default)]
+pub struct FakeRunner {
+    responses: HashMap<String, CmdOutput>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl FakeRunner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn on(mut self, program_basename: &str, args: &[&str], out: CmdOutput) -> Self {
+        self.responses
+            .insert(Self::key(program_basename, args), out);
+        self
+    }
+
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn key(basename: &str, args: &[&str]) -> String {
+        std::iter::once(basename)
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+impl CommandRunner for FakeRunner {
+    fn run(&self, program: &Path, args: &[&str]) -> Result<CmdOutput, CoreError> {
+        let base = program
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let key = Self::key(&base, args);
+        self.calls.lock().unwrap().push(key.clone());
+        self.responses
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| CoreError::Command {
+                program: base,
+                message: format!("no fake output registered for `{key}`"),
+            })
     }
 }
