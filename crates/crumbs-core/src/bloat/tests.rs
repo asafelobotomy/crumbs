@@ -134,17 +134,19 @@ fn cache_running_app_not_preselected() {
     assert!(items[0].preselected && items[0].note.is_none());
     assert_eq!(items[0].app_id.as_deref(), Some(app.id.as_str()));
 
-    // Two owners: ambiguous, no app_id.
+    // Two owners, one running: no app_id, but still not preselected.
     let mut twin = App::new(SourceKind::Flatpak, "hauler");
     twin.exec_names = vec!["hauler".into()];
-    let items = run(
-        &t,
-        &Config::default(),
-        &inv(vec![app, twin]),
-        Category::Cache,
-    );
+    let both = inv(vec![app, twin]);
+    let items = run(&t, &Config::default(), &both, Category::Cache);
     let hauler = items.iter().find(|i| i.label == "hauler").unwrap();
-    assert!(hauler.app_id.is_none() && hauler.preselected);
+    assert!(hauler.app_id.is_none());
+    assert!(!hauler.preselected);
+    assert_eq!(hauler.note.as_deref(), Some("Hauler is running"));
+
+    // Two owners, none running: ambiguous, preselected.
+    let items = run(&t2, &Config::default(), &both, Category::Cache);
+    assert!(items[0].app_id.is_none() && items[0].preselected && items[0].note.is_none());
 }
 
 #[test]
@@ -211,12 +213,12 @@ fn age(p: &Path, days: u64) {
 fn logs_age_filter() {
     let t = FixtureTree::new();
     let old = t.write("home/user/.local/state/app/old.log", b"x");
-    let fresh = t.write("home/user/.local/state/app/fresh.log", b"x");
+    t.write("home/user/.local/state/app/fresh.log", b"x");
     let nested = t.write("home/user/.local/state/a/b/c/deep.log", b"x");
     let other = t.write("home/user/.local/state/app/notes.txt", b"x");
     let xs = t.write("home/user/.xsession-errors", b"x");
     let xs_old = t.write("home/user/.xsession-errors.old", b"x");
-    let xs_fresh_dir = t.write("home/user/.local/state/new/x.log", b"x");
+    t.write("home/user/.local/state/new/x.log", b"x");
     t.write("home/user/Keep/data.log", b"x");
     t.symlink("home/user/.local/state/link", "/home/user/Keep");
     t.symlink(
@@ -226,8 +228,7 @@ fn logs_age_filter() {
     for p in [&old, &nested, &other, &xs, &xs_old] {
         age(p, 30);
     }
-    let _ = (&fresh, &xs_fresh_dir);
-    // Only .xsession-errors is old enough? make .old fresh again.
+    // Keep .xsession-errors.old fresh.
     fs::File::options()
         .write(true)
         .open(&xs_old)

@@ -91,15 +91,20 @@ impl Scanner for CacheScanner {
                 continue;
             };
             let key = NameKey::new(&lossy);
-            let mut matching = owners
+            let matching: Vec<&App> = owners
                 .iter()
-                .filter(|(_, ids)| matches!(score_name(&key, ids), Some((Confidence::High, _))));
-            if let (Some((app, _)), None) = (matching.next(), matching.next()) {
+                .filter(|(_, ids)| matches!(score_name(&key, ids), Some((Confidence::High, _))))
+                .map(|(app, _)| *app)
+                .collect();
+            if let [app] = matching.as_slice() {
                 item.app_id = Some(app.id.clone());
-                if !running_processes(cx.env, app).is_empty() {
-                    item.preselected = false;
-                    item.note = Some(format!("{} is running", app.display_name));
-                }
+            }
+            if let Some(app) = matching
+                .iter()
+                .find(|a| !running_processes(cx.env, a).is_empty())
+            {
+                item.preselected = false;
+                item.note = Some(format!("{} is running", app.display_name));
             }
             out.push(item);
         }
