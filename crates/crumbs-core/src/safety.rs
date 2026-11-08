@@ -1,0 +1,397 @@
+//! The gate every destructive action passes through. All checks fail closed.
+
+use std::fs;
+use std::io;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Component, Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::config::{Config, glob_match};
+use crate::env::{Env, display_path};
+use crate::error::CoreError;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protection {
+    /// Only the path itself is protected; children may be acted on.
+    Exact,
+    /// The path and everything below it is protected.
+    Subtree,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SafetyError {
+    #[error("refusing: {0} is protected")]
+    Protected(String),
+    #[error("refusing: {0} is outside the allowed roots")]
+    OutsideAllowedRoots(String),
+    #[error("refusing: {0} changed since it was scanned")]
+    Changed(String),
+    #[error("{0} no longer exists")]
+    Missing(String),
+}
+
+/// Built-in protected paths (spec §8) plus `cfg.protect` as subtrees, all
+/// in-system.
+pub fn protected_paths(env: &Env, cfg: &Config) -> Vec<(PathBuf, Protection)> {
+    let home = env.unsys(&env.home);
+    let mut v: Vec<(PathBuf, Protection)> = Vec::new();
+    v.push((home.clone(), Protection::Exact));
+    for p in [
+        &env.config_home,
+        &env.cache_home,
+        &env.data_home,
+        &env.state_home,
+    ] {
+        v.push((env.unsys(p), Protection::Exact));
+    }
+    for p in ["/", "/etc", "/opt", "/var", "/home"] {
+        v.push((PathBuf::from(p), Protection::Exact));
+    }
+    for rel in [
+        ".ssh",
+        ".gnupg",
+        ".pki",
+        ".local/share/keyrings",
+        ".password-store",
+        ".config/crumbs",
+        ".local/state/crumbs",
+        "Documents",
+        "Desktop",
+        "Pictures",
+        "Music",
+        "Videos",
+    ] {
+        v.push((home.join(rel), Protection::Subtree));
+    }
+    for p in [
+        "/usr",
+        "/boot",
+        "/var/lib/pacman",
+        "/var/lib/dpkg",
+        "/var/lib/rpm",
+    ] {
+        v.push((PathBuf::from(p), Protection::Subtree));
+    }
+    for p in &cfg.protect {
+        v.push((p.clone(), Protection::Subtree));
+    }
+    v
+}
+
+/// Lexical normalisation: drops `.` components. Returns `None` for relative
+/// paths and for any path containing `..` (callers treat that as unsafe).
+fn normalise(p: &Path) -> Option<PathBuf> {
+    if !p.is_absolute() {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => return None,
+            other => out.push(other.as_os_str()),
+        }
+    }
+    Some(out)
+}
+
+pub fn is_protected(env: &Env, cfg: &Config, in_system: &Path) -> bool {
+    let Some(path) = normalise(in_system) else {
+        return true;
+    };
+    protected_paths(env, cfg).iter().any(|(p, kind)| {
+        let Some(p) = normalise(p) else {
+            // A malformed configured entry can't be compared: fail closed.
+            return true;
+        };
+        match kind {
+            Protection::Exact => path == p || p.starts_with(&path),
+            Protection::Subtree => path.starts_with(&p) || p.starts_with(&path),
+        }
+    })
+}
+
+pub fn is_allowed_user_target(env: &Env, cfg: &Config, in_system: &Path) -> bool {
+    let Some(path) = normalise(in_system) else {
+        return false;
+    };
+    let home = env.unsys(&env.home);
+    if path == home || !path.starts_with(&home) {
+        return false;
+    }
+    if is_protected(env, cfg, &path) {
+        return false;
+    }
+    let text = path.to_string_lossy();
+    !cfg.exclude.iter().any(|pat| glob_match(pat, &text))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fingerprint {
+    pub dev: u64,
+    pub ino: u64,
+    pub is_symlink: bool,
+}
+
+fn real_path(env: &Env, in_system: &Path) -> PathBuf {
+    match in_system.strip_prefix("/") {
+        Ok(rest) => env.root.join(rest),
+        Err(_) => env.root.join(in_system),
+    }
+}
+
+fn lstat(env: &Env, in_system: &Path) -> io::Result<Fingerprint> {
+    let m = fs::symlink_metadata(real_path(env, in_system))?;
+    Ok(Fingerprint {
+        dev: m.dev(),
+        ino: m.ino(),
+        is_symlink: m.file_type().is_symlink(),
+    })
+}
+
+pub fn fingerprint(env: &Env, in_system: &Path) -> Result<Fingerprint, CoreError> {
+    lstat(env, in_system).map_err(|source| CoreError::Io {
+        path: in_system.to_path_buf(),
+        source,
+    })
+}
+
+/// Re-checks `in_system` immediately before an action. Order: allowed target,
+/// parent chain (no symlinks between home and the path), then the target's own
+/// `(dev, ino, is_symlink)` against `expected`.
+pub fn verify(
+    env: &Env,
+    cfg: &Config,
+    in_system: &Path,
+    expected: &Fingerprint,
+) -> Result<(), SafetyError> {
+    let shown = display_path(env, in_system);
+    if is_protected(env, cfg, in_system) {
+        return Err(SafetyError::Protected(shown));
+    }
+    if !is_allowed_user_target(env, cfg, in_system) {
+        return Err(SafetyError::OutsideAllowedRoots(shown));
+    }
+    // Allowed implies normalisable and strictly under home.
+    let (Some(path), home) = (normalise(in_system), env.unsys(&env.home)) else {
+        return Err(SafetyError::OutsideAllowedRoots(shown));
+    };
+    let Some(parent) = path.parent() else {
+        return Err(SafetyError::OutsideAllowedRoots(shown));
+    };
+    // Every directory strictly below home, down to the parent of the target.
+    let mut dir = home.clone();
+    let rel_parent = parent.strip_prefix(&home).unwrap_or(Path::new(""));
+    for comp in rel_parent.components() {
+        dir.push(comp.as_os_str());
+        match lstat(env, &dir) {
+            Ok(fp) if !fp.is_symlink => {}
+            Ok(_) => return Err(SafetyError::Changed(shown)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(SafetyError::Missing(shown));
+            }
+            Err(_) => return Err(SafetyError::Changed(shown)),
+        }
+    }
+    match lstat(env, &path) {
+        Ok(fp) if fp == *expected => Ok(()),
+        Ok(_) => Err(SafetyError::Changed(shown)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(SafetyError::Missing(shown)),
+        Err(_) => Err(SafetyError::Changed(shown)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::FixtureTree;
+
+    fn setup() -> (FixtureTree, Env, Config) {
+        let t = FixtureTree::new();
+        let env = t.env();
+        (t, env, Config::default())
+    }
+
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    #[test]
+    fn home_itself_protected_exact_child_allowed() {
+        let (_t, env, cfg) = setup();
+        assert!(is_protected(&env, &cfg, &p("/home/user")));
+        assert!(!is_allowed_user_target(&env, &cfg, &p("/home/user")));
+        assert!(is_protected(&env, &cfg, &p("/home/user/.config")));
+        assert!(!is_protected(&env, &cfg, &p("/home/user/.config/foo")));
+        assert!(is_allowed_user_target(
+            &env,
+            &cfg,
+            &p("/home/user/.config/foo")
+        ));
+    }
+
+    #[test]
+    fn ssh_subtree_protected() {
+        let (_t, env, cfg) = setup();
+        assert!(is_protected(&env, &cfg, &p("/home/user/.ssh/known_hosts")));
+        assert!(is_protected(&env, &cfg, &p("/home/user/Documents/a/b")));
+        assert!(!is_protected(&env, &cfg, &p("/home/user/.sshx")));
+    }
+
+    #[test]
+    fn ancestor_of_protected_is_protected() {
+        let (_t, env, cfg) = setup();
+        assert!(is_protected(&env, &cfg, &p("/home/user/.local")));
+        assert!(is_protected(&env, &cfg, &p("/home/user/.local/share")));
+        assert!(!is_protected(&env, &cfg, &p("/home/user/.local/share/foo")));
+        assert!(is_protected(&env, &cfg, &p("/var/lib")));
+    }
+
+    #[test]
+    fn system_paths_protected() {
+        let (_t, env, cfg) = setup();
+        for s in [
+            "/",
+            "/etc",
+            "/opt",
+            "/var",
+            "/home",
+            "/usr/bin/ls",
+            "/boot/x",
+        ] {
+            assert!(is_protected(&env, &cfg, &p(s)), "{s}");
+        }
+        assert!(!is_protected(&env, &cfg, &p("/opt/foo")));
+    }
+
+    #[test]
+    fn user_protect_added() {
+        let (_t, env, mut cfg) = setup();
+        let target = p("/home/user/.config/keepme/sub");
+        assert!(is_allowed_user_target(&env, &cfg, &target));
+        cfg.protect.push(p("/home/user/.config/keepme"));
+        assert!(is_protected(&env, &cfg, &target));
+        assert!(!is_allowed_user_target(&env, &cfg, &target));
+    }
+
+    #[test]
+    fn exclude_glob_blocks_target() {
+        let (_t, env, mut cfg) = setup();
+        cfg.exclude.push("/home/user/.config/*-keep".into());
+        assert!(!is_allowed_user_target(
+            &env,
+            &cfg,
+            &p("/home/user/.config/a-keep/x")
+        ));
+        assert!(is_allowed_user_target(
+            &env,
+            &cfg,
+            &p("/home/user/.config/a-drop")
+        ));
+    }
+
+    #[test]
+    fn outside_home_not_allowed() {
+        let (_t, env, cfg) = setup();
+        assert!(!is_allowed_user_target(&env, &cfg, &p("/opt/foo")));
+        assert!(!is_allowed_user_target(&env, &cfg, &p("/tmp/x")));
+        assert!(!is_allowed_user_target(&env, &cfg, &p("/home/username/x")));
+    }
+
+    #[test]
+    fn dotdot_and_relative_fail_closed() {
+        let (_t, env, cfg) = setup();
+        assert!(is_protected(
+            &env,
+            &cfg,
+            &p("/home/user/.config/foo/../../.ssh")
+        ));
+        assert!(!is_allowed_user_target(
+            &env,
+            &cfg,
+            &p("/home/user/.config/foo/../bar")
+        ));
+        assert!(!is_allowed_user_target(&env, &cfg, &p("foo")));
+        // `.` components are dropped, so these compare normally.
+        assert!(is_protected(&env, &cfg, &p("/home/user/./.ssh/x")));
+        assert!(is_allowed_user_target(
+            &env,
+            &cfg,
+            &p("/home/user/./.config/foo")
+        ));
+    }
+
+    #[test]
+    fn verify_ok_when_unchanged() {
+        let (t, env, cfg) = setup();
+        t.mkdir("home/user/.config/foo");
+        let target = p("/home/user/.config/foo");
+        let fp = fingerprint(&env, &target).unwrap();
+        assert!(!fp.is_symlink);
+        assert_eq!(verify(&env, &cfg, &target, &fp), Ok(()));
+    }
+
+    #[test]
+    fn verify_detects_swap() {
+        let (t, env, cfg) = setup();
+        t.mkdir("home/user/.config/foo");
+        t.mkdir("home/user/Documents");
+        let target = p("/home/user/.config/foo");
+        let fp = fingerprint(&env, &target).unwrap();
+        std::fs::remove_dir(t.dir.path().join("home/user/.config/foo")).unwrap();
+        t.symlink("home/user/.config/foo", "/home/user/Documents");
+        assert!(matches!(
+            verify(&env, &cfg, &target, &fp),
+            Err(SafetyError::Changed(_))
+        ));
+    }
+
+    #[test]
+    fn verify_detects_symlinked_parent() {
+        let (t, env, cfg) = setup();
+        t.write("home/user/.config/foo/bar", b"x");
+        t.write("home/user/elsewhere/foo/bar", b"x");
+        let target = p("/home/user/.config/foo/bar");
+        let fp = fingerprint(&env, &target).unwrap();
+        std::fs::remove_dir_all(t.dir.path().join("home/user/.config")).unwrap();
+        t.symlink("home/user/.config", "/home/user/elsewhere");
+        assert!(matches!(
+            verify(&env, &cfg, &target, &fp),
+            Err(SafetyError::Changed(_))
+        ));
+    }
+
+    #[test]
+    fn verify_missing() {
+        let (t, env, cfg) = setup();
+        t.write("home/user/.config/foo/bar", b"x");
+        let target = p("/home/user/.config/foo/bar");
+        let fp = fingerprint(&env, &target).unwrap();
+        std::fs::remove_file(t.dir.path().join("home/user/.config/foo/bar")).unwrap();
+        assert!(matches!(
+            verify(&env, &cfg, &target, &fp),
+            Err(SafetyError::Missing(_))
+        ));
+    }
+
+    #[test]
+    fn verify_refuses_protected_and_outside() {
+        let (t, env, cfg) = setup();
+        t.write("home/user/.ssh/id", b"k");
+        t.write("opt/foo", b"x");
+        let ssh = p("/home/user/.ssh/id");
+        let fp = fingerprint(&env, &ssh).unwrap();
+        assert!(matches!(
+            verify(&env, &cfg, &ssh, &fp),
+            Err(SafetyError::Protected(_))
+        ));
+        let out = p("/tmp/x");
+        t.write("tmp/x", b"x");
+        let fp = fingerprint(&env, &out).unwrap();
+        assert!(matches!(
+            verify(&env, &cfg, &out, &fp),
+            Err(SafetyError::OutsideAllowedRoots(_))
+        ));
+    }
+}
