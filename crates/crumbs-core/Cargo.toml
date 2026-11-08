@@ -11,12 +11,13 @@ name = "crumbs_core"
 test-support = ["dep:tempfile"]
 
 [dependencies]
+jiff = "0.2.40"
 rustix = { version = "1.1.6", features = ["fs", "process"] }
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 tempfile = { version = "3.27.0", optional = true }
 thiserror = "2.0.21"
 toml = "1.2.1"
 
 [dev-dependencies]
-serde_json = "1.0.154"
 tempfile = "3.27.0"

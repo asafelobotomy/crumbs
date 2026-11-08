@@ -157,7 +157,7 @@ pub struct Fingerprint {
 }
 
 /// True when the path is absolute and already in normalised form.
-fn is_canonical(p: &Path) -> bool {
+pub(crate) fn is_canonical(p: &Path) -> bool {
     normalise(p).is_some_and(|n| n.as_os_str() == p.as_os_str())
 }
 
