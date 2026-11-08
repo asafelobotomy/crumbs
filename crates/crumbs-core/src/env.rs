@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -65,6 +66,10 @@ pub struct Env {
     /// test user, so [`Env::fake`] expects that user instead. The sticky
     /// bit is required either way.
     pub(crate) system_owner_uid: u32,
+    /// Test override for the user's mount namespace (see
+    /// [`Env::user_mount_ns`]): `Some(None)` reads as unreadable. Always
+    /// `None` outside tests, where the real `/proc/self/ns/mnt` is read.
+    pub(crate) mount_ns: Option<Option<OsString>>,
 }
 
 /// Days from `CRUMBS_TEST_CLOCK_SHIFT_DAYS`; only ever read for a fake root.
@@ -133,6 +138,7 @@ impl Env {
             distro,
             clock_shift: Duration::ZERO,
             system_owner_uid: 0,
+            mount_ns: None,
         })
     }
 
@@ -157,6 +163,7 @@ impl Env {
             root: canon,
             distro,
             clock_shift: test_clock_shift(),
+            mount_ns: None,
         })
     }
 
@@ -170,6 +177,25 @@ impl Env {
     #[cfg(any(test, feature = "test-support", debug_assertions))]
     pub fn set_system_owner_uid(&mut self, uid: u32) {
         self.system_owner_uid = uid;
+    }
+
+    /// Test hook: sets [`Env::mount_ns`]; `None` makes it unreadable.
+    #[cfg(any(test, feature = "test-support", debug_assertions))]
+    pub fn set_mount_ns(&mut self, ns: Option<OsString>) {
+        self.mount_ns = Some(ns);
+    }
+
+    /// The mount namespace this process runs in: the target of the real
+    /// `/proc/self/ns/mnt` (never the fake root's), e.g. `mnt:[4026531841]`.
+    /// `None` when it cannot be read.
+    pub fn user_mount_ns(&self) -> Option<OsString> {
+        if let Some(ns) = &self.mount_ns {
+            return ns.clone();
+        }
+        fs::read_link("/proc/self/ns/mnt")
+            .ok()
+            .map(PathBuf::into_os_string)
+            .filter(|ns| !ns.is_empty())
     }
 
     /// The current time, shifted by [`Env::clock_shift`] (zero on the real

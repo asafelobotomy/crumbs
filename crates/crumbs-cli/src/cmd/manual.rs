@@ -18,7 +18,7 @@ use super::render::sanitise;
 pub fn is_privileged(pa: &PlannedAction) -> bool {
     match pa.action {
         Action::PrivilegedCommand { .. } | Action::PackageRemove { .. } => true,
-        Action::Delete { .. } => pa.scope == Scope::System,
+        Action::Delete { .. } => matches!(pa.scope, Scope::System | Scope::SystemTree),
         Action::Trash { .. } | Action::EditFile { .. } | Action::UserCommand { .. } => false,
     }
 }
@@ -36,6 +36,17 @@ pub fn root_command(env: &Env, pa: &PlannedAction) -> Option<String> {
         | Action::PackageRemove { program, args, .. } => {
             (program, args.iter().map(OsStr::new).collect())
         }
+        // The batch wraps this in a mount-namespace guard; run by hand,
+        // it is the user's own namespace.
+        Action::Delete { path } if pa.scope == Scope::SystemTree => (
+            "rm",
+            vec![
+                OsStr::new("-rf"),
+                OsStr::new("--one-file-system"),
+                OsStr::new("--"),
+                path.as_os_str(),
+            ],
+        ),
         Action::Delete { path } => (
             "rm",
             vec![OsStr::new("-f"), OsStr::new("--"), path.as_os_str()],
@@ -120,6 +131,12 @@ mod tests {
                 Scope::System,
             ),
             planned(
+                Action::Delete {
+                    path: "/opt/it's".into(),
+                },
+                Scope::SystemTree,
+            ),
+            planned(
                 Action::PackageRemove {
                     source: crumbs_core::SourceKind::Pacman,
                     names: vec!["a".into()],
@@ -135,6 +152,8 @@ mod tests {
             [
                 r"sudo '/usr/bin/flatpak' 'uninstall' 'it'\''s'",
                 "sudo '/usr/bin/rm' '-f' '--' '/var/lib/systemd/coredump/core.1'",
+                // The user runs it themselves: no namespace guard.
+                r"sudo '/usr/bin/rm' '-rf' '--one-file-system' '--' '/opt/it'\''s'",
                 // Not installed: shown as given.
                 "sudo 'pacman' '-Rn' 'a'",
             ]

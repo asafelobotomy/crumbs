@@ -17,7 +17,7 @@ use crate::env::{Env, display_path};
 use crate::error::CoreError;
 use crate::executor::files;
 use crate::history::{self, HistoryAction, HistoryEntry};
-use crate::safety::{is_allowed_user_target, is_canonical};
+use crate::safety::{Scope, is_allowed_user_target, is_canonical};
 use crate::trash::{self, Trashed};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -31,6 +31,9 @@ pub struct RestoreOutcome {
 pub const NO_MATCH: &str = "no matching history entry";
 pub const INVALID_ENTRY: &str = "history entry failed validation";
 pub const ALREADY_RESTORED: &str = "already restored";
+/// Why a `Delete` of a [`Scope::SystemTree`](crate::safety::Scope::SystemTree)
+/// target cannot be undone.
+pub const MSG_SYSTEM_TREE: &str = "system files deleted as root cannot be restored";
 
 /// Restores the entries the selectors name. A selector is an entry id, a
 /// batch id (its successful entries that changed something) or an absolute
@@ -110,6 +113,7 @@ fn restore_with(
                     argv: None,
                     packages: None,
                     kind: None,
+                    scope: None,
                 };
                 logged += 1;
                 // Appended right after its action, so a later failure never
@@ -198,6 +202,7 @@ fn restore_one(
         return Err("the original action failed; nothing to restore".into());
     }
     match e.action {
+        HistoryAction::Delete if e.scope == Some(Scope::SystemTree) => Err(MSG_SYSTEM_TREE.into()),
         HistoryAction::Delete => Err("permanently deleted; cannot be restored".into()),
         HistoryAction::Restore => Err(INVALID_ENTRY.into()),
         HistoryAction::Command | HistoryAction::PrivilegedCommand => {

@@ -10,30 +10,44 @@ use std::path::{Path, PathBuf};
 
 use crate::env::Env;
 use crate::error::CoreError;
+use crate::safety::is_canonical;
 
 /// The in-system mount points equal to or below `in_system`, comparing
 /// whole path components, in mountinfo order. Reads only mountinfo, never
-/// the tree. An unreadable or unparsable mountinfo is an error: callers
-/// fail closed.
+/// the tree. A target that is not canonical, and an unreadable, empty or
+/// unparsable mountinfo, are errors: callers fail closed.
 pub fn mounts_at_or_below(env: &Env, in_system: &Path) -> Result<Vec<PathBuf>, CoreError> {
     let file = env.sys("/proc/self/mountinfo");
+    let invalid = |what: &str| CoreError::Io {
+        path: file.clone(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, what.to_string()),
+    };
+    if !is_canonical(in_system) {
+        return Err(CoreError::Io {
+            path: in_system.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "mount check needs a canonical absolute path",
+            ),
+        });
+    }
     let data = fs::read(&file).map_err(|source| CoreError::Io {
         path: file.clone(),
         source,
     })?;
     let mut found = Vec::new();
+    let mut lines = 0usize;
     for line in data.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
-        let mount = parse_mount_point(line).ok_or_else(|| CoreError::Io {
-            path: file.clone(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "unparsable mountinfo line",
-            ),
-        })?;
+        lines += 1;
+        let mount = parse_mount_point(line).ok_or_else(|| invalid("unparsable mountinfo line"))?;
         let mount = env.unsys(&mount);
         if mount.starts_with(in_system) {
             found.push(mount);
         }
+    }
+    // Every system has a root mount: no lines means a broken read.
+    if lines == 0 {
+        return Err(invalid("empty mountinfo"));
     }
     Ok(found)
 }
@@ -160,6 +174,37 @@ mod tests {
         let t = FixtureTree::new();
         let env = t.env();
         assert!(mounts_at_or_below(&env, Path::new("/opt/inky")).is_err());
+    }
+
+    #[test]
+    fn non_canonical_target_fails_closed() {
+        let t = FixtureTree::new();
+        t.write("proc/self/mountinfo", line("/").as_bytes());
+        let env = t.env();
+        for bad in [
+            "opt/inky",
+            "/opt/inky/",
+            "/opt/./inky",
+            "/opt/../opt/inky",
+            "//opt/inky",
+            "",
+        ] {
+            assert!(mounts_at_or_below(&env, Path::new(bad)).is_err(), "{bad}");
+        }
+        assert!(mounts_at_or_below(&env, Path::new("/opt/inky")).is_ok());
+    }
+
+    #[test]
+    fn empty_mountinfo_fails_closed() {
+        for empty in ["", "\n", "\n\n"] {
+            let t = FixtureTree::new();
+            t.write("proc/self/mountinfo", empty.as_bytes());
+            let env = t.env();
+            assert!(
+                mounts_at_or_below(&env, Path::new("/opt/inky")).is_err(),
+                "{empty:?}"
+            );
+        }
     }
 
     #[test]
