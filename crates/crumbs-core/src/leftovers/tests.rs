@@ -1270,6 +1270,25 @@ mod system {
     }
 
     #[test]
+    fn cost_does_not_grow_with_unclaimed_inventory() {
+        let t = FixtureTree::new();
+        for n in ["zeta", "yota", "xi"] {
+            t.mkdir(&format!("etc/{n}"));
+            t.mkdir(&format!("opt/{n}"));
+        }
+        let apps: Vec<App> = (0..2000)
+            .map(|i| pacman(&format!("app{i:04}"), &[]))
+            .collect();
+        let s = sys(&t, apps, owned(&["/usr/bin/true"]), &[]);
+        let start = std::time::Instant::now();
+        for i in 0..s.inv.apps.len() {
+            assert!(s.find(i, true).is_empty());
+        }
+        let took = start.elapsed();
+        assert!(took < Duration::from_secs(5), "{took:?}");
+    }
+
+    #[test]
     fn app_name_sets_lists_exact_names_and_keys() {
         let mut app = pacman("inky-app", &["inky"]);
         app.desktop_ids = vec!["org.inky.Inky.desktop".into()];

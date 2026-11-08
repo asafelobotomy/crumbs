@@ -103,7 +103,11 @@ fn parse_rules(text: &str, what: &str, origin: &RuleOrigin) -> (Vec<Rule>, Vec<C
             ));
             continue;
         }
-        for path in raw.paths.iter().filter(|p| p.starts_with('/')) {
+        for path in raw
+            .paths
+            .iter()
+            .filter(|p| p.starts_with("/etc/") || p.starts_with("/opt/"))
+        {
             if expand_system_rule_path(path).is_none() {
                 errors.push(parse_error(
                     what,
@@ -315,17 +319,29 @@ mod tests {
     use crate::model::SourceKind;
 
     #[test]
+    fn absolute_home_rule_path_does_not_warn() {
+        let t = FixtureTree::new();
+        user_rule_file(
+            &t,
+            "home.toml",
+            "[[app]]\nmatch = { package = [\"x\"] }\npaths = [\"/home/user/.foo\", \"/usr/bin/x\"]\n",
+        );
+        let (_, errors) = load_rules(&t.env());
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
     fn invalid_absolute_rule_path_warns_but_keeps_rule() {
         let t = FixtureTree::new();
         user_rule_file(
             &t,
             "sys.toml",
-            "[[app]]\nmatch = { package = [\"x\"] }\npaths = [\"/etc/x\", \"/etc/x/y\", \"/usr/bin/x\", \"~/.x\"]\n",
+            "[[app]]\nmatch = { package = [\"x\"] }\npaths = [\"/etc/x\", \"/etc/x/y\", \"/opt/a/b\", \"/usr/bin/x\", \"~/.x\"]\n",
         );
         let (rules, errors) = load_rules(&t.env());
         let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
         assert_eq!(msgs.len(), 2, "{msgs:?}");
-        for p in ["/etc/x/y", "/usr/bin/x"] {
+        for p in ["/etc/x/y", "/opt/a/b"] {
             assert!(
                 msgs.iter().any(|m| m.contains(&format!(
                     "rule path {p} ignored: only /etc/<name> or /opt/<name> are allowed outside home"
@@ -333,7 +349,7 @@ mod tests {
                 "{p}: {msgs:?}"
             );
         }
-        assert!(rules.iter().any(|r| r.paths.len() == 4));
+        assert!(rules.iter().any(|r| r.paths.len() == 5));
     }
 
     #[test]

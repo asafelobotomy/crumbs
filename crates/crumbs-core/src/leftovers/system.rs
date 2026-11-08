@@ -2,6 +2,7 @@
 //! after an app. They are never High and never pre-selected; root deletes
 //! them only when the user picks them.
 
+use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::fs;
 use std::ops::Bound;
@@ -145,13 +146,8 @@ pub fn find_system_leftovers(
         return Vec::new();
     };
     let mine = Claimant::of(idx, &inv.apps[ai]);
-    let others: Vec<(&App, Claimant)> = inv
-        .apps
-        .iter()
-        .enumerate()
-        .filter(|&(o, _)| o != ai)
-        .map(|(_, a)| (a, Claimant::of(idx, a)))
-        .collect();
+    // Other apps' claim data is built only once this app claims an entry.
+    let others: OnceCell<Vec<(&App, Claimant)>> = OnceCell::new();
     let mut out: Vec<Finding> = Vec::new();
     for (dir, kind) in [
         ("/etc", FindingKind::SystemConfig),
@@ -180,6 +176,14 @@ pub fn find_system_leftovers(
                 continue;
             };
             // Any claim by another installed app shares it.
+            let others = others.get_or_init(|| {
+                inv.apps
+                    .iter()
+                    .enumerate()
+                    .filter(|&(o, _)| o != ai)
+                    .map(|(_, a)| (a, Claimant::of(idx, a)))
+                    .collect()
+            });
             let others: HashSet<&str> = others
                 .iter()
                 .filter(|(_, c)| c.claim(&path, &name).is_some())
