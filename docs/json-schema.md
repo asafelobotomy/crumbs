@@ -22,13 +22,14 @@ Within `schema_version` 1, fields may be **added**, never removed or renamed, an
 | Field | Type | Meaning |
 |---|---|---|
 | `schema_version` | number | Always `1`. |
-| `command` | string | `apps list`, `apps show`, `doctor`, `orphans`, `uninstall`, `history` or `restore`. |
+| `command` | string | `apps list`, `apps show`, `doctor`, `orphans`, `uninstall`, `history`, `restore`, `scan` or `clean`. |
 | `data` | object | The command's payload, described per command below. |
 | `errors` | array | Non-fatal problems and refusals. Entries are `{ "source": string, "message": string }`. |
 
 `errors[].source` is one of:
 
 - a source name: `pacman`, `flatpak`, `appimage`, `unmanaged` (that source failed; the others still ran);
+- a category name (`scan` and `clean` only): that category's scanner failed, for example `flatpak-unused`;
 - `config` (a `config.toml` entry was dropped; the config file is never fatal because of this);
 - `rules` (a leftover rules file could not be used);
 - `history` (`history` only: unreadable lines of `history.jsonl` were skipped);
@@ -36,7 +37,7 @@ Within `schema_version` 1, fields may be **added**, never removed or renamed, an
 
 ### Error envelope
 
-When `uninstall` or `orphans --clean` is run with `--json` and refuses or fails (bad flags, unknown or inexact app, source errors without `--force`, a running app, a user "no", ...), it still prints a complete envelope on stdout, with an empty plan, a null report, and one `cli` entry whose `message` is the same text printed to stderr after `error: `:
+When `uninstall`, `orphans --clean` or `clean` is run with `--json` and refuses or fails (bad flags, unknown or inexact app, source errors without `--force`, a running app, a user "no", ...), it still prints a complete envelope on stdout, with an empty plan, a null report, and one `cli` entry whose `message` is the same text printed to stderr after `error: `:
 
 ```json
 {
@@ -62,11 +63,11 @@ The exit code tells you which kind of failure it was (see below). `apps show` re
 | Code | Meaning |
 |---|---|
 | 0 | Success (including a dry run and "nothing to do"). |
-| 1 | Error, or `uninstall`/`orphans --clean` refused because a source failed (override with `--force`) or an app is running, or `uninstall` refused an AppImage whose file fails the safety checks. |
-| 2 | Usage error: bad flags, ambiguous or not-found app, `--json` without `--yes` or `--dry-run`, a destructive command run non-interactively without `--yes`, removing a non-AppImage app without `--leftovers-only`, or `restore` with no selector matching any history entry. |
-| 3 | Partial failure: some source failed while another worked, or some actions/restores failed. |
+| 1 | Error, or `uninstall`/`orphans --clean`/`clean` refused because a source or scanner failed (override with `--force`) or an app is running, or `uninstall` refused an AppImage whose file fails the safety checks. |
+| 2 | Usage error: bad flags, an unknown category name, `--system` (not available yet), ambiguous or not-found app, `--json` without `--yes` or `--dry-run`, a destructive command run non-interactively without `--yes`, removing a non-AppImage app without `--leftovers-only`, or `restore` with no selector matching any history entry. |
+| 3 | Partial failure: some source failed while another worked, some actions/restores failed, or (`scan`) some category's scanner failed. |
 | 4 | Aborted by the user at a prompt. |
-| 5 | Privilege escalation unavailable (reserved; not returned by M2 commands). |
+| 5 | Privilege escalation unavailable (reserved; not returned by M2 or M3 commands). |
 
 ## App IDs
 
@@ -124,7 +125,20 @@ Commands that take an app accept an ID, a name, a desktop ID or a display name. 
 | `total_size` | number | Sum of the actions' `size`. |
 | `notes` | array of string | For example `the app itself stays installed (leftovers only)`. |
 
-Each action is `{ "action", "size", "reason" }`. `action` is tagged by `type`: `trash` and `delete` carry `path`; `edit-file` carries `path` and `remove_lines` (array of string; the file is edited and a backup is kept next to it). `size` is bytes (0 for `edit-file`).
+Each action is `{ "action", "size", "reason" }`, plus two optional fields. `action` is tagged by `type`:
+
+- `trash` and `delete` carry `path`;
+- `edit-file` carries `path` and `remove_lines` (array of string; the file is edited and a backup is kept next to it);
+- `user-command` (`clean` only) carries `program` and `args` (array of string). crumbs resolves `program` in the trusted system directories when it runs it, never through `$PATH`. It has no path and cannot be undone.
+
+`size` is bytes (0 for `edit-file`, and 0 for `user-command`, whose size is unknown).
+
+The optional fields are left out when they have no value:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `scope` | string | Where the path may lie: `user-temp` (a direct child of `/tmp`) or `home-trash` (an entry of the home trash). Absent means the home directory, as in M2. |
+| `depends_on` | number | Index of an earlier action in the same plan. If that action did not succeed, this one is skipped. The `.trashinfo` file of a trashed entry depends on the entry itself. |
 
 ## `apps list`
 
@@ -347,7 +361,9 @@ Orphans are never `high`:
 - `null` on `--dry-run`, and in every error envelope;
 - otherwise an array aligned with `plans`, one entry per plan: `null` for a plan with no actions, else an ExecReport. When nothing at all is to be done, every entry is `null`.
 
-**ExecReport**: `batch` (string, the history batch ID), `freed` (number, bytes) and `results` (array, one per planned action, same order): `{ action, ok, error, history_id }`. `action` is the planned action's `{ type, path, ... }`; `error` is string or null; `history_id` is the entry ID usable with `restore`.
+**ExecReport**: `batch` (string, the history batch ID), `freed` (number, bytes) and `results` (array, one per planned action, same order): `{ action, ok, error, history_id }`. `action` is the planned action's `{ type, path, ... }`; `error` is string or null; `history_id` is the entry ID usable with `restore` (for a command it records the run, and there is nothing to restore).
+
+`freed` is the sum of the `size` of every action that succeeded. As in M2 it counts bytes moved to the trash as well as bytes deleted: a trashed item still takes disk space until the trash is emptied. Read it as "removed from where it was", not as "returned to the filesystem". An action skipped because the action it `depends_on` failed has `ok` false and the `error` text `skipped: <path> was not removed`.
 
 Exit 0 when every action succeeded, 3 when some failed.
 
@@ -433,12 +449,14 @@ With `--leftovers-only`, the plan leaves out what launches or opens the app: its
 | `restored` | number | Entries of this batch that a later successful restore put back. |
 | `entries` | array | History entries (below). |
 
-**History entry**: `id` (`<batch>-<index>`), `batch`, `time`, `action` (`trash`, `delete`, `edit-file` or `restore`; lines written by earlier builds may say `edit_file`, which means the same), `path`, `trashed` (null, or `{ original, files_path, info_path }`), `backup` (string or null), `size` (number), `ok` (boolean), `error` (string or null), `app_id` (string or null) and `restores` (string or null).
+**History entry**: `id` (`<batch>-<index>`), `batch`, `time`, `action` (`trash`, `delete`, `edit-file`, `restore` or `command`; lines written by earlier builds may say `edit_file`, which means the same), `path`, `trashed` (null, or `{ original, files_path, info_path }`), `backup` (string or null), `size` (number), `ok` (boolean), `error` (string or null), `app_id` (string or null) and `restores` (string or null) and `argv` (array of string; present on `command` entries only).
 
 - `trashed` is set for `trash` entries, and on `restore` entries it repeats the trash record that was restored.
 - On an `edit-file` entry, `backup` is the copy of the file as it was before the edit.
 - On a `restore` entry, `restores` is the ID of the entry it restored. For a restored `edit-file`, `backup` is the **pre-restore backup**: a copy of the file as it was just before the restore overwrote it. For other entries `backup` is null.
-- Failed attempts are recorded too (`ok` false, `error` set).
+- On a `command` entry (a `user-command` action that ran), `path` is the program's in-system path (or its bare name when it is not installed), `argv` its arguments, `size` 0, `trashed` and `backup` null. It cannot be restored.
+- Failed and skipped attempts are recorded too (`ok` false, `error` set).
+- A batch made by `clean` has `app_id` null on its entries, so `history` labels it `orphans`.
 
 `errors` has a `history` entry when unreadable lines were skipped. Exit 0. Example (a trashed orphan, then a restore of it; one batch of each):
 
@@ -546,5 +564,414 @@ A path selector names the newest successful trash entry for that path that has n
     ]
   },
   "errors": []
+}
+```
+
+## `scan`
+
+`crumbs scan [--category <name>]... [--details] [--user] [--json]` is strictly read-only: it never changes a file and never writes history. `--system` is not available yet: exit 2 with `system cleanup needs privileged support (coming in a later version)` (under `--json`, an envelope with `data: null` and a `cli` error).
+
+`data`: `categories`, an array of **CategoryReport**, one per listed category in this fixed order: `cache`, `thumbnails`, `trash`, `temp`, `browser-cache`, `dev-cache`, `flatpak-unused`, `appimage-old`, `logs`.
+
+- With no `--category`, all nine are listed. Categories switched off in `categories_off` (default: `dev-cache`) are listed with `skipped: true`, an empty `items` and `total` 0, and are not scanned.
+- With `--category`, exactly the named categories are listed and scanned, even ones switched off in the config.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `category` | string | One of the nine names above. |
+| `items` | array | BloatItems, largest first. |
+| `total` | number | Sum of the known item sizes, in bytes. |
+| `unknown_sizes` | number | Items whose size is unknown (`size` null). The real total is larger. |
+| `error` | string or null | Set when this category's scanner failed. `items` is then empty. |
+| `skipped` | boolean | `true` for a category that is switched off and was not named: it was not scanned. |
+
+**BloatItem**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `category` | string | The category. |
+| `path` | string or null | In-system path. `null` for a command item. |
+| `label` | string | What to show: a name, a display path, or for a command what it does. |
+| `size` | number or null | Bytes. `null` when unknown. |
+| `rebuildable` | boolean | The owner recreates it on demand (caches). |
+| `preselected` | boolean | Whether `clean` includes it by default. `false` for an item held back (its app is running, see `note`) and for `flatpak-unused`, which only runs when named. |
+| `note` | string or null | Why it is held back (`Firefox is running`), or what to know (`deleted permanently (temporary file)`, `decided by flatpak`). |
+| `action` | string or object | `"trash"`, `"delete"`, or `{ "command": { "program", "args" } }`. |
+| `scope` | string | `home`, `user-temp` or `home-trash` (see the plan action's `scope`). Always present here. |
+| `extra_paths` | array of string | Further paths removed together with the item, for example the `.trashinfo` file of a trashed entry. Paths only: the safety fingerprints are internal and not shown. |
+| `app_id` | string or null | The app the item belongs to, when exactly one installed app matches. |
+
+The internal fingerprint of an item is never serialized.
+
+`errors` has one entry per failed scanner (`source` is the category name), then one per failed app source, then config notes. Exit 0, or 3 when a scanner failed (a failed app source alone does not change the exit code). Example (the fixture has a user Flatpak runtime, an old log, an old file in `/tmp` and two AppImage versions):
+
+```json
+{
+  "schema_version": 1,
+  "command": "scan",
+  "data": {
+    "categories": [
+      {
+        "category": "cache",
+        "items": [
+          {
+            "category": "cache",
+            "path": "/home/user/.cache/foo",
+            "label": "foo",
+            "size": 4096,
+            "rebuildable": true,
+            "preselected": true,
+            "note": null,
+            "action": "trash",
+            "scope": "home",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 4096,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      // ...
+      {
+        "category": "trash",
+        "items": [
+          {
+            "category": "trash",
+            "path": "/home/user/.local/share/Trash/files/old.txt",
+            "label": "~/docs/old.txt",
+            "size": 8192,
+            "rebuildable": false,
+            "preselected": true,
+            "note": null,
+            "action": "delete",
+            "scope": "home-trash",
+            "extra_paths": [
+              "/home/user/.local/share/Trash/info/old.txt.trashinfo"
+            ],
+            "app_id": null
+          }
+        ],
+        "total": 8192,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "temp",
+        "items": [
+          {
+            "category": "temp",
+            "path": "/tmp/build-output.bin",
+            "label": "/tmp/build-output.bin",
+            "size": 8192,
+            "rebuildable": false,
+            "preselected": true,
+            "note": "deleted permanently (temporary file)",
+            "action": "delete",
+            "scope": "user-temp",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 8192,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      // ...
+      {
+        "category": "dev-cache",
+        "items": [],
+        "total": 0,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": true
+      },
+      {
+        "category": "flatpak-unused",
+        "items": [
+          {
+            "category": "flatpak-unused",
+            "path": null,
+            "label": "unused Flatpak runtimes (user)",
+            "size": null,
+            "rebuildable": false,
+            "preselected": false,
+            "note": "decided by flatpak",
+            "action": {
+              "command": {
+                "program": "flatpak",
+                "args": [
+                  "uninstall",
+                  "--user",
+                  "--unused",
+                  "--noninteractive",
+                  "-y"
+                ]
+              }
+            },
+            "scope": "home",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 0,
+        "unknown_sizes": 1,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "appimage-old",
+        "items": [
+          {
+            "category": "appimage-old",
+            "path": "/home/user/Applications/Tool-1.0-x86_64.AppImage",
+            "label": "Tool-1.0-x86_64.AppImage",
+            "size": 4096,
+            "rebuildable": false,
+            "preselected": true,
+            "note": null,
+            "action": "trash",
+            "scope": "home",
+            "extra_paths": [],
+            "app_id": "appimage:~/Applications/Tool-1.0-x86_64.AppImage"
+          }
+        ],
+        "total": 4096,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      }
+      // ...
+    ]
+  },
+  "errors": []
+}
+```
+
+When a scanner fails, its category has `error` set and the exit code is 3. Here `flatpak` itself failed, so the Flatpak app source is reported as well:
+
+```json
+{
+  "category": "flatpak-unused",
+  "items": [],
+  "total": 0,
+  "unknown_sizes": 0,
+  "error": "command flatpak failed: boom",
+  "skipped": false
+}
+```
+
+with these envelope `errors`:
+
+```json
+[
+  { "source": "flatpak-unused", "message": "command flatpak failed: boom" },
+  { "source": "flatpak", "message": "boom" }
+]
+```
+
+## `clean`
+
+`crumbs clean [<category>...] [-i] [--dry-run] [--yes] [--permanent] [--force] [--json] [--user]` prints the same `{ plans, report }` shape as `uninstall`, with `command` `clean`; it always has exactly one plan, with `app_id` null, or none at all when there is nothing to do. `--json` needs `--yes` or `--dry-run`, as for `uninstall`. `--system` exits 2 with the same message and error envelope as `scan`, except that `data` is `{ "plans": [], "report": null }`.
+
+Which items are planned:
+
+- With no category, every enabled category is scanned (all but those in `categories_off`). Naming categories scans exactly those, even ones switched off in the config.
+- The items cleaned are the ones with `preselected` true. An item held back (its app is running) is left out and listed nowhere in the JSON. With `-i` you pick from all items instead.
+- `flatpak-unused` only runs when it is named, as its item is never preselected otherwise.
+- `trash` and `temp` items are always permanent deletes (`delete` actions with `scope` `home-trash` and `user-temp`, and the plan's `notes` say so). With `--permanent`, trash items of the other categories become `delete` too.
+- When any action is a `trash`, the plan's `notes` include `space is freed when the trash is emptied (or use --permanent)`.
+
+Refusals:
+
+- If an app source or a category's scanner failed, `clean` refuses with exit 1 and `refusing: some sources failed (...); re-run with --force to continue`, unless `--force` or `--dry-run` is given (a dry run only warns). The failed sources and scanners lead `errors`, followed by the `cli` entry, and `data` is `{ "plans": [], "report": null }`.
+- Nothing chosen (nothing found, or everything held back): exit 0 and `data` is `{ "plans": [], "report": [] }`, or `{ "plans": [], "report": null }` with `--dry-run`.
+- Any other refusal or failure uses the error envelope described at the top, with `report` null.
+
+Exit 0 when every action succeeded, 3 when some failed.
+
+Dry run of `crumbs clean trash temp flatpak-unused`:
+
+```json
+{
+  "schema_version": 1,
+  "command": "clean",
+  "data": {
+    "plans": [
+      {
+        "actions": [
+          {
+            "action": {
+              "path": "/home/user/.local/share/Trash/files/old.txt",
+              "type": "delete"
+            },
+            "reason": "~/docs/old.txt",
+            "scope": "home-trash",
+            "size": 8192
+          },
+          {
+            "action": {
+              "path": "/home/user/.local/share/Trash/info/old.txt.trashinfo",
+              "type": "delete"
+            },
+            "depends_on": 0,
+            "reason": "~/docs/old.txt",
+            "scope": "home-trash",
+            "size": 0
+          },
+          {
+            "action": {
+              "path": "/tmp/build-output.bin",
+              "type": "delete"
+            },
+            "reason": "deleted permanently (temporary file)",
+            "scope": "user-temp",
+            "size": 8192
+          },
+          {
+            "action": {
+              "args": [
+                "uninstall",
+                "--user",
+                "--unused",
+                "--noninteractive",
+                "-y"
+              ],
+              "program": "flatpak",
+              "type": "user-command"
+            },
+            "reason": "decided by flatpak",
+            "size": 0
+          }
+        ],
+        "app_id": null,
+        "notes": [
+          "permanently delete (temporary files)",
+          "permanently delete (emptying the trash)"
+        ],
+        "total_size": 16384
+      }
+    ],
+    "report": null
+  },
+  "errors": []
+}
+```
+
+`crumbs clean cache --yes --json` (the plan is shown in full; `freed` counts the trashed bytes, as in M2):
+
+```json
+{
+  "schema_version": 1,
+  "command": "clean",
+  "data": {
+    "plans": [
+      {
+        "actions": [
+          {
+            "action": {
+              "path": "/home/user/.cache/foo",
+              "type": "trash"
+            },
+            "reason": "foo",
+            "size": 4096
+          }
+        ],
+        "app_id": null,
+        "notes": [
+          "space is freed when the trash is emptied (or use --permanent)"
+        ],
+        "total_size": 4096
+      }
+    ],
+    "report": [
+      {
+        "batch": "1794149571972",
+        "freed": 4096,
+        "results": [
+          {
+            "action": {
+              "path": "/home/user/.cache/foo",
+              "type": "trash"
+            },
+            "error": null,
+            "history_id": "1794149571972-0",
+            "ok": true
+          }
+        ]
+      }
+    ]
+  },
+  "errors": []
+}
+```
+
+Nothing to clean, with `--yes`:
+
+```json
+{
+  "schema_version": 1,
+  "command": "clean",
+  "data": {
+    "plans": [],
+    "report": []
+  },
+  "errors": []
+}
+```
+
+Refused because a scanner failed (exit 1):
+
+```json
+{
+  "schema_version": 1,
+  "command": "clean",
+  "data": {
+    "plans": [],
+    "report": null
+  },
+  "errors": [
+    {
+      "source": "flatpak",
+      "message": "boom"
+    },
+    {
+      "source": "flatpak-unused",
+      "message": "command flatpak failed: boom"
+    },
+    {
+      "source": "cli",
+      "message": "refusing: some sources failed (flatpak, flatpak-unused); re-run with --force to continue"
+    }
+  ]
+}
+```
+
+The history entry that running the Flatpak command leaves (see `history`):
+
+```json
+{
+  "action": "command",
+  "app_id": null,
+  "argv": [
+    "uninstall",
+    "--user",
+    "--unused",
+    "--noninteractive",
+    "-y"
+  ],
+  "backup": null,
+  "batch": "1794149571982",
+  "error": null,
+  "id": "1794149571982-0",
+  "ok": true,
+  "path": "/usr/bin/flatpak",
+  "restores": null,
+  "size": 0,
+  "time": "2026-11-08T14:52:51.98359927Z",
+  "trashed": null
 }
 ```

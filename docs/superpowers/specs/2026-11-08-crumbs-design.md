@@ -413,12 +413,12 @@ Each milestone gets its own implementation plan and ends in a working, tested CL
 
 1. **Foundation** — workspace, `Env`, model, `CommandRunner`, desktop parser,
    pacman + Flatpak + AppImage + unmanaged sources, `apps list`, `apps show`
-   (without leftovers), `doctor`.
+   (without leftovers), `doctor`. — done
 2. **Leftovers & uninstall (user level)** — rules loader + curated rules,
    matcher, safety module, trash + history, `apps show` leftovers,
    `uninstall --leftovers-only`, AppImage uninstall, `orphans`, `history`,
-   `restore`.
-3. **Bloat (user level)** — size module, user scanners, `scan`, `clean --user`.
+   `restore`. — done
+3. **Bloat (user level)** — size module, user scanners, `scan`, `clean --user`. — done
 4. **Privilege & system** — privilege module, simulations, package-manager
    uninstall, system scanners, `clean --system`.
 5. **Cross-distro** — dpkg, rpm, Snap sources; distro CI matrix.
