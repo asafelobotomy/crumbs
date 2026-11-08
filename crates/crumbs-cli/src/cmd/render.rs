@@ -17,6 +17,20 @@ fn verb(a: &Action) -> &'static str {
     }
 }
 
+/// Control characters other than tab would act on the terminal; show them
+/// as U+FFFD instead. Used for text that comes from files.
+fn sanitise(line: &str) -> String {
+    line.chars()
+        .map(|c| {
+            if c != '\t' && c.is_control() {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// Prints each plan under its heading, then the totals line.
 pub fn preview(env: &Env, plans: &[(String, &Plan)], permanent: bool) -> anyhow::Result<()> {
     for (i, (heading, plan)) in plans.iter().enumerate() {
@@ -47,7 +61,9 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)], permanent: bool) -> anyhow:
                 .actions
                 .iter()
                 .map(|a| match &a.action {
-                    Action::EditFile { remove_lines, .. } => remove_lines.clone(),
+                    Action::EditFile { remove_lines, .. } => {
+                        remove_lines.iter().map(|l| sanitise(l)).collect()
+                    }
                     _ => Vec::new(),
                 })
                 .collect();

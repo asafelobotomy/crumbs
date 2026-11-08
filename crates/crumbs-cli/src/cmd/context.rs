@@ -3,7 +3,6 @@
 
 use std::io::Write;
 
-use anyhow::anyhow;
 use crumbs_core::command::SystemRunner;
 use crumbs_core::config::{Config, load_config};
 use crumbs_core::inventory::{Inventory, discover};
@@ -14,12 +13,27 @@ use crumbs_core::{CoreError, Env};
 
 use crate::output::ErrorEntry;
 
-/// Loads `config.toml`. A parse error is fatal; dropped entries come back as
-/// `config` notes.
+/// `config.toml` could not be read or parsed. `main` reports it under
+/// `--json` as an envelope error with source `config`.
+#[derive(Debug)]
+pub struct ConfigError(pub String);
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+/// Loads `config.toml`. A parse error is fatal ([`ConfigError`]); dropped
+/// entries come back as `config` notes.
 pub fn load_cfg(env: &Env) -> anyhow::Result<(Config, Vec<ErrorEntry>)> {
-    let cfg = load_config(env).map_err(|e| match e {
-        CoreError::Parse { what, message } => anyhow!("{what}: {message}"),
-        other => anyhow!(other),
+    let cfg = load_config(env).map_err(|e| {
+        ConfigError(match e {
+            CoreError::Parse { what, message } => format!("{what}: {message}"),
+            other => other.to_string(),
+        })
     })?;
     let notes = cfg
         .warnings

@@ -34,7 +34,8 @@ pub const ALREADY_RESTORED: &str = "already restored";
 
 /// Restores the entries the selectors name. A selector is an entry id, a
 /// batch id (its successful entries that changed something) or an absolute
-/// in-system path (the newest successful `Trash` entry for it). Unless
+/// in-system path (the newest successful `Trash` entry for it that has not
+/// been restored yet). Unless
 /// `dry_run`, every attempt on a matched entry is logged as a `Restore`
 /// entry whose `restores` is the restored entry's id.
 pub fn restore(
@@ -67,7 +68,7 @@ fn restore_with(
     let mut outcomes = Vec::new();
     let mut logged = 0usize;
     for sel in selectors {
-        let matched = select(&entries, sel);
+        let matched = select(&entries, sel, &restored);
         if matched.is_empty() {
             outcomes.push(RestoreOutcome {
                 entry_id: String::new(),
@@ -129,9 +130,13 @@ fn restore_with(
     Ok(outcomes)
 }
 
-/// Entries a selector names, oldest first. `Restore` entries are never
-/// selected.
-fn select<'a>(entries: &'a [HistoryEntry], sel: &str) -> Vec<&'a HistoryEntry> {
+/// Entries a selector names, oldest first. A path names its newest entry
+/// not yet restored. `Restore` entries are never selected.
+fn select<'a>(
+    entries: &'a [HistoryEntry],
+    sel: &str,
+    restored: &HashSet<&str>,
+) -> Vec<&'a HistoryEntry> {
     let actions = || {
         entries
             .iter()
@@ -149,9 +154,13 @@ fn select<'a>(entries: &'a [HistoryEntry], sel: &str) -> Vec<&'a HistoryEntry> {
     }
     if sel.starts_with('/') {
         let path = Path::new(sel);
-        if let Some(e) =
-            actions().rfind(|e| e.action == HistoryAction::Trash && e.ok && e.path == path)
-        {
+        // The newest entry that is still in the trash.
+        if let Some(e) = actions().rfind(|e| {
+            e.action == HistoryAction::Trash
+                && e.ok
+                && e.path == path
+                && !restored.contains(e.id.as_str())
+        }) {
             return vec![e];
         }
     }

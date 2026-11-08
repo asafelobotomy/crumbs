@@ -84,8 +84,24 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     }
 }
 
+/// The envelope `command` of an invocation that asked for `--json`.
+fn json_command(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::Apps(cmd::apps::AppsCmd::List { json: true, .. }) => Some("apps list"),
+        Command::Apps(cmd::apps::AppsCmd::Show { json: true, .. }) => Some("apps show"),
+        Command::Uninstall(a) if a.act.json => Some("uninstall"),
+        Command::Orphans(a) if a.act.json => Some("orphans"),
+        Command::History { json: true, .. } => Some("history"),
+        Command::Restore { json: true, .. } => Some("restore"),
+        Command::Doctor { json: true } => Some("doctor"),
+        _ => None,
+    }
+}
+
 fn main() -> ExitCode {
-    match run(Cli::parse()) {
+    let cli = Cli::parse();
+    let json_command = json_command(&cli.command);
+    match run(cli) {
         Ok(code) => code,
         Err(e) => {
             let broken_pipe = e.chain().any(|c| {
@@ -96,6 +112,18 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             eprintln!("error: {e:#}");
+            if let Some(command) = json_command {
+                let source = if e.is::<cmd::context::ConfigError>() {
+                    "config"
+                } else {
+                    "cli"
+                };
+                let entry = output::ErrorEntry::new(source, format!("{e:#}"));
+                if output::print_json_entries(command, &serde_json::Value::Null, &[entry]).is_err()
+                {
+                    return ExitCode::from(1);
+                }
+            }
             ExitCode::from(1)
         }
     }

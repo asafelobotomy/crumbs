@@ -238,7 +238,12 @@ pub(crate) fn enumerate(env: &Env, cfg: &Config) -> Vec<Candidate> {
             if skip.contains(&&path) || holds_container(&containers, &path) {
                 continue;
             }
-            raw.push((path, FindingKind::DotDir, Subject::Name(NameKey::new(bare))));
+            let kind = if is_real_dir(env, &path) {
+                FindingKind::DotDir
+            } else {
+                FindingKind::DotFile
+            };
+            raw.push((path, kind, Subject::Name(NameKey::new(bare))));
         }
         for (path, id) in children(env, &home.join(".var/app")) {
             raw.push((path, FindingKind::FlatpakData, Subject::Flatpak(id)));

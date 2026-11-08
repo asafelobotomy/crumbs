@@ -153,6 +153,7 @@ pub(crate) fn find_orphans_at(
                 | FindingKind::Data
                 | FindingKind::State
                 | FindingKind::DotDir
+                | FindingKind::DotFile
                 | FindingKind::FlatpakData
                 | FindingKind::SnapData
                 | FindingKind::Autostart

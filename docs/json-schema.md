@@ -55,7 +55,7 @@ When `uninstall` or `orphans --clean` is run with `--json` and refuses or fails 
 }
 ```
 
-The exit code tells you which kind of failure it was (see below). `apps show` reports "no match" and "ambiguous" through its own `data` shape instead (below). Unexpected internal failures (for example an unreadable state directory) exit 1 with a message on stderr only, and no JSON.
+The exit code tells you which kind of failure it was (see below). `apps show` reports "no match" and "ambiguous" through its own `data` shape instead (below). A failure that stops a command before it can produce its result (an unparseable `config.toml`, an unreadable state directory) exits 1 with the message on stderr, and under `--json` also an envelope on stdout with `data: null` and one `errors` entry: `{ "source": "config", "message": ... }` for the config file, `{ "source": "cli", ... }` otherwise.
 
 ## Exit codes
 
@@ -63,7 +63,7 @@ The exit code tells you which kind of failure it was (see below). `apps show` re
 |---|---|
 | 0 | Success (including a dry run and "nothing to do"). |
 | 1 | Error, or `uninstall`/`orphans --clean` refused because a source failed (override with `--force`) or an app is running, or `uninstall` refused an AppImage whose file fails the safety checks. |
-| 2 | Usage error: bad flags, ambiguous or not-found app, `--json` without `--yes` or `--dry-run`, a destructive command run non-interactively without `--yes`, or removing a non-AppImage app without `--leftovers-only`. |
+| 2 | Usage error: bad flags, ambiguous or not-found app, `--json` without `--yes` or `--dry-run`, a destructive command run non-interactively without `--yes`, removing a non-AppImage app without `--leftovers-only`, or `restore` with no selector matching any history entry. |
 | 3 | Partial failure: some source failed while another worked, or some actions/restores failed. |
 | 4 | Aborted by the user at a prompt. |
 | 5 | Privilege escalation unavailable (reserved; not returned by M2 commands). |
@@ -107,7 +107,7 @@ Commands that take an app accept an ID, a name, a desktop ID or a display name. 
 | Field | Type | Meaning |
 |---|---|---|
 | `path` | string | In-system path. |
-| `kind` | string | `config`, `cache`, `data`, `state`, `dot-dir`, `flatpak-data`, `snap-data`, `autostart`, `desktop-entry`, `icon`, `systemd-unit` or `mime-assoc`. |
+| `kind` | string | `config`, `cache`, `data`, `state`, `dot-dir` (a directory directly in home), `dot-file` (a file or symlink there), `flatpak-data`, `snap-data`, `autostart`, `desktop-entry`, `icon`, `systemd-unit` or `mime-assoc`. |
 | `confidence` | string | `high`, `medium` or `low`. |
 | `shared` | boolean | Another installed app may also use it. |
 | `reason` | string | Why crumbs thinks it belongs to the app. |
@@ -128,7 +128,7 @@ Each action is `{ "action", "size", "reason" }`. `action` is tagged by `type`: `
 
 ## `apps list`
 
-`data`: `apps` (array of App), `statuses` (array of `{ source, available, app_count, skipped_reason }`; `skipped_reason` is string or null). `errors` carries source failures and config notes. Exit 3 on partial failure.
+`data`: `apps` (array of App), `statuses` (array of `{ source, available, app_count, skipped_reason }`; `skipped_reason` is string or null). `errors` carries source failures and config notes; with `--source`, only failures of the listed sources. Exit 3 on partial failure.
 
 ```json
 {
@@ -248,7 +248,7 @@ Each action is `{ "action", "size", "reason" }`. `action` is tagged by `type`: `
 
 ## `doctor`
 
-`data`: `crumbs_version` (string), `distro` (`{ id, id_like, name }`), `sources` (array of `{ source, available, app_count, skipped_reason }`), `escalation` (null, or `{ kind, program, requires_tty }` with `kind` one of `run0`, `pkexec`, `sudo`), `trash` (`{ path, exists, writable }`), `data_dirs` (array of string) and `errors` (array of `{ source, message }`, the same list as the envelope's `errors`). Exit 3 on partial failure.
+`data`: `crumbs_version` (string), `distro` (`{ id, id_like, name }`), `sources` (array of `{ source, available, app_count, skipped_reason }`), `escalation` (null, or `{ kind, program, requires_tty }` with `kind` one of `run0`, `pkexec`, `sudo`), `trash` (`{ path, exists, writable }`), `data_dirs` (array of string) and `errors` (array of `{ source, message }`, source failures; the envelope's `errors` also carries config notes). Apps found in the `appimage_dirs` of `config.toml` are counted. Exit 3 on partial failure.
 
 ```json
 {
@@ -523,7 +523,7 @@ Selectors are batch IDs, entry IDs or absolute original paths. `data`: `outcomes
 | `ok` | boolean | |
 | `error` | string or null | For example `already restored`, `no matching history entry`. |
 
-`--dry-run` checks and reports without changing anything. Exit 0 when every outcome is `ok`, otherwise 3.
+A path selector names the newest successful trash entry for that path that has not been restored yet. `--dry-run` checks and reports without changing anything. Exit 0 when every outcome is `ok`; 2 when no selector matched any history entry (every outcome has an empty `entry_id`); otherwise 3.
 
 ```json
 {

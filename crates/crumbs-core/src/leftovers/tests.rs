@@ -137,6 +137,33 @@ fn dot_dir_exact() {
 }
 
 #[test]
+fn dot_file_and_symlink_are_dot_file() {
+    let t = FixtureTree::new();
+    t.write("/home/user/.hauler", b"x");
+    t.mkdir("/home/user/elsewhere");
+    std::os::unix::fs::symlink(
+        t.env().sys("/home/user/elsewhere"),
+        t.env().sys("/home/user/.grokbot"),
+    )
+    .unwrap();
+    let r = Run::new(
+        &t,
+        vec![
+            appimage("hauler-x86_64.AppImage"),
+            appimage("Grok_Bot-1.0-x86_64.AppImage"),
+        ],
+    );
+    assert_eq!(
+        must(&r.find(0, false), ".hauler").kind,
+        FindingKind::DotFile
+    );
+    assert_eq!(
+        must(&r.find(1, false), ".grokbot").kind,
+        FindingKind::DotFile
+    );
+}
+
+#[test]
 fn rule_paths_high() {
     let t = FixtureTree::new();
     t.mkdir("/home/user/.mozilla/firefox/abc.default");

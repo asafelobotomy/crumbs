@@ -6,23 +6,29 @@ use crumbs_core::doctor::{DoctorReport, doctor};
 use crumbs_core::privilege::EscalationKind;
 use crumbs_core::{Env, SourceError, SourceKind};
 
-use crate::output::print_json;
+use super::context::{load_cfg, print_notes};
+use crate::output::{ErrorEntry, print_json_entries};
 
 pub fn run(env: &Env, json: bool) -> anyhow::Result<ExitCode> {
-    let report = doctor(env, &SystemRunner);
+    let (cfg, notes) = load_cfg(env)?;
+    let report = doctor(env, &SystemRunner, &cfg);
     let code = if crate::output::partial_failure_parts(&report.sources, &report.errors) {
         3
     } else {
         0
     };
     if json {
-        print_json("doctor", &report, &report.errors)?;
+        let mut errors: Vec<ErrorEntry> = report.errors.iter().map(ErrorEntry::from).collect();
+        errors.extend(notes);
+        print_json_entries("doctor", &report, &errors)?;
     } else {
         print_human(&report)?;
         let mut err = anstream::stderr().lock();
         for e in &report.errors {
             writeln!(err, "warning: {}: {}", e.source.as_str(), e.message)?;
         }
+        drop(err);
+        print_notes(&notes)?;
     }
     Ok(ExitCode::from(code))
 }

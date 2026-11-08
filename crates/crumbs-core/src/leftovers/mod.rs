@@ -44,7 +44,10 @@ pub enum FindingKind {
     Cache,
     Data,
     State,
+    /// A directory directly in home whose name starts with `.`.
     DotDir,
+    /// A file (or symlink) directly in home whose name starts with `.`.
+    DotFile,
     FlatpakData,
     SnapData,
     Autostart,

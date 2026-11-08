@@ -86,7 +86,9 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
     let mut targets = Vec::new();
     for app in apps {
         let mut found = plannable(find_leftovers(&cx.idx, app, args.show_low));
-        if args.leftovers_only {
+        // The launchers and icons stay with an app that stays, and with
+        // `--keep-data` they are not caches.
+        if args.leftovers_only || args.keep_data {
             found.retain(|f| !is_own_launcher(env, app, f));
         }
         let prompt_text = format!("Leftovers of {} to remove", app.display_name);

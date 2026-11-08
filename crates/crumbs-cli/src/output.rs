@@ -87,16 +87,6 @@ pub fn finding_kind(k: FindingKind) -> String {
 }
 
 /// Writes the JSON envelope for one invocation to stdout.
-pub fn print_json<T: Serialize>(
-    command: &str,
-    data: &T,
-    errors: &[SourceError],
-) -> anyhow::Result<()> {
-    let entries: Vec<ErrorEntry> = errors.iter().map(ErrorEntry::from).collect();
-    print_json_entries(command, data, &entries)
-}
-
-/// Like [`print_json`], with CLI-built entries (config and rules notes).
 pub fn print_json_entries<T: Serialize>(
     command: &str,
     data: &T,

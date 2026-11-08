@@ -1002,3 +1002,256 @@ fn uninstall_leftovers_only_keeps_mime_associations() {
         .collect();
     assert!(!names.iter().any(|n| n.contains("crumbs-bak")), "{names:?}");
 }
+
+// ---- M3 task 4: CLI consistency ----
+
+fn bad_config(t: &FixtureTree) {
+    t.write("/home/user/.config/crumbs/config.toml", b"protect = [\n");
+}
+
+#[test]
+fn json_config_error_has_envelope() {
+    let t = fixture(FLATPAK_OK);
+    bad_config(&t);
+    let cases: [(&str, &[&str]); 5] = [
+        ("apps list", &["apps", "list", "--json"]),
+        ("apps show", &["apps", "show", "firefox", "--json"]),
+        ("orphans", &["orphans", "--json"]),
+        ("restore", &["restore", "x", "--json"]),
+        ("doctor", &["doctor", "--json"]),
+    ];
+    for (command, args) in cases {
+        let out = crumbs(&t).args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(!out.stderr.is_empty(), "{args:?}: human text on stderr");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{args:?}: {e}: {:?}", out.stdout));
+        assert_eq!(v["schema_version"], 1, "{args:?}");
+        assert_eq!(v["command"], command, "{args:?}");
+        assert!(v["data"].is_null(), "{args:?}");
+        let errors = v["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 1, "{args:?}: {v}");
+        assert_eq!(errors[0]["source"], "config", "{args:?}");
+        assert!(
+            errors[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("config.toml")
+        );
+    }
+    let v = stdout_json(crumbs(&t).args(["uninstall", "Tool", "--json", "--dry-run"]));
+    assert_eq!(v["command"], "uninstall");
+    assert!(v["data"].is_null());
+    assert_eq!(v["errors"][0]["source"], "config");
+    // Without --json nothing goes to stdout.
+    let out = crumbs(&t).args(["doctor"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn doctor_counts_configured_appimage_dirs() {
+    let t = fixture(FLATPAK_OK);
+    let count = |t: &FixtureTree| -> u64 {
+        let v = stdout_json(crumbs(t).args(["doctor", "--json"]));
+        let s = v["data"]["sources"].as_array().unwrap();
+        s.iter().find(|s| s["source"] == "appimage").unwrap()["app_count"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(count(&t), 1);
+    t.write(
+        "/home/user/.config/crumbs/config.toml",
+        b"appimage_dirs = [\"~/Tools\"]\n",
+    );
+    t.appimage("/home/user/Tools/Extra-2.0-x86_64.AppImage");
+    assert_eq!(count(&t), 2);
+}
+
+#[test]
+fn source_filter_scopes_errors() {
+    let t = fixture(FLATPAK_FAIL);
+    let out = crumbs(&t)
+        .args(["apps", "list", "--source", "pacman"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(!stderr.contains("flatpak"), "{stderr}");
+    let v = stdout_json(crumbs(&t).args(["apps", "list", "--source", "pacman", "--json"]));
+    assert!(v["errors"].as_array().unwrap().is_empty(), "{v}");
+    // A failed source that was asked for still reports.
+    crumbs(&t)
+        .args(["apps", "list", "--source", "flatpak"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("warning: flatpak:"));
+}
+
+fn batch_ids(t: &FixtureTree) -> Vec<String> {
+    history_json(t)["data"]["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["batch"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn restore_path_skips_restored_entry() {
+    let t = fixture(FLATPAK_OK);
+    let remove = |t: &FixtureTree| {
+        crumbs(t)
+            .args(["uninstall", "Tool", "--leftovers-only", "--yes"])
+            .assert()
+            .code(0);
+    };
+    t.write("/home/user/.config/Tool/settings.json", b"one");
+    remove(&t);
+    t.write("/home/user/.config/Tool/settings.json", b"two");
+    remove(&t);
+    assert_eq!(batch_ids(&t).len(), 2);
+    let path = "/home/user/.config/Tool";
+    let v = stdout_json(crumbs(&t).args(["restore", path, "--json"]));
+    let first = &v["data"]["outcomes"][0];
+    assert_eq!(first["ok"], true, "{v}");
+    assert_eq!(
+        std::fs::read(real(&t, "/home/user/.config/Tool/settings.json")).unwrap(),
+        b"two"
+    );
+    // The newest entry is restored; the next restore goes for the older one
+    // (which is blocked by the restored directory) instead of repeating it.
+    let out = crumbs(&t)
+        .args(["restore", path, "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let v2: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let second = &v2["data"]["outcomes"][0];
+    assert_ne!(second["entry_id"], first["entry_id"], "{v2}");
+    assert_ne!(second["error"], "already restored", "{v2}");
+    // Nothing left to pick once both were handled: nothing matches.
+    std::fs::remove_dir_all(real(&t, "/home/user/.config/Tool")).unwrap();
+    crumbs(&t).args(["restore", path]).assert().code(0);
+    crumbs(&t).args(["restore", path]).assert().code(2);
+}
+
+#[test]
+fn restore_unknown_selector_exit_2() {
+    let t = fixture(FLATPAK_OK);
+    with_leftovers(&t);
+    crumbs(&t)
+        .args(["restore", "/home/user/.config/nope"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("no matching history entry"));
+    crumbs(&t)
+        .args(["restore", "nope", "also-nope", "--dry-run"])
+        .assert()
+        .code(2);
+    let v = json_error_free(&t, &["restore", "nope", "--json"], 2);
+    assert_eq!(v["data"]["outcomes"][0]["entry_id"], "");
+    // One selector that matches and one that does not is still a partial
+    // failure.
+    crumbs(&t)
+        .args(["uninstall", "Tool", "--yes"])
+        .assert()
+        .code(0);
+    let batch = batch_ids(&t)[0].clone();
+    crumbs(&t)
+        .args(["restore", &batch, "nope", "--dry-run"])
+        .assert()
+        .code(3);
+}
+
+fn json_error_free(t: &FixtureTree, args: &[&str], code: i32) -> serde_json::Value {
+    let out = crumbs(t).args(args).output().unwrap();
+    assert_eq!(out.status.code(), Some(code));
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn dotfile_kind() {
+    let t = fixture(FLATPAK_OK);
+    t.write("/home/user/.zzquuxrc", b"x");
+    t.write("/home/user/.zzquuxdir/a", b"x");
+    let v = stdout_json(crumbs(&t).args(["orphans", "--show-low", "--json"]));
+    let kind_of = |name: &str| -> String {
+        let want = format!("/home/user/{name}");
+        v["data"]["orphans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["path"] == want.as_str())
+            .unwrap_or_else(|| panic!("{want} not in {v}"))["kind"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(kind_of(".zzquuxrc"), "dot-file");
+    assert_eq!(kind_of(".zzquuxdir"), "dot-dir");
+    crumbs(&t)
+        .args(["orphans", "--show-low"])
+        .assert()
+        .stdout(predicate::str::contains("dot-file"));
+}
+
+#[test]
+fn keep_data_keeps_launchers() {
+    let t = fixture(FLATPAK_OK);
+    gutcheck_launcher(&t);
+    t.write("/home/user/.cache/GutCheck/blob", b"x");
+    let out = crumbs(&t)
+        .args(["uninstall", "GutCheck", "--keep-data", "--yes"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(!real(&t, "/home/user/.cache/GutCheck").exists());
+    assert!(
+        real(
+            &t,
+            "/home/user/.local/share/applications/appofholding-gutcheck.desktop"
+        )
+        .exists()
+    );
+    assert!(
+        real(
+            &t,
+            "/home/user/.local/share/icons/hicolor/512x512/apps/appofholding-gutcheck.png"
+        )
+        .exists()
+    );
+    assert!(!stdout.contains("appofholding-gutcheck"), "{stdout}");
+}
+
+#[test]
+fn preview_sanitises_control_bytes() {
+    let t = fixture(FLATPAK_OK);
+    gutcheck(&t);
+    t.write(
+        "/home/user/.config/mimeapps.list",
+        b"[Default Applications]\ntext/x-\x07gut\x08=gutcheck.desktop\n",
+    );
+    t.desktop(
+        "/home/user/.local/share/applications/gutcheck.desktop",
+        "[Desktop Entry]\nType=Application\nName=GutCheck\nExec=/home/user/Applications/GutCheck-0.19.0-x86_64.AppImage\n",
+    );
+    let out = crumbs(&t)
+        .args(["uninstall", "GutCheck", "--dry-run"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.contains("    - text/x-\u{FFFD}gut\u{FFFD}=gutcheck.desktop\n"),
+        "{text}"
+    );
+    assert!(
+        !text.contains('\u{7}') && !text.contains('\u{8}'),
+        "{text:?}"
+    );
+    // JSON keeps the raw bytes.
+    let v = stdout_json(crumbs(&t).args(["uninstall", "GutCheck", "--dry-run", "--json"]));
+    assert!(v.to_string().contains("\\u0007"), "{v}");
+}

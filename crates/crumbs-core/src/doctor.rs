@@ -41,8 +41,8 @@ fn trash_status(env: &Env) -> TrashStatus {
     }
 }
 
-pub fn doctor(env: &Env, runner: &dyn CommandRunner) -> DoctorReport {
-    let inv = discover(env, runner, &ListOptions::default(), &Config::default());
+pub fn doctor(env: &Env, runner: &dyn CommandRunner, cfg: &Config) -> DoctorReport {
+    let inv = discover(env, runner, &ListOptions::default(), cfg);
     DoctorReport {
         crumbs_version: env!("CARGO_PKG_VERSION").to_string(),
         distro: env.distro.clone(),
@@ -67,7 +67,7 @@ mod tests {
         t.mkdir("/var/lib/pacman/local");
         t.mkdir("/home/user/.local/share/Trash");
         t.write_exec("/usr/bin/sudo", b"");
-        let r = doctor(&t.env(), &FakeRunner::new());
+        let r = doctor(&t.env(), &FakeRunner::new(), &Config::default());
         assert_eq!(r.crumbs_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(r.distro.id, "manjaro");
         let kinds: Vec<_> = r.sources.iter().map(|s| s.source).collect();
@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn missing_trash_is_not_writable() {
         let t = FixtureTree::new();
-        let r = doctor(&t.env(), &FakeRunner::new());
+        let r = doctor(&t.env(), &FakeRunner::new(), &Config::default());
         assert!(!r.trash.exists);
         assert!(!r.trash.writable);
         assert!(r.escalation.is_none());

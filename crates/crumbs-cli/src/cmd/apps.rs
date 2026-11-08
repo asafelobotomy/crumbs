@@ -80,6 +80,8 @@ fn list(
     let mut inv = discover(env, &SystemRunner, &ListOptions { include_all: all }, &cfg);
     if !sources.is_empty() {
         inv.apps.retain(|a| sources.contains(&a.source));
+        // A source that was not asked for is none of the caller's business.
+        inv.errors.retain(|e| sources.contains(&e.source));
     }
     if matches!(sort, Sort::Size) {
         // Stable: ties keep name order; unknown sizes sort last.
