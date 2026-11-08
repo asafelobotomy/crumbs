@@ -1,5 +1,7 @@
 //! Detection of the privilege-escalation program to use for root operations.
 
+pub mod batch;
+
 use std::path::PathBuf;
 
 use serde::Serialize;

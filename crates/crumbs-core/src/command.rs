@@ -30,7 +30,7 @@ pub trait CommandRunner: Send + Sync {
 }
 
 /// Variables a child may inherit; everything else is dropped.
-const ENV_ALLOWLIST: [&str; 9] = [
+pub(crate) const ENV_ALLOWLIST: [&str; 9] = [
     "HOME",
     "USER",
     "LOGNAME",
@@ -41,7 +41,7 @@ const ENV_ALLOWLIST: [&str; 9] = [
     "XDG_STATE_HOME",
     "DBUS_SESSION_BUS_ADDRESS",
 ];
-const CHILD_PATH: &str = "/usr/bin:/usr/sbin:/bin:/sbin";
+pub(crate) const CHILD_PATH: &str = "/usr/bin:/usr/sbin:/bin:/sbin";
 const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a `UserCommand` may run.
 pub const USER_COMMAND_TIMEOUT: Duration = Duration::from_secs(30 * 60);
