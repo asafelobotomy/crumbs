@@ -106,6 +106,11 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)], permanent: bool) -> anyhow:
     Ok(())
 }
 
+/// Whether a successful action leaves something `crumbs restore` can undo.
+fn can_undo(a: &Action) -> bool {
+    matches!(a, Action::Trash { .. } | Action::EditFile { .. })
+}
+
 /// Prints one `✓`/`✗` line per action and the closing `freed …` line.
 /// Returns whether every action succeeded.
 pub fn report(env: &Env, reports: &[ExecReport]) -> anyhow::Result<bool> {
@@ -124,7 +129,7 @@ pub fn report(env: &Env, reports: &[ExecReport]) -> anyhow::Result<bool> {
                     Action::UserCommand { .. } => "ran",
                 };
                 writeln!(out, "✓ {done} {path}")?;
-                restorable |= !matches!(res.action, Action::Delete { .. });
+                restorable |= can_undo(&res.action);
             } else {
                 all_ok = false;
                 let err = res.error.as_deref().unwrap_or("failed");
@@ -147,4 +152,24 @@ pub fn report(env: &Env, reports: &[ExecReport]) -> anyhow::Result<bool> {
         )?;
     }
     Ok(all_ok)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_trash_and_edit_can_be_undone() {
+        let p = std::path::PathBuf::from("/x");
+        assert!(can_undo(&Action::Trash { path: p.clone() }));
+        assert!(can_undo(&Action::EditFile {
+            path: p.clone(),
+            remove_lines: Vec::new()
+        }));
+        assert!(!can_undo(&Action::Delete { path: p }));
+        assert!(!can_undo(&Action::UserCommand {
+            program: "flatpak".into(),
+            args: Vec::new()
+        }));
+    }
 }

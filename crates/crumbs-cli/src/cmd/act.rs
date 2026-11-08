@@ -198,10 +198,13 @@ pub fn drop_overlaps(targets: &mut [Target]) {
         let mut new_index: Vec<Option<usize>> = Vec::with_capacity(t.plan.actions.len());
         for mut pa in t.plan.actions.drain(..) {
             let path = pa.action.path().to_path_buf();
-            let covered = earlier
-                .iter()
-                .flat_map(|e| &e.plan.actions)
-                .any(|e| path.starts_with(e.action.path()));
+            // A command has no filesystem path to overlap with.
+            let is_cmd = |a: &Action| matches!(a, Action::UserCommand { .. });
+            let covered = !is_cmd(&pa.action)
+                && earlier
+                    .iter()
+                    .flat_map(|e| &e.plan.actions)
+                    .any(|e| !is_cmd(&e.action) && path.starts_with(e.action.path()));
             if !covered {
                 // A dropped dependency was covered by an earlier plan, which
                 // runs first in the batch, so there is nothing to wait for.
@@ -388,6 +391,26 @@ mod tests {
             .iter()
             .map(|a| a.action.path().to_path_buf())
             .collect()
+    }
+
+    #[test]
+    fn drop_overlaps_ignores_commands() {
+        let cmd = || {
+            action(
+                Action::UserCommand {
+                    program: "flatpak".into(),
+                    args: Vec::new(),
+                },
+                0,
+            )
+        };
+        let mut ts = [
+            target(vec![cmd(), trash("/home/user/flatpak", 1)]),
+            target(vec![cmd()]),
+        ];
+        drop_overlaps(&mut ts);
+        assert_eq!(ts[0].plan.actions.len(), 2);
+        assert_eq!(ts[1].plan.actions.len(), 1, "a command is never an overlap");
     }
 
     #[test]

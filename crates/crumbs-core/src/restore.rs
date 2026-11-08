@@ -149,6 +149,8 @@ fn select<'a>(
     let batch: Vec<&HistoryEntry> = actions()
         .filter(|e| e.batch == sel && e.ok)
         .filter(|e| !(e.action == HistoryAction::EditFile && e.backup.is_none()))
+        // A command changed nothing that can be put back.
+        .filter(|e| e.action != HistoryAction::Command)
         .collect();
     if !batch.is_empty() {
         return batch;
@@ -782,11 +784,15 @@ mod tests {
         };
         let rep = crate::executor::execute_with(&env, &Config::default(), &plan, &runner);
         assert!(rep.results[0].ok);
-        for sel_ in [rep.batch.clone(), rep.results[0].history_id.clone()] {
-            let out = restore(&env, &Config::default(), &sel(&sel_), false).unwrap();
-            assert_eq!(out.len(), 1, "{sel_}");
-            assert!(!out[0].ok);
-            assert_eq!(out[0].error.as_deref(), Some("commands cannot be undone"));
-        }
+        // By entry id: reported as not undoable.
+        let id = rep.results[0].history_id.clone();
+        let out = restore(&env, &Config::default(), &sel(&id), false).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].ok);
+        assert_eq!(out[0].error.as_deref(), Some("commands cannot be undone"));
+        // By batch: commands are skipped like other no-op entries.
+        let out = restore(&env, &Config::default(), &sel(&rep.batch), false).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].error.as_deref(), Some(NO_MATCH));
     }
 }

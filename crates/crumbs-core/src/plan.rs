@@ -633,12 +633,17 @@ mod tests {
         assert!(plan.notes.is_empty());
 
         // Temp and trash items are never trashed, permanent or not.
-        let bad = [bitem(&env, "/tmp/old", ItemAction::Trash, Scope::UserTemp)];
-        for o in [PlanOptions::default(), opts] {
-            assert!(matches!(
-                build_clean_plan(&env, &bad, &o),
-                Err(CoreError::Parse { .. })
-            ));
+        for scope in [Scope::UserTemp, Scope::HomeTrash] {
+            let bad = [bitem(&env, "/tmp/old", ItemAction::Trash, scope)];
+            for o in [PlanOptions::default(), opts] {
+                assert!(
+                    matches!(
+                        build_clean_plan(&env, &bad, &o),
+                        Err(CoreError::Parse { .. })
+                    ),
+                    "{scope:?}"
+                );
+            }
         }
     }
 }
