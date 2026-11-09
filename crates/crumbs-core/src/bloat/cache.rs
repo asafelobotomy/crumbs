@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::dev::dev_cache_paths;
 use super::{BloatItem, Category, ItemAction, ScanContext, Scanner};
@@ -115,10 +115,105 @@ impl Scanner for CacheScanner {
                 item.preselected = false;
                 item.note = Some(format!("{} is running", app.display_name));
             }
+            let real = cx.env.cache_home.join(&name);
+            if let Some(inner) = git_checkout(&real) {
+                // Someone's work, not a cache: never rebuilt by any tool.
+                item.preselected = false;
+                item.rebuildable = false;
+                item.note = Some(format!("contains a git checkout ({})", inner.display()));
+            } else if let Some((pid, comm)) = working_in(cx, &cache.join(&name)) {
+                item.preselected = false;
+                item.note = Some(format!("in use by {comm} (pid {pid})"));
+            }
             out.push(item);
         }
         Ok(out)
     }
+}
+
+/// Levels below a cache item searched for a git working tree: the item
+/// itself and two more (`~/.cache/<work>/<repo>/.git`).
+const GIT_DEPTH: usize = 2;
+/// At most this many directories are looked at per item, so a huge cache
+/// (thousands of hashed directories) stays cheap.
+const GIT_DIR_LIMIT: usize = 20_000;
+
+/// The first git working tree in the real directory `dir` or up to
+/// [`GIT_DEPTH`] levels below it, relative to `dir` (`.` for `dir`
+/// itself). A working tree has a `.git` directory holding an `index`, or
+/// a `.git` file (a linked worktree); a tool's own clone or bare
+/// repository has neither. Symlinks are not followed.
+fn git_checkout(dir: &Path) -> Option<PathBuf> {
+    let is_tree = |d: &Path| {
+        let git = d.join(".git");
+        match fs::symlink_metadata(&git) {
+            Ok(m) if m.is_dir() => {
+                fs::symlink_metadata(git.join("index")).is_ok_and(|i| i.is_file())
+            }
+            Ok(m) if m.is_file() => fs::read(&git).is_ok_and(|b| b.starts_with(b"gitdir:")),
+            _ => false,
+        }
+    };
+    let mut level: Vec<PathBuf> = vec![dir.to_path_buf()];
+    let mut seen = 0usize;
+    for depth in 0..=GIT_DEPTH {
+        let mut next = Vec::new();
+        for d in &level {
+            seen += 1;
+            if seen > GIT_DIR_LIMIT {
+                return None;
+            }
+            if is_tree(d) {
+                let rel = d.strip_prefix(dir).unwrap_or(d);
+                return Some(if rel.as_os_str().is_empty() {
+                    PathBuf::from(".")
+                } else {
+                    rel.to_path_buf()
+                });
+            }
+            if depth == GIT_DEPTH {
+                continue;
+            }
+            let Ok(rd) = fs::read_dir(d) else { continue };
+            next.extend(
+                rd.flatten()
+                    .filter(|e| e.file_name() != ".git" && e.file_type().is_ok_and(|t| t.is_dir()))
+                    .map(|e| e.path()),
+            );
+        }
+        level = next;
+    }
+    None
+}
+
+/// A running process whose current directory is `in_system` or below it
+/// (a build or a shell working there), as `(pid, command name)`.
+fn working_in(cx: &ScanContext, in_system: &Path) -> Option<(u32, String)> {
+    let proc_dir = cx.env.sys_path(Path::new("/proc"));
+    let real = cx.env.sys_path(in_system);
+    let rd = fs::read_dir(proc_dir).ok()?;
+    let mut found: Vec<(u32, String)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+            let cwd = fs::read_link(e.path().join("cwd")).ok()?;
+            if !(cwd.starts_with(in_system) || cwd.starts_with(&real)) {
+                return None;
+            }
+            let comm = fs::read_to_string(e.path().join("comm")).unwrap_or_default();
+            let comm = comm.trim();
+            Some((
+                pid,
+                if comm.is_empty() {
+                    "a process".into()
+                } else {
+                    comm.to_string()
+                },
+            ))
+        })
+        .collect();
+    found.sort();
+    found.into_iter().next()
 }
 
 pub struct ThumbnailsScanner;
