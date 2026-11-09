@@ -13,8 +13,8 @@ use std::sync::Mutex;
 use crate::command::{CmdOutput, CommandRunner};
 use crate::env::Env;
 use crate::error::CoreError;
-use crate::privilege::Escalation;
-use crate::privilege::batch::PrivilegedRunner;
+use crate::privilege::batch::{PrivilegedRun, PrivilegedRunner, StdioMode, stdio_modes};
+use crate::privilege::{Escalation, Interaction};
 
 pub struct FixtureTree {
     pub dir: tempfile::TempDir,
@@ -166,25 +166,55 @@ impl CommandRunner for FakeRunner {
 }
 
 /// A `PrivilegedRunner` that runs the script with `/bin/sh -c` as the test
-/// user (never escalating) and records every script it was given.
+/// user (never escalating) and records every script it was given, and the
+/// [`Interaction`] it ran with. Stdin is always `/dev/null`; stderr is
+/// captured under `NoTerminal` and dropped otherwise.
 #[derive(Default)]
 pub struct FakePrivilegedRunner {
     pub calls: Mutex<Vec<Vec<u8>>>,
+    pub interactions: Mutex<Vec<Interaction>>,
+    interaction: Interaction,
+}
+
+impl FakePrivilegedRunner {
+    pub fn with_interaction(i: Interaction) -> Self {
+        FakePrivilegedRunner {
+            interaction: i,
+            ..Default::default()
+        }
+    }
 }
 
 impl PrivilegedRunner for FakePrivilegedRunner {
-    fn run(&self, _esc: &Escalation, script: &[u8]) -> Result<Vec<u8>, CoreError> {
+    fn run(&self, esc: &Escalation, script: &[u8]) -> Result<Vec<u8>, CoreError> {
+        self.run_captured(esc, script).map(|r| r.stdout)
+    }
+
+    fn interaction(&self) -> Interaction {
+        self.interaction
+    }
+
+    fn run_captured(&self, _esc: &Escalation, script: &[u8]) -> Result<PrivilegedRun, CoreError> {
         self.calls.lock().unwrap().push(script.to_vec());
+        self.interactions.lock().unwrap().push(self.interaction);
+        let (_, stderr) = stdio_modes(self.interaction);
         let out = Command::new("/bin/sh")
             .arg("-c")
             .arg(OsStr::from_bytes(script))
             .stdin(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(if stderr == StdioMode::Piped {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .output()
             .map_err(|e| CoreError::Command {
                 program: "/bin/sh".into(),
                 message: e.to_string(),
             })?;
-        Ok(out.stdout)
+        Ok(PrivilegedRun {
+            stdout: out.stdout,
+            stderr: out.stderr,
+        })
     }
 }

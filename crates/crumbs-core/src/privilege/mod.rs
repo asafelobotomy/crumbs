@@ -12,6 +12,17 @@ use crate::env::Env;
 /// Oldest systemd release whose `run0` is trusted for escalation.
 const MIN_RUN0_SYSTEMD: u32 = 256;
 
+/// Whether a terminal is available to the escalation. `NoTerminal` is for
+/// a server whose stdin and stdout carry a protocol: the escalation gets
+/// stdin from `/dev/null`, its stderr is captured, and `sudo` (which needs
+/// a TTY) is never chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Interaction {
+    #[default]
+    Terminal,
+    NoTerminal,
+}
+
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum EscalationKind {
@@ -68,14 +79,24 @@ pub(crate) fn allow_detection_in_test<R>(f: impl FnOnce() -> R) -> R {
 /// crumbs' unit tests it finds nothing unless [`allow_detection_in_test`]
 /// is used.
 pub fn detect_escalation(env: &Env, runner: &dyn CommandRunner) -> Option<Escalation> {
+    detect_escalation_for(env, runner, Interaction::Terminal)
+}
+
+/// [`detect_escalation`] for `i`: under [`Interaction::NoTerminal`] `sudo`
+/// is excluded.
+pub fn detect_escalation_for(
+    env: &Env,
+    runner: &dyn CommandRunner,
+    i: Interaction,
+) -> Option<Escalation> {
     #[cfg(test)]
     if !DETECTION_ALLOWED.with(std::cell::Cell::get) {
         return None;
     }
-    find_escalation(env, runner)
+    find_escalation(env, runner, i)
 }
 
-fn find_escalation(env: &Env, runner: &dyn CommandRunner) -> Option<Escalation> {
+fn find_escalation(env: &Env, runner: &dyn CommandRunner, i: Interaction) -> Option<Escalation> {
     let found = |kind, path: PathBuf, requires_tty| Escalation {
         kind,
         program: env.unsys(&path),
@@ -88,6 +109,9 @@ fn find_escalation(env: &Env, runner: &dyn CommandRunner) -> Option<Escalation> 
     }
     if let Some(p) = resolve_trusted(env, "pkexec") {
         return Some(found(EscalationKind::Pkexec, p, false));
+    }
+    if i == Interaction::NoTerminal {
+        return None;
     }
     resolve_trusted(env, "sudo").map(|p| found(EscalationKind::Sudo, p, true))
 }
@@ -118,7 +142,7 @@ mod tests {
             t.write_exec(&format!("/usr/bin/{p}"), b"");
         }
         let runner = version("systemd 255 (255.4-1)\n+PAM\n");
-        let e = find_escalation(&t.env(), &runner).unwrap();
+        let e = find_escalation(&t.env(), &runner, Interaction::Terminal).unwrap();
         assert_eq!(e.kind, EscalationKind::Pkexec);
         assert_eq!(e.program, PathBuf::from("/usr/bin/pkexec"));
         assert!(!e.requires_tty);
@@ -131,7 +155,7 @@ mod tests {
             t.write_exec(&format!("/usr/bin/{p}"), b"");
         }
         let runner = version("systemd 261 (261.3-1-manjaro)\n");
-        let e = find_escalation(&t.env(), &runner).unwrap();
+        let e = find_escalation(&t.env(), &runner, Interaction::Terminal).unwrap();
         assert_eq!(e.kind, EscalationKind::Run0);
         assert_eq!(e.program, PathBuf::from("/usr/bin/run0"));
         assert!(!e.requires_tty);
@@ -144,10 +168,10 @@ mod tests {
         for p in ["run0", "pkexec", "systemctl"] {
             t.write_exec(&format!("/usr/bin/{p}"), b"");
         }
-        let e = find_escalation(&t.env(), &version("garbage\n")).unwrap();
+        let e = find_escalation(&t.env(), &version("garbage\n"), Interaction::Terminal).unwrap();
         assert_eq!(e.kind, EscalationKind::Pkexec);
         // systemctl failing to run (no fake registered) also falls through.
-        let e = find_escalation(&t.env(), &FakeRunner::new()).unwrap();
+        let e = find_escalation(&t.env(), &FakeRunner::new(), Interaction::Terminal).unwrap();
         assert_eq!(e.kind, EscalationKind::Pkexec);
     }
 
@@ -155,16 +179,40 @@ mod tests {
     fn sudo_fallback_requires_tty() {
         let t = FixtureTree::new();
         t.write_exec("/usr/bin/sudo", b"");
-        let e = find_escalation(&t.env(), &FakeRunner::new()).unwrap();
+        let e = find_escalation(&t.env(), &FakeRunner::new(), Interaction::Terminal).unwrap();
         assert_eq!(e.kind, EscalationKind::Sudo);
         assert_eq!(e.program, PathBuf::from("/usr/bin/sudo"));
         assert!(e.requires_tty);
     }
 
     #[test]
+    fn no_terminal_never_picks_sudo() {
+        let t = FixtureTree::new();
+        t.write_exec("/usr/bin/sudo", b"");
+        let found = allow_detection_in_test(|| {
+            (
+                detect_escalation_for(&t.env(), &FakeRunner::new(), Interaction::NoTerminal),
+                detect_escalation_for(&t.env(), &FakeRunner::new(), Interaction::Terminal),
+            )
+        });
+        assert_eq!(found.0, None);
+        assert_eq!(found.1.unwrap().kind, EscalationKind::Sudo);
+    }
+
+    #[test]
+    fn no_terminal_still_picks_pkexec() {
+        let t = FixtureTree::new();
+        t.write_exec("/usr/bin/pkexec", b"");
+        t.write_exec("/usr/bin/sudo", b"");
+        let e = find_escalation(&t.env(), &FakeRunner::new(), Interaction::NoTerminal).unwrap();
+        assert_eq!(e.kind, EscalationKind::Pkexec);
+    }
+
+    #[test]
     fn none_when_nothing_present() {
         let t = FixtureTree::new();
-        assert_eq!(find_escalation(&t.env(), &FakeRunner::new()), None);
+        let e = find_escalation(&t.env(), &FakeRunner::new(), Interaction::Terminal);
+        assert_eq!(e, None);
     }
 
     #[test]

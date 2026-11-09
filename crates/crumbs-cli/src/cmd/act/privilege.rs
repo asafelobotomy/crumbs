@@ -6,7 +6,7 @@ use std::io::IsTerminal;
 use crumbs_core::Env;
 use crumbs_core::command::SystemRunner;
 use crumbs_core::privilege::batch::{PrivilegedRunner, SystemPrivilegedRunner};
-use crumbs_core::privilege::{Escalation, detect_escalation};
+use crumbs_core::privilege::{Escalation, Interaction, detect_escalation_for};
 
 #[cfg(debug_assertions)]
 use super::test_runner;
@@ -36,8 +36,23 @@ impl Privilege {
     /// `n`, as if it were killed); on the real root it is ignored. Release
     /// builds refuse to start when `CRUMBS_TEST_*` is set.
     pub(crate) fn for_run(env: &Env, needed: bool) -> Privilege {
-        let system =
-            || -> Box<dyn PrivilegedRunner> { Box::new(SystemPrivilegedRunner::new(&env.root)) };
+        Privilege::build(env, needed, Interaction::Terminal)
+    }
+
+    /// For a server whose stdin and stdout carry a protocol: the same
+    /// gating as [`for_run`](Self::for_run), always `needed`, but with no
+    /// terminal: stdin from `/dev/null`, stderr captured, never `sudo`.
+    #[allow(dead_code)] // used by the MCP server
+    pub(crate) fn for_server(env: &Env) -> Privilege {
+        Privilege::build(env, true, Interaction::NoTerminal)
+    }
+
+    /// The one place that gates real escalation, so `for_run` and
+    /// `for_server` cannot drift apart.
+    fn build(env: &Env, needed: bool, i: Interaction) -> Privilege {
+        let system = || -> Box<dyn PrivilegedRunner> {
+            Box::new(SystemPrivilegedRunner::with_interaction(&env.root, i))
+        };
         if !needed {
             return Privilege {
                 esc: None,
@@ -47,7 +62,7 @@ impl Privilege {
         #[cfg(debug_assertions)]
         {
             let value = std::env::var("CRUMBS_TEST_PRIV_RUNNER").ok();
-            if let Some(runner) = test_runner::select(&env.root, value.as_deref()) {
+            if let Some(runner) = test_runner::select(&env.root, value.as_deref(), i) {
                 return Privilege {
                     esc: Some(test_runner::escalation()),
                     runner,
@@ -60,10 +75,41 @@ impl Privilege {
                 };
             }
         }
-        let esc = detect_escalation(env, &SystemRunner::new()).filter(usable);
+        let esc = detect_escalation_for(env, &SystemRunner::new(), i)
+            .filter(|e| i == Interaction::NoTerminal || usable(e));
         Privilege {
             esc,
             runner: system(),
         }
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    use super::*;
+    use crumbs_core::testing::FixtureTree;
+
+    // One test mutates the process environment; it is the only one here.
+    #[test]
+    fn for_server_shares_the_gating_and_has_no_terminal() {
+        let t = FixtureTree::new();
+        let fake = t.env();
+        let mut real = t.env();
+        real.root = std::path::PathBuf::from("/");
+        unsafe {
+            std::env::set_var("CRUMBS_TEST_PRIV_RUNNER", "sh");
+            std::env::remove_var("CRUMBS_ALLOW_REAL_ESCALATION");
+        }
+        let server = Privilege::for_server(&fake);
+        let run = Privilege::for_run(&fake, true);
+        assert!(server.esc.is_some() && run.esc.is_some());
+        assert_eq!(server.runner.interaction(), Interaction::NoTerminal);
+        assert_eq!(run.runner.interaction(), Interaction::Terminal);
+        // On the real root the test runner is ignored, and without
+        // CRUMBS_ALLOW_REAL_ESCALATION nothing is detected.
+        let server = Privilege::for_server(&real);
+        assert!(server.esc.is_none());
+        assert_eq!(server.runner.interaction(), Interaction::NoTerminal);
+        unsafe { std::env::remove_var("CRUMBS_TEST_PRIV_RUNNER") };
     }
 }

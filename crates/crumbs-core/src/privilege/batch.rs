@@ -18,7 +18,7 @@ use std::thread;
 
 use crate::command::{CHILD_PATH, ENV_ALLOWLIST};
 use crate::error::CoreError;
-use crate::privilege::{Escalation, EscalationKind};
+use crate::privilege::{Escalation, EscalationKind, Interaction};
 
 /// Start of every script: a fixed `PATH` and locale, no preloads, no
 /// inherited `IFS`/`CDPATH`, and no functions shadowing the builtins the
@@ -245,15 +245,67 @@ fn digits(b: &[u8]) -> Option<&str> {
     std::str::from_utf8(b).ok()
 }
 
+/// What a privileged run wrote: the script's stdout and, when the runner
+/// captures it (see [`Interaction::NoTerminal`]), the escalation's stderr.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrivilegedRun {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
 /// Runs a batch script as root and returns its stdout.
 pub trait PrivilegedRunner: Send + Sync {
     fn run(&self, esc: &Escalation, script: &[u8]) -> Result<Vec<u8>, CoreError>;
+
+    /// Like [`run`](Self::run), also returning captured stderr. Runners that
+    /// do not capture it return it empty.
+    fn run_captured(&self, esc: &Escalation, script: &[u8]) -> Result<PrivilegedRun, CoreError> {
+        Ok(PrivilegedRun {
+            stdout: self.run(esc, script)?,
+            stderr: Vec::new(),
+        })
+    }
+
+    /// Whether this runner has a terminal; callers needing no terminal can
+    /// check it.
+    fn interaction(&self) -> Interaction {
+        Interaction::Terminal
+    }
+}
+
+/// How one standard stream of the escalation program is set up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdioMode {
+    Inherit,
+    Null,
+    Piped,
+}
+
+impl StdioMode {
+    fn stdio(self) -> Stdio {
+        match self {
+            StdioMode::Inherit => Stdio::inherit(),
+            StdioMode::Null => Stdio::null(),
+            StdioMode::Piped => Stdio::piped(),
+        }
+    }
+}
+
+/// The escalation program's `(stdin, stderr)` for `i`: the terminal's for
+/// [`Interaction::Terminal`]; `/dev/null` and a pipe otherwise.
+pub fn stdio_modes(i: Interaction) -> (StdioMode, StdioMode) {
+    match i {
+        Interaction::Terminal => (StdioMode::Inherit, StdioMode::Inherit),
+        Interaction::NoTerminal => (StdioMode::Null, StdioMode::Piped),
+    }
 }
 
 /// Runs `<esc.program> [--] /bin/sh -c <script>` for real.
 ///
-/// stdin and stderr are the terminal's, so run0, pkexec and sudo can prompt;
-/// stdout is captured. The child stays in crumbs' process group (the
+/// With [`Interaction::Terminal`], stdin and stderr are the terminal's, so
+/// run0, pkexec and sudo can prompt; stdout is captured. With
+/// [`Interaction::NoTerminal`] stdin is `/dev/null` and stderr is captured
+/// (returned by `run_captured`, never printed). The child stays in crumbs' process group (the
 /// escalation program must own the terminal for its prompt), so Ctrl-C
 /// reaches it too. There is no timeout: the user may take a while to answer.
 ///
@@ -262,13 +314,19 @@ pub trait PrivilegedRunner: Send + Sync {
 /// programs in the script are user-writable fixtures.
 pub struct SystemPrivilegedRunner {
     root: PathBuf,
+    interaction: Interaction,
 }
 
 impl SystemPrivilegedRunner {
     /// `root` is the environment's root (`Env::root`).
     pub fn new(root: &Path) -> Self {
+        Self::with_interaction(root, Interaction::Terminal)
+    }
+
+    pub fn with_interaction(root: &Path, i: Interaction) -> Self {
         SystemPrivilegedRunner {
             root: root.to_path_buf(),
+            interaction: i,
         }
     }
 }
@@ -299,6 +357,14 @@ fn escalation_args(esc: &Escalation, script: &[u8]) -> Vec<OsString> {
 
 impl PrivilegedRunner for SystemPrivilegedRunner {
     fn run(&self, esc: &Escalation, script: &[u8]) -> Result<Vec<u8>, CoreError> {
+        self.run_captured(esc, script).map(|r| r.stdout)
+    }
+
+    fn interaction(&self) -> Interaction {
+        self.interaction
+    }
+
+    fn run_captured(&self, esc: &Escalation, script: &[u8]) -> Result<PrivilegedRun, CoreError> {
         if let Some(why) = escalation_refused(&self.root, cfg!(test)) {
             return Err(CoreError::Command {
                 program: esc.program.display().to_string(),
@@ -317,22 +383,33 @@ impl PrivilegedRunner for SystemPrivilegedRunner {
             }
         }
         cmd.env("PATH", CHILD_PATH).env("LC_ALL", "C");
+        let (stdin, stderr) = stdio_modes(self.interaction);
         let mut child = cmd
-            .stdin(Stdio::inherit())
+            .stdin(stdin.stdio())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(stderr.stdio())
             .spawn()
             .map_err(fail)?;
-        let reader = child.stdout.take().map(|mut out| {
-            thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = out.read_to_end(&mut buf);
-                buf
+        let drain = |r: Option<Box<dyn Read + Send>>| {
+            r.map(|mut r| {
+                thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let _ = r.read_to_end(&mut buf);
+                    buf
+                })
             })
-        });
+        };
+        let out = drain(child.stdout.take().map(|s| Box::new(s) as _));
+        let err = drain(child.stderr.take().map(|s| Box::new(s) as _));
         // The exit status is not used: the markers say what ran.
         child.wait().map_err(fail)?;
-        Ok(reader.and_then(|h| h.join().ok()).unwrap_or_default())
+        let join = |h: Option<thread::JoinHandle<Vec<u8>>>| {
+            h.and_then(|h| h.join().ok()).unwrap_or_default()
+        };
+        Ok(PrivilegedRun {
+            stdout: join(out),
+            stderr: join(err),
+        })
     }
 }
 
@@ -712,6 +789,37 @@ mod tests {
             argv(EscalationKind::Sudo),
             [os("--"), os("/bin/sh"), os("-c"), os("echo hi")]
         );
+    }
+
+    #[test]
+    fn terminal_behaviour_unchanged() {
+        assert_eq!(
+            stdio_modes(Interaction::Terminal),
+            (StdioMode::Inherit, StdioMode::Inherit)
+        );
+        let r = SystemPrivilegedRunner::new(Path::new("/"));
+        assert_eq!(r.interaction(), Interaction::Terminal);
+        // A runner that does not capture returns empty stderr.
+        let f = FakePrivilegedRunner::default();
+        let run = f.run_captured(&esc(), b"echo out; echo err >&2").unwrap();
+        assert_eq!(run.stdout, b"out\n");
+        assert!(run.stderr.is_empty());
+    }
+
+    #[test]
+    fn no_terminal_runner_uses_null_stdin() {
+        assert_eq!(
+            stdio_modes(Interaction::NoTerminal),
+            (StdioMode::Null, StdioMode::Piped)
+        );
+        let r = SystemPrivilegedRunner::with_interaction(Path::new("/"), Interaction::NoTerminal);
+        assert_eq!(r.interaction(), Interaction::NoTerminal);
+        // The fake records the interaction it ran with and captures stderr.
+        let f = FakePrivilegedRunner::with_interaction(Interaction::NoTerminal);
+        let run = f.run_captured(&esc(), b"echo out; echo err >&2").unwrap();
+        assert_eq!(run.stdout, b"out\n");
+        assert_eq!(run.stderr, b"err\n");
+        assert_eq!(*f.interactions.lock().unwrap(), [Interaction::NoTerminal]);
     }
 
     #[test]
