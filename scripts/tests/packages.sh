@@ -17,10 +17,26 @@ echo "$info" | grep -q "^ Version: $VERSION\$" || fail "no Version: $VERSION"
 echo "$info" | grep -q '^ Section: utils$' || fail "no Section: utils"
 # cargo-deb always writes the field; empty, dpkg drops it on install.
 echo "$info" | grep -Eq '^ Depends: *[^ ]' && fail "has dependencies: $(echo "$info" | grep '^ Depends:')"
+echo "$info" | grep -Eq '^ Maintainer: [^<]+ <[^@ ]+@[^> ]+>$' || fail "Maintainer has no email: $(echo "$info" | grep Maintainer)"
 contents=$(dpkg-deb --contents "$DEB")
-for f in ./usr/bin/crumbs ./usr/share/doc/crumbs/README.md ./usr/share/doc/crumbs/copyright; do
+for f in ./usr/bin/crumbs ./usr/share/doc/crumbs/README.md ./usr/share/doc/crumbs/copyright \
+    ./usr/share/doc/crumbs/changelog.Debian.gz; do
     echo "$contents" | grep -q " $f\$" || fail "the .deb lacks $f"
 done
+
+copyright=$(dpkg-deb --fsys-tarfile "$DEB" | tar -xOf - ./usr/share/doc/crumbs/copyright)
+echo "$copyright" | head -1 | grep -q '^Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/' ||
+    fail "copyright is not in the Debian copyright format"
+changelog=$(dpkg-deb --fsys-tarfile "$DEB" | tar -xOf - ./usr/share/doc/crumbs/changelog.Debian.gz | gzip -dc)
+echo "$changelog" | head -1 | grep -q "^crumbs ($VERSION) " || fail "changelog.Debian.gz does not start with $VERSION"
+
+check deb_lintian_clean
+# lintian is installed in the container, so this check needs network.
+out=$(podman run --rm -v "$DIST:/dist:ro" docker.io/library/debian:trixie sh -euc '
+    apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends lintian >/dev/null
+    lintian --fail-on error --no-tag-display-limit /dist/'"$(basename "$DEB")"'
+' 2>&1) || fail "lintian: $(echo "$out" | grep -E '^E: ' | head -3 | tr '\n' ' ')"
+echo "$out"
 
 check rpm_metadata
 need "$RPM"

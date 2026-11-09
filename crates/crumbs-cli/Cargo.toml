@@ -54,6 +54,8 @@ tokio = { version = "1.54.1", features = ["macros", "rt", "time"] }
 # static musl binary: no dependencies. The `.rpm` is packaging/rpm/crumbs.spec.
 [package.metadata.deb]
 name = "crumbs"
+maintainer = "asafelobotomy <asafelobotomy@users.noreply.github.com>"
+changelog = "../../packaging/deb/changelog"
 section = "utils"
 priority = "optional"
 revision = ""
@@ -65,5 +67,5 @@ you exactly what will go, and cleans caches, logs, trash and orphan packages."""
 assets = [
     ["target/release/crumbs", "usr/bin/crumbs", "755"],
     ["../../README.md", "usr/share/doc/crumbs/README.md", "644"],
-    ["../../LICENSE", "usr/share/doc/crumbs/copyright", "644"],
+    ["../../packaging/deb/copyright", "usr/share/doc/crumbs/copyright", "644"],
 ]

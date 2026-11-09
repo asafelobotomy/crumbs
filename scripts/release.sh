@@ -43,6 +43,9 @@ for pkg in crumbs crumbs-bin; do
     named "packaging/aur/$pkg/.SRCINFO" 's/^\tpkgver = //p'
 done
 named packaging/appimage/io.github.asafelobotomy.crumbs.metainfo.xml 's/.*<release version="\([^"]*\)".*/\1/p'
+named packaging/deb/changelog 's/^crumbs (\([^)]*\)).*/\1/p'
+
+scripts/check-licenses.sh >&2 || die "a dependency's licence is not allowed (listed above)"
 
 mkdir -p dist
 rm -rf dist/aur
@@ -50,7 +53,9 @@ rm -f dist/SHA256SUMS dist/RELEASE_NOTES.md dist/LICENSE
 
 BIN=$(scripts/build-static.sh)
 APPIMAGE=$(scripts/build-appimage.sh "$BIN")
-PACKAGES=$(scripts/build-packages.sh "$BIN")
+scripts/build-packages.sh "$BIN" >/dev/null
+DEB=crumbs_${VERSION}_amd64.deb
+RPM=crumbs-$VERSION-1.x86_64.rpm
 cp LICENSE dist/LICENSE
 # The source tarball the AUR `crumbs` package downloads. It is uploaded
 # with the release, so its sum is of the bytes users fetch; GitHub's own
@@ -60,8 +65,8 @@ git archive --format=tar.gz --prefix="crumbs-$VERSION/" -o "$TARBALL" HEAD
 
 (
     cd dist
-    sha256sum "$(basename "$BIN")" "$(basename "$APPIMAGE")" \
-        $(for p in $PACKAGES; do basename "$p"; done) "$(basename "$TARBALL")" LICENSE > SHA256SUMS
+    sha256sum "$(basename "$BIN")" "$(basename "$APPIMAGE")" "$DEB" "$RPM" \
+        "$(basename "$TARBALL")" LICENSE > SHA256SUMS
 )
 
 # The release notes: the changelog section, without its heading.

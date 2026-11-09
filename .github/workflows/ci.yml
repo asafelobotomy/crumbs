@@ -11,12 +11,13 @@ jobs:
   ubuntu:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo fmt --check
+      - run: scripts/check-licenses.sh
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
       # Release builds compile out the test hooks; build one so a cfg
@@ -29,7 +30,7 @@ jobs:
     steps:
       - name: Install toolchain
         run: pacman -Syu --noconfirm rust jq gcc
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Test
         run: cargo test --workspace --all-features
       - name: Build
@@ -63,7 +64,7 @@ jobs:
     env:
       CARGO_TARGET_DIR: /target
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           path: src
       - name: Build, test, smoke and end-to-end uninstall
