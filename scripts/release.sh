@@ -33,6 +33,17 @@ if [ "$allow_dirty" -eq 0 ] && [ -n "$(git status --porcelain)" ]; then
 fi
 grep -q "^## $VERSION\$" CHANGELOG.md || die "CHANGELOG.md has no '## $VERSION' section"
 
+# Files that name the version themselves must agree before anything builds.
+named() { # <file> <sed expression printing the version it names>
+    found=$(sed -n "$2" "$1" | head -1)
+    [ "$found" = "$VERSION" ] || die "$1 names version ${found:-none}, not $VERSION"
+}
+for pkg in crumbs crumbs-bin; do
+    named "packaging/aur/$pkg/PKGBUILD" 's/^pkgver=//p'
+    named "packaging/aur/$pkg/.SRCINFO" 's/^\tpkgver = //p'
+done
+named packaging/appimage/io.github.asafelobotomy.crumbs.metainfo.xml 's/.*<release version="\([^"]*\)".*/\1/p'
+
 mkdir -p dist
 rm -rf dist/aur
 rm -f dist/SHA256SUMS dist/RELEASE_NOTES.md dist/LICENSE
@@ -41,11 +52,16 @@ BIN=$(scripts/build-static.sh)
 APPIMAGE=$(scripts/build-appimage.sh "$BIN")
 PACKAGES=$(scripts/build-packages.sh "$BIN")
 cp LICENSE dist/LICENSE
+# The source tarball the AUR `crumbs` package downloads. It is uploaded
+# with the release, so its sum is of the bytes users fetch; GitHub's own
+# tag tarballs are compressed differently and would not match.
+TARBALL=dist/crumbs-$VERSION.tar.gz
+git archive --format=tar.gz --prefix="crumbs-$VERSION/" -o "$TARBALL" HEAD
 
 (
     cd dist
     sha256sum "$(basename "$BIN")" "$(basename "$APPIMAGE")" \
-        $(for p in $PACKAGES; do basename "$p"; done) LICENSE > SHA256SUMS
+        $(for p in $PACKAGES; do basename "$p"; done) "$(basename "$TARBALL")" LICENSE > SHA256SUMS
 )
 
 # The release notes: the changelog section, without its heading.
@@ -64,11 +80,9 @@ for line in open("CHANGELOG.md"):
 sys.stdout.write("".join(out).strip() + "\n")
 PY
 
-# The AUR files, with each 'SKIP' replaced by the artifact's sum. The
-# source tarball's sum is that of `git archive` at HEAD; it equals GitHub's
-# tag tarball only if the tag points at this commit (re-check after tagging).
+# The AUR files, with each 'SKIP' replaced by the artifact's sum.
 sum() { sha256sum | cut -d' ' -f1; }
-tarball_sum=$(git archive --format=tar.gz --prefix="crumbs-$VERSION/" HEAD | sum)
+tarball_sum=$(sum < "$TARBALL")
 license_sum=$(sum < LICENSE)
 bin_sum=$(sum < "$BIN")
 fill() { # <package> <array>=<sum>...
@@ -95,4 +109,3 @@ fill crumbs-bin "sha256sums=$license_sum" "sha256sums_x86_64=$bin_sum"
 
 echo "dist/ now holds:" >&2
 (cd dist && sha256sum -c SHA256SUMS >&2)
-echo "The AUR 'crumbs' sum is that of git archive at $(git rev-parse --short HEAD); re-check it against GitHub's tag tarball after tagging." >&2

@@ -22,18 +22,30 @@ st=0; err=$("$CLONE/scripts/release.sh" 9.9.9 2>&1) || st=$?
 echo "$err" | grep -qF "version 9.9.9 does not match Cargo.toml ($VERSION)" || fail "$err"
 st=0; err=$("$CLONE/scripts/release.sh" 2>&1) || st=$?
 [ "$st" -eq 2 ] || fail "no version: exit $st"
+
+check release_refuses_stale_packaging_versions
+for f in packaging/aur/crumbs/PKGBUILD packaging/aur/crumbs-bin/.SRCINFO \
+    packaging/appimage/io.github.asafelobotomy.crumbs.metainfo.xml; do
+    git -C "$CLONE" checkout -q -- .
+    sed -i "s/$VERSION/0.0.9/" "$CLONE/$f"
+    git -C "$CLONE" -c user.name=test -c user.email=test@invalid commit -qam "test: stale $f"
+    st=0; err=$("$CLONE/scripts/release.sh" "$VERSION" 2>&1) || st=$?
+    [ "$st" -eq 2 ] || fail "$f at 0.0.9: exit $st: $(echo "$err" | tail -2)"
+    echo "$err" | grep -qF "$f names version 0.0.9, not $VERSION" || fail "$f: $err"
+    git -C "$CLONE" reset -q --hard HEAD~1
+done
 rm -rf "$CLONE"
 
 check release_builds_everything_with_sums
 scripts/release.sh "$VERSION" --allow-dirty >/dev/null 2>"$HOME/.cache/crumbs-test/release.log" ||
     fail "release.sh failed: $(tail -3 "$HOME/.cache/crumbs-test/release.log" | tr '\n' ' ')"
 for f in "crumbs-$VERSION-x86_64-linux-musl" "crumbs-$VERSION-x86_64.AppImage" \
-    "crumbs_${VERSION}_amd64.deb" "crumbs-$VERSION-1.x86_64.rpm" LICENSE SHA256SUMS RELEASE_NOTES.md \
+    "crumbs_${VERSION}_amd64.deb" "crumbs-$VERSION-1.x86_64.rpm" "crumbs-$VERSION.tar.gz" LICENSE SHA256SUMS RELEASE_NOTES.md \
     aur/crumbs/PKGBUILD aur/crumbs/.SRCINFO aur/crumbs-bin/PKGBUILD aur/crumbs-bin/.SRCINFO; do
     [ -f "dist/$f" ] || fail "missing dist/$f"
 done
 (cd dist && sha256sum --quiet -c SHA256SUMS) || fail "sha256sum -c failed"
-[ "$(wc -l < dist/SHA256SUMS)" -eq 5 ] || fail "SHA256SUMS should list 5 files: $(cat dist/SHA256SUMS)"
+[ "$(wc -l < dist/SHA256SUMS)" -eq 6 ] || fail "SHA256SUMS should list 6 files: $(cat dist/SHA256SUMS)"
 grep -q "^## $VERSION\$" dist/RELEASE_NOTES.md && fail "RELEASE_NOTES.md repeats the heading"
 [ -s dist/RELEASE_NOTES.md ] || fail "RELEASE_NOTES.md is empty"
 for pkg in crumbs crumbs-bin; do
@@ -43,6 +55,13 @@ for pkg in crumbs crumbs-bin; do
 done
 bin_sum=$(sha256sum "dist/crumbs-$VERSION-x86_64-linux-musl" | cut -d' ' -f1)
 grep -q "$bin_sum" dist/aur/crumbs-bin/PKGBUILD || fail "crumbs-bin lacks the binary's sum"
+# The source package downloads the tarball the release uploads, so the sum
+# is of the very bytes users fetch (GitHub's own tag tarballs differ).
+tar_sum=$(sha256sum "dist/crumbs-$VERSION.tar.gz" | cut -d' ' -f1)
+grep -q "sha256sums=('$tar_sum')" dist/aur/crumbs/PKGBUILD || fail "crumbs lacks the source tarball's sum"
+grep -q "source = https://github.com/asafelobotomy/crumbs/releases/download/v$VERSION/crumbs-$VERSION.tar.gz" dist/aur/crumbs/.SRCINFO ||
+    fail "crumbs does not download the release's source tarball"
+tar -tzf "dist/crumbs-$VERSION.tar.gz" | grep -qx "crumbs-$VERSION/Cargo.lock" || fail "the source tarball lacks crumbs-$VERSION/Cargo.lock"
 
 check release_workflow_is_valid_yaml
 wf=.github/workflows/release.yml

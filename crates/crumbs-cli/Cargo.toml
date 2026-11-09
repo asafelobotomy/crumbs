@@ -50,8 +50,8 @@ serde_json = "1.0.154"
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["macros", "rt", "time"] }
 
-# `.deb` (cargo-deb) and `.rpm` (cargo-generate-rpm), both built with
-# scripts/build-packages.sh around the static musl binary: no dependencies.
+# The `.deb`, built by scripts/build-packages.sh with cargo-deb around the
+# static musl binary: no dependencies. The `.rpm` is packaging/rpm/crumbs.spec.
 [package.metadata.deb]
 name = "crumbs"
 section = "utils"
@@ -66,16 +66,4 @@ assets = [
     ["target/release/crumbs", "usr/bin/crumbs", "755"],
     ["../../README.md", "usr/share/doc/crumbs/README.md", "644"],
     ["../../LICENSE", "usr/share/doc/crumbs/copyright", "644"],
-]
-
-[package.metadata.generate-rpm]
-name = "crumbs"
-summary = "Find and remove app leftovers, caches and system bloat"
-# The binary is static and runs no scriptlets: no requirements at all.
-require-sh = false
-auto-req = "no"
-assets = [
-    { source = "target/release/crumbs", dest = "/usr/bin/crumbs", mode = "755" },
-    { source = "../../README.md", dest = "/usr/share/doc/crumbs/README.md", mode = "644", doc = true },
-    { source = "../../LICENSE", dest = "/usr/share/licenses/crumbs/LICENSE", mode = "644", doc = true },
 ]

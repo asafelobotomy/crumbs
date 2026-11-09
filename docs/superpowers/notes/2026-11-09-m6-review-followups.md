@@ -11,9 +11,8 @@ M6 left these out on purpose, or noticed them on the way.
 
 ## Known limits
 
-5. **appimagetool is unpinned.** The release workflow downloads appimagetool's `continuous` build, which also fetches the AppImage runtime at build time. Pin both by version and checksum.
-6. **The `crumbs` AUR checksum.** `release.sh` sums `git archive` at HEAD. That matches GitHub's tag tarball only when the tag points at the same commit and GitHub's gzip output is unchanged; re-check after tagging (README, "Releasing").
-7. **The `.deb` has an empty `Depends:` field.** cargo-deb 3.8 always writes it. dpkg accepts it and drops it on install; lintian may warn.
-8. **The `.rpm` has no Group, and its description is the summary.** cargo-generate-rpm supports neither a package group nor a separate long description.
-9. **rpm self-removal is not tested.** In Debian, the packaging test removes the `.deb` with `crumbs uninstall dpkg:crumbs`. In Fedora it uses `rpm -e`, because dnf's simulation needs repository metadata and the test container has no network.
-10. **The source AUR package tests in the debug profile.** `check()` runs `cargo test`, not `cargo test --release`, because the CLI tests rely on debug-only fixture roots.
+5. **appimagetool is unpinned.** (cargo-deb is pinned in `scripts/build-packages.sh`.) The release workflow downloads appimagetool's `continuous` build, which also fetches the AppImage runtime at build time. Pin both by version and checksum.
+6. **The `.deb` has an empty `Depends:` field.** cargo-deb 3.8 always writes it. dpkg accepts it and drops it on install; lintian may warn.
+7. **The `.rpm` is built with `rpmbuild`,** from `packaging/rpm/crumbs.spec`, not cargo-generate-rpm: cargo-generate-rpm 0.21.1 cannot own directories, so `rpm -e` left `/usr/share/doc/crumbs` and `/usr/share/licenses/crumbs` behind.
+8. **rpm self-removal is not tested.** In Debian, the packaging test removes the `.deb` with `crumbs uninstall dpkg:crumbs`. In Fedora it uses `rpm -e`, because dnf's simulation needs repository metadata and the test container has no network.
+9. **The source AUR package tests in the debug profile.** `check()` runs `cargo test`, not `cargo test --release`, because the CLI tests rely on debug-only fixture roots.

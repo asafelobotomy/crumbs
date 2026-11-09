@@ -21,7 +21,7 @@ jobs:
     steps:
       - name: Install tools
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rustup python github-cli
+          pacman -Syu --noconfirm --needed base-devel git rustup python github-cli rpm-tools
           rustup default 1.99.1
           curl -fsSL -o /usr/local/bin/appimagetool \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage

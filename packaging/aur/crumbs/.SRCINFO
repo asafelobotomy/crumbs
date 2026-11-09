@@ -9,7 +9,7 @@ pkgbase = crumbs
 	depends = gcc-libs
 	depends = glibc
 	options = !lto
-	source = crumbs-0.1.0.tar.gz::https://github.com/asafelobotomy/crumbs/archive/refs/tags/v0.1.0.tar.gz
+	source = https://github.com/asafelobotomy/crumbs/releases/download/v0.1.0/crumbs-0.1.0.tar.gz
 	sha256sums = SKIP
 
 pkgname = crumbs

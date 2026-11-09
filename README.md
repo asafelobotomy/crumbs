@@ -348,13 +348,14 @@ Every artifact comes from one script, which also runs in CI on a tag push:
    - the static binary;
    - the AppImage;
    - the `.deb` and `.rpm`;
+   - the source tarball `crumbs-<version>.tar.gz` (what the AUR `crumbs` package builds from);
    - `LICENSE`, `SHA256SUMS` and `RELEASE_NOTES.md`;
    - `dist/aur/{crumbs,crumbs-bin}` with real checksums.
 
-   It needs `appimagetool` (or `APPIMAGETOOL`), `rustup`, `python3` and `git`. It installs `cargo-deb` and `cargo-generate-rpm` into `~/.cache/crumbs-tools` when they are missing.
+   It needs `appimagetool` (or `APPIMAGETOOL`), `rpmbuild`, `rustup`, `python3` and `git`. It installs the pinned `cargo-deb` into `~/.cache/crumbs-tools` when it is missing. It refuses to run unless the version in `Cargo.toml`, the AUR `PKGBUILD`s and `.SRCINFO`s and the AppStream metainfo all match.
 3. Check the artifacts with `scripts/test-packaging.sh`, which needs podman. It runs each artifact in containers: the binary on four distros, the AppImage without FUSE, install and removal of the `.deb` and `.rpm`, and an AUR build.
 4. Tag and push: `git tag v<version> && git push origin v<version>`. `.github/workflows/release.yml` then runs `scripts/release.sh` and creates the GitHub release with every artifact.
-5. Publish to the AUR: download the workflow's `aur` artifact, or use your local `dist/aur/`, and push each folder to its AUR repository (`ssh://aur@aur.archlinux.org/crumbs.git`, `.../crumbs-bin.git`). The `crumbs` checksum is that of `git archive` at the tagged commit: check it against GitHub's tag tarball first (`curl -sL <url>/archive/refs/tags/v<version>.tar.gz | sha256sum`).
+5. Publish to the AUR: download the workflow's `aur` artifact, or use your local `dist/aur/`, and push each folder to its AUR repository (`ssh://aur@aur.archlinux.org/crumbs.git`, `.../crumbs-bin.git`). Their checksums are of the files the release uploads.
 
 `scripts/check-licenses.sh` lists any dependency whose licence is not GPL-compatible permissive.
 

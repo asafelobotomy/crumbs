@@ -4,6 +4,11 @@ DEB=$DIST/crumbs_${VERSION}_amd64.deb
 RPM=$DIST/crumbs-$VERSION-1.x86_64.rpm
 URL=https://github.com/asafelobotomy/crumbs
 
+check packaging_tools_are_pinned
+# A tag build installs these fresh; an unpinned install could build a
+# different package from the one these tests checked.
+grep -q 'CARGO_DEB_VERSION=3.8.0' scripts/build-packages.sh || fail "cargo-deb is not pinned"
+
 check deb_metadata
 need "$DEB"
 info=$(dpkg-deb --info "$DEB")
@@ -40,10 +45,10 @@ out=$(podman run --rm --network=none -v "$DIST:/dist:ro" docker.io/library/debia
     files=$(dpkg -L crumbs | while read -r f; do [ -f "$f" ] && echo "$f"; done)
     [ -n "$files" ] || { echo "dpkg -L lists no files"; exit 1; }
     [ "$(crumbs --version)" = "crumbs '"$VERSION"'" ] || { echo "bad --version"; exit 1; }
-    crumbs apps list --all --json | grep -q "\"dpkg:crumbs\"" || { echo "apps list lacks dpkg:crumbs"; exit 1; }
+    crumbs apps list --all --json >/tmp/apps.json; grep -q "\"dpkg:crumbs\"" /tmp/apps.json || { echo "apps list lacks dpkg:crumbs"; exit 1; }
     crumbs uninstall dpkg:crumbs --yes --json >/tmp/u.json || { echo "uninstall failed: $(cat /tmp/u.json)"; exit 1; }
     dpkg -s crumbs >/dev/null 2>&1 && { echo "still installed after crumbs uninstall"; exit 1; }
-    for f in $files; do [ ! -e "$f" ] || { echo "left behind: $f"; exit 1; }; done
+    for f in $files /usr/share/doc/crumbs; do [ ! -e "$f" ] || { echo "left behind: $f"; exit 1; }; done
     echo ok
 ' 2>&1) || fail "debian: $out"
 out=$(podman run --rm --network=none -v "$DIST:/dist:ro" registry.fedoraproject.org/fedora:latest sh -euc '
@@ -51,9 +56,9 @@ out=$(podman run --rm --network=none -v "$DIST:/dist:ro" registry.fedoraproject.
     files=$(rpm -ql crumbs | while read -r f; do [ -f "$f" ] && echo "$f"; done)
     [ -n "$files" ] || { echo "rpm -ql lists no files"; exit 1; }
     [ "$(crumbs --version)" = "crumbs '"$VERSION"'" ] || { echo "bad --version"; exit 1; }
-    crumbs apps list --all --json | grep -q "\"rpm:crumbs\"" || { echo "apps list lacks rpm:crumbs"; exit 1; }
+    crumbs apps list --all --json >/tmp/apps.json; grep -q "\"rpm:crumbs\"" /tmp/apps.json || { echo "apps list lacks rpm:crumbs"; exit 1; }
     rpm -e crumbs
-    for f in $files; do [ ! -e "$f" ] || { echo "left behind: $f"; exit 1; }; done
+    for f in $files /usr/share/doc/crumbs /usr/share/licenses/crumbs; do [ ! -e "$f" ] || { echo "left behind: $f"; exit 1; }; done
     echo ok
 ' 2>&1) || fail "fedora: $out"
 
