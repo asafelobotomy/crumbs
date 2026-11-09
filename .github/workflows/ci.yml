@@ -19,6 +19,9 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
+      # Release builds compile out the test hooks; build one so a cfg
+      # mistake that only breaks release cannot reach main.
+      - run: cargo build --workspace --release --locked
 
   arch:
     runs-on: ubuntu-latest

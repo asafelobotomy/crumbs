@@ -3403,3 +3403,13 @@ fn uninstall_dry_run_json_plan_matches_builder() {
     .map(|(k, p)| (k.to_string(), p.to_string()));
     assert_eq!(actions, want, "{:#}", plans[0]);
 }
+
+#[test]
+fn version_flag_prints_name_and_version() {
+    Command::cargo_bin("crumbs")
+        .unwrap()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(format!("crumbs {}\n", env!("CARGO_PKG_VERSION")));
+}

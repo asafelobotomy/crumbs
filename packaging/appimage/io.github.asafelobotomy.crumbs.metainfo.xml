@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="console-application">
+  <id>io.github.asafelobotomy.crumbs</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>crumBS</name>
+  <summary>Find and remove app leftovers, caches and system bloat</summary>
+  <description>
+    <p>
+      crumBS lists the apps installed from your package manager, Flatpak, Snap
+      and AppImages, and finds what each one leaves behind: configuration,
+      caches, data and system files. It removes an app together with its
+      leftovers after showing you exactly what will go, and it cleans caches,
+      logs, trash and orphan packages.
+    </p>
+    <p>
+      Every deletion is previewed, checked against safety rules, recorded and
+      can be restored. crumBS also serves its tools to AI assistants over MCP.
+    </p>
+  </description>
+  <developer id="io.github.asafelobotomy">
+    <name>asafelobotomy</name>
+  </developer>
+  <url type="homepage">https://github.com/asafelobotomy/crumbs</url>
+  <url type="bugtracker">https://github.com/asafelobotomy/crumbs/issues</url>
+  <categories>
+    <category>System</category>
+    <category>Utility</category>
+  </categories>
+  <provides>
+    <binary>crumbs</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-09">
+      <description>
+        <p>The first release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -1,0 +1,23 @@
+# Maintainer: asafelobotomy
+
+pkgname=crumbs-bin
+_pkgname=crumbs
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Find and remove app leftovers, caches and system bloat (static binary)"
+arch=('x86_64')
+url="https://github.com/asafelobotomy/crumbs"
+license=('GPL-3.0-or-later')
+provides=("$_pkgname=$pkgver")
+conflicts=("$_pkgname")
+# The release binary is already stripped, and static.
+options=('!strip' '!debug')
+source=("LICENSE::$url/releases/download/v$pkgver/LICENSE")
+source_x86_64=("$_pkgname-$pkgver::$url/releases/download/v$pkgver/$_pkgname-$pkgver-$CARCH-linux-musl")
+sha256sums=('SKIP') # filled in by scripts/release.sh
+sha256sums_x86_64=('SKIP') # filled in by scripts/release.sh
+
+package() {
+    install -Dm755 "$_pkgname-$pkgver" "$pkgdir/usr/bin/$_pkgname"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

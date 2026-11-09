@@ -6,3 +6,15 @@ members = ["crates/crumbs-core", "crates/crumbs-cli"]
 edition = "2024"
 rust-version = "1.99"
 version = "0.1.0"
+license = "GPL-3.0-or-later"
+authors = ["asafelobotomy"]
+repository = "https://github.com/asafelobotomy/crumbs"
+homepage = "https://github.com/asafelobotomy/crumbs"
+description = "Find and remove app leftovers, caches and system bloat on Linux"
+
+# Every release artifact is built with this profile. `panic` stays `unwind`:
+# the MCP server turns a panic in a tool into an error and keeps serving.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,45 @@
+name: Release
+
+# Pushing a tag v<version> builds every artifact with scripts/release.sh and
+# publishes them as a GitHub release. The AUR files (with real checksums)
+# are kept as a workflow artifact for you to push to the AUR.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    env:
+      CARGO_TERM_COLOR: always
+      # No FUSE in the container: appimagetool runs extracted.
+      APPIMAGE_EXTRACT_AND_RUN: 1
+    steps:
+      - name: Install tools
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rustup python github-cli rpm-tools
+          rustup default 1.99.1
+          curl -fsSL -o /usr/local/bin/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /usr/local/bin/appimagetool
+      - uses: actions/checkout@v4
+      - name: Build the release
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          scripts/release.sh "${GITHUB_REF_NAME#v}"
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "crumBS ${GITHUB_REF_NAME#v}" --notes-file dist/RELEASE_NOTES.md \
+            dist/crumbs-* dist/crumbs_* dist/LICENSE dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aur
+          path: dist/aur/
+          include-hidden-files: true

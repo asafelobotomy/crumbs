@@ -1,0 +1,5 @@
+#!/bin/sh
+# The AppImage entry point. It prints nothing itself, so `crumbs mcp`
+# keeps a pure JSON-RPC stdout, and passes every argument through as is.
+HERE=${APPDIR:-$(dirname "$(readlink -f "$0")")}
+exec "$HERE/usr/bin/crumbs" "$@"

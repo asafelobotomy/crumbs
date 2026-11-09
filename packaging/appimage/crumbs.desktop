@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=crumBS
+Comment=Find and remove app leftovers, caches and system bloat
+Exec=crumbs
+Icon=crumbs
+Terminal=true
+Categories=System;Utility;
+Keywords=cleaner;uninstall;cache;leftovers;
