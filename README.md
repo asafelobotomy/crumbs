@@ -2,7 +2,7 @@
 
 crumBS is a Linux command-line tool that lists the apps installed on your system across pacman, Flatpak, AppImage and unmanaged `.desktop` sources, finds the files they leave behind, finds space you can reclaim (caches, the trash, old temporary files, logs, superseded AppImages), and moves the items you pick to the trash. It is pre-alpha software.
 
-**Status:** M4c: `crumbs mcp` serves crumbs to AI agents, with the user's confirmation for every change. M4b: `uninstall` fully removes pacman and Flatpak apps (and AppImages), and now also unmanaged apps by path; `uninstall` and `orphans --system` find system leftovers in `/etc` and `/opt`. `scan` and `clean` handle system bloat with `--system`, on top of M3's reclaimable space in your own files and M2's leftovers, orphans, history and restore. Everything that needs administrator rights runs in one batch behind one prompt. apt, dnf and Snap come later.
+**Status:** M4c: `crumbs mcp` serves crumbs to AI agents, with the user's confirmation for every change. M4b: `uninstall` fully removes pacman and Flatpak apps (and AppImages), and now also unmanaged apps by path; `uninstall` and `orphans --system` find system leftovers in `/etc` and `/opt`. `scan` and `clean` handle system bloat with `--system`, on top of M3's reclaimable space in your own files and M2's leftovers, orphans, history and restore. Everything that needs administrator rights runs in one batch behind one prompt. M5: Debian/Ubuntu (dpkg, apt), Fedora (rpm, dnf) and Snap work like Arch, checked in containers by `scripts/distro-check.sh`.
 
 ## Build
 
@@ -17,7 +17,7 @@ cargo build --release
 
 - `crumbs apps list [--source <source>] [--all] [--sort name|size] [--json]` lists installed apps.
 - `crumbs apps show <app> [--show-low] [--json]` shows one app and its leftovers, system leftovers in `/etc` and `/opt` included (marked `root`).
-- `crumbs uninstall <app>... [--leftovers-only] [--keep-data] [--show-low] [-i] [--dry-run] [--yes] [--permanent] [--force] [--json]` removes an app and its leftovers. pacman apps are removed with `pacman -Rn` (the exact package list its simulation printed, dependencies included; the preview shows `also removed: ...`), Flatpak apps with `flatpak uninstall` for their installation (user, system or a named one), AppImages by trashing the file. An unmanaged app (`unmanaged:<id>`) has its own files removed by path when that is unambiguous, and is otherwise refused with a reason (see "System leftovers and unmanaged apps"); `--leftovers-only` is the fallback. With `--leftovers-only` the app stays, and so do its launchers, icons and file-type associations. `--keep-data` keeps the app's settings and data and removes only its caches; when the AppImage file itself goes, its own launchers and icons go with it, so nothing is left pointing at a removed file. If the app is running, crumbs asks `<app> is running; continue anyway?` (without a terminal it refuses with exit 1; `--force` goes on). After `Proceed?` it checks running apps again: an app that started while you were answering makes the run refuse with exit 1, before anything changes.
+- `crumbs uninstall <app>... [--leftovers-only] [--keep-data] [--show-low] [-i] [--dry-run] [--yes] [--permanent] [--force] [--json]` removes an app and its leftovers. pacman apps are removed with `pacman -Rn` (the exact package list its simulation printed, dependencies included; the preview shows `also removed: ...`), Debian/Ubuntu packages with `apt-get purge -y --no-install-recommends <exact list>` after an `apt-get -s purge` simulation (never `autoremove`; a removal of an essential package is refused), Fedora packages with `dnf remove -y --setopt=clean_requirements_on_remove=False <exact list>` after `dnf remove --assumeno` (dnf5 and dnf4; protected packages are refused), snaps with `snap remove --purge`, Flatpak apps with `flatpak uninstall` for their installation (user, system or a named one), AppImages by trashing the file. An unmanaged app (`unmanaged:<id>`) has its own files removed by path when that is unambiguous, and is otherwise refused with a reason (see "System leftovers and unmanaged apps"); `--leftovers-only` is the fallback. With `--leftovers-only` the app stays, and so do its launchers, icons and file-type associations. `--keep-data` keeps the app's settings and data and removes only its caches; when the AppImage file itself goes, its own launchers and icons go with it, so nothing is left pointing at a removed file. If the app is running, crumbs asks `<app> is running; continue anyway?` (without a terminal it refuses with exit 1; `--force` goes on). After `Proceed?` it checks running apps again: an app that started while you were answering makes the run refuse with exit 1, before anything changes.
 - `crumbs orphans [--show-low] [--json]` lists per-user files that belong to no installed app.
 - `crumbs orphans --system [--show-low] [--json]` lists unowned directories directly under `/opt`; it never lists `/etc`.
 - `crumbs orphans --clean (--select <path>... | -i) [--dry-run] [--yes] ...` removes chosen orphans; with `--system` they are deleted as root. Nothing is removed unless you name it.
@@ -143,11 +143,11 @@ low   4.0 KiB  system-data  /opt/old-tool  not owned by any package and matched 
 
 Only these need them:
 
-- removing a pacman app (`pacman -Rn`), a system Flatpak app or a Flatpak app in a named installation;
+- removing a pacman, apt or dnf package, a snap, a system Flatpak app or a Flatpak app in a named installation;
 - the system categories (`clean --system`);
 - deleting a system file (a core dump) or a system leftover or unmanaged app under `/etc` or `/opt`.
 
-Removing a per-user Flatpak app, an AppImage, leftovers and every user category need none. A run that has such steps asks **once**: crumbs joins them into one script and runs it through `run0` (on systemd 256 or newer), else `pkexec`, else `sudo` (`sudo` only when it can ask on a terminal). The preview says `these steps run with administrator rights; you will be asked once`, and shows each command exactly as it will run. `--dry-run`, `scan` and `apps` never ask.
+Removing a per-user Flatpak app, an AppImage, leftovers and every user category need none. A run that has such steps asks **once**: crumbs joins them into one script and runs it through `run0` (on systemd 256 or newer), else `pkexec`, else `sudo` (`sudo` only when it can ask on a terminal). When crumbs already runs as root, the script runs with the system `sh` directly and nothing asks; per-user temp cleanup is then not offered (`unavailable (not available as root)`). The preview says `these steps run with administrator rights; you will be asked once`, and shows each command exactly as it will run. `--dry-run`, `scan` and `apps` never ask.
 
 Exit 5 means administrator rights were needed and nothing that needs them was changed. It has two causes, and crumbs prints the commands to run yourself in both:
 
@@ -293,6 +293,19 @@ Claude Desktop, in `claude_desktop_config.json`:
 ```
 
 `crumbs` must be on the client's `PATH`; otherwise give the full path as `command`. Without the `mcp` feature (`--no-default-features`) there is no `crumbs mcp`.
+
+## Supported systems
+
+| | Apps | Package removal | `pkg-cache` / `orphan-pkgs` |
+|---|---|---|---|
+| Arch, Manjaro | pacman (`/var/lib/pacman/local`) | `pacman -Rn` | `paccache` (or `pacman -Sc`) / `pacman -Qdtq` closure |
+| Debian, Ubuntu | dpkg (`/var/lib/dpkg/status`) | `apt-get purge` | `apt-get clean` / `apt-get -s autoremove --purge` list |
+| Fedora | rpm (`rpm -qa`) | `dnf remove` | `dnf clean packages` / `dnf autoremove --assumeno` list |
+| any | Flatpak, Snap, AppImage, unmanaged | `flatpak uninstall`, `snap remove --purge`, trash, by path | — |
+
+System leftovers and unmanaged-app removal under `/opt` use the package database that is present (pacman, then dpkg, then rpm). zypper and plain `rpm -e` are not supported yet.
+
+`scripts/distro-check.sh` builds and tests crumbs in rootless podman containers (`archlinux`, `debian:trixie`, `ubuntu`, `fedora`), runs read-only smoke tests and a real `crumbs uninstall sl` inside each container; the CI workflow runs the same script per image.
 
 ## Safety
 

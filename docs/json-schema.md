@@ -28,7 +28,7 @@ Within `schema_version` 1, fields may be **added**, never removed or renamed, an
 
 `errors[].source` is one of:
 
-- a source name: `pacman`, `flatpak`, `appimage`, `unmanaged` (that source failed; the others still ran);
+- a source name: `pacman`, `dpkg`, `rpm`, `flatpak`, `snap`, `appimage`, `unmanaged` (that source failed; the others still ran);
 - a category name (`scan` and `clean` only): that category's scanner failed, for example `flatpak-unused`;
 - `config` (a `config.toml` entry was dropped; the config file is never fatal because of this);
 - `rules` (a leftover rules file could not be used);
@@ -93,7 +93,7 @@ Commands that take an app accept an ID, a name, a desktop ID or a display name. 
 | `display_name` | string |
 | `version` | string or null |
 | `description` | string or null |
-| `source` | `pacman`, `flatpak`, `appimage` or `unmanaged` |
+| `source` | `pacman`, `dpkg`, `rpm`, `flatpak`, `snap`, `appimage` or `unmanaged` |
 | `installation` | `user`, `system`, or `custom:<name>` for a named Flatpak installation (for example `custom:extra`) |
 | `install_size` | number (bytes) or null |
 | `location` | string (in-system path) or null |
@@ -134,7 +134,7 @@ Each action is `{ "action", "size", "reason" }`, plus two optional fields. `acti
 - `edit-file` carries `path` and `remove_lines` (array of string; the file is edited and a backup is kept next to it);
 - `user-command` carries `program` and `args` (array of string). crumbs resolves `program` in the trusted system directories when it runs it, never through `$PATH`. It has no path and cannot be undone. `uninstall` plans one to remove a per-user Flatpak app; `clean` plans one for `flatpak-unused`.
 - `privileged-command` carries `program` and `args`, like `user-command`, but runs as root in the run's single privileged batch (see below). It has no path and cannot be undone. `uninstall` plans one to remove a system or custom-installation Flatpak app; `clean --system` plans them for most system categories.
-- `package-remove` carries `source` (`pacman`), `names` and `versions` (arrays of string, aligned: the app's package first, then every package pacman will remove with it), `program` and `args`. It runs as root in the privileged batch, has no path and cannot be undone by crumbs.
+- `package-remove` carries `source` (`pacman`, `dpkg` or `rpm`), `names` and `versions` (arrays of string, aligned: the app's package first, then every package the package manager's simulation will remove with it), `program` and `args`: `pacman -Rn --noconfirm <names>`, `apt-get purge -y --no-install-recommends <names>` or `dnf remove -y --setopt=clean_requirements_on_remove=False <names>`. A snap is removed by a `privileged-command` `snap remove --purge <name>`. It runs as root in the privileged batch, has no path and cannot be undone by crumbs.
 
 `size` is bytes (0 for `edit-file`, and 0 for a command or `package-remove` whose size is unknown; a `privileged-command` from `clean --system` carries the size its scan estimated, such as the package cache). A system-tree `delete` whose size could not be read (nothing counted) also has `size` 0; the human preview shows its size as `-` and the total as `will permanently delete N items (X + unknown)`. The JSON does not mark it.
 
@@ -271,7 +271,7 @@ The optional fields are left out when they have no value:
 
 ## `doctor`
 
-`data`: `crumbs_version` (string), `distro` (`{ id, id_like, name }`), `sources` (array of `{ source, available, app_count, skipped_reason }`), `escalation` (null, or `{ kind, program, requires_tty }` with `kind` one of `run0`, `pkexec`, `sudo`), `trash` (`{ path, exists, writable }`), `data_dirs` (array of string) and `errors` (array of `{ source, message }`, source failures; the envelope's `errors` also carries config notes). Apps found in the `appimage_dirs` of `config.toml` are counted. Exit 3 on partial failure. The human output ends with `privileged cleanup: available via <kind>`, or `unavailable` when there is no escalation program or only `sudo` without a terminal.
+`data`: `crumbs_version` (string), `distro` (`{ id, id_like, name }`), `sources` (array of `{ source, available, app_count, skipped_reason }`), `escalation` (null, or `{ kind, program, requires_tty }` with `kind` one of `run0`, `pkexec`, `sudo`, `already-root`), `trash` (`{ path, exists, writable }`), `data_dirs` (array of string) and `errors` (array of `{ source, message }`, source failures; the envelope's `errors` also carries config notes). Apps found in the `appimage_dirs` of `config.toml` are counted. Exit 3 on partial failure. The human output ends with `privileged cleanup: available via <kind>`, or `unavailable` when there is no escalation program or only `sudo` without a terminal.
 
 ```json
 {
@@ -660,14 +660,14 @@ With `--leftovers-only`, the plan leaves out what launches or opens the app: its
 | `restored` | number | Entries of this batch that a later successful restore put back. |
 | `entries` | array | History entries (below). |
 
-**History entry**: `id` (`<batch>-<index>`), `batch`, `time`, `action` (`trash`, `delete`, `edit-file`, `restore`, `command`, `privileged-command` or `package-remove`; lines written by earlier builds may say `edit_file`, which means the same), `path`, `trashed` (null, or `{ original, files_path, info_path }`), `backup` (string or null), `size` (number), `ok` (boolean), `error` (string or null), `app_id` (string or null), `restores` (string or null), `argv` (array of string; present on `command`, `privileged-command` and `package-remove` entries only), `packages` (array of `[name, version]` pairs; present on `package-remove` entries only) and `scope` (string; present only on a system delete: `system` or `system-tree`) and `kind` (string: `uninstall`, `orphans` or `clean`, the command that made the batch; absent on `restore` entries and on lines written by earlier builds).
+**History entry**: `id` (`<batch>-<index>`), `batch`, `time`, `action` (`trash`, `delete`, `edit-file`, `restore`, `command`, `privileged-command` or `package-remove`; lines written by earlier builds may say `edit_file`, which means the same), `path`, `trashed` (null, or `{ original, files_path, info_path }`), `backup` (string or null), `size` (number), `ok` (boolean), `error` (string or null), `app_id` (string or null), `restores` (string or null), `argv` (array of string; present on `command`, `privileged-command` and `package-remove` entries only), `packages` (array of `[name, version]` pairs; present on `package-remove` entries only), `source` (string: `pacman`, `dpkg` or `rpm`; present on `package-remove` entries; absent on lines written before M5, which were all pacman) and `scope` (string; present only on a system delete: `system` or `system-tree`) and `kind` (string: `uninstall`, `orphans` or `clean`, the command that made the batch; absent on `restore` entries and on lines written by earlier builds).
 
 - `trashed` is set for `trash` entries, and on `restore` entries it repeats the trash record that was restored.
 - On an `edit-file` entry, `backup` is the copy of the file as it was before the edit.
 - On a `restore` entry, `restores` is the ID of the entry it restored. For a restored `edit-file`, `backup` is the **pre-restore backup**: a copy of the file as it was just before the restore overwrote it. For other entries `backup` is null.
 - On a `command` entry (a `user-command` action that ran), `path` is the program's in-system path (or its bare name when it is not installed), `argv` its arguments, `size` 0, `trashed` and `backup` null. It cannot be restored.
 - A `privileged-command` entry is the same for a command that ran as root: `path` is the program's in-system path, `argv` its arguments, `size` the size the scan estimated (0 when unknown), `trashed` and `backup` null. It cannot be restored.
-- A `package-remove` entry records a package removal that ran as root: `path` is the package manager (`/usr/bin/pacman`), `argv` the exact arguments, `packages` the `[name, version]` of each package that is **gone** afterwards (empty when the removal failed or was denied; after a partial failure only what was removed). `crumbs restore` says `packages cannot be restored by crumbs`. A permanent `delete` of a system file (`coredumps`) is recorded as a `delete` entry, and so is a system-tree delete, with `scope` `system-tree`; both are root-owned deletes that `restore` refuses by name.
+- A `package-remove` entry records a package removal that ran as root: `path` is the package manager (`/usr/bin/pacman`, `/usr/bin/apt-get` or `/usr/bin/dnf`), `argv` the exact arguments, `packages` the `[name, version]` of each package that is **gone** afterwards (empty when the removal failed or was denied; after a partial failure only what was removed). `crumbs restore` says `packages cannot be restored by crumbs`. A permanent `delete` of a system file (`coredumps`) is recorded as a `delete` entry, and so is a system-tree delete, with `scope` `system-tree`; both are root-owned deletes that `restore` refuses by name.
 - Failed and skipped attempts are recorded too (`ok` false, `error` set). A denied escalation is recorded with `ok` false.
 - A batch made by `clean` has `app_id` null and `kind` `clean` on its entries, so `history` labels it `clean`.
 
@@ -757,7 +757,7 @@ Selectors are batch IDs, entry IDs or absolute original paths. `data`: `outcomes
 | `ok` | boolean | |
 | `error` | string or null | For example `already restored`, `no matching history entry`. On an `ok` outcome with an empty `entry_id` it is informational (below). |
 
-A batch selector restores the batch's successful `trash` and `edit-file` entries; `delete`, `command`, `privileged-command` and `package-remove` entries are skipped, since nothing of them can be put back (an entry ID names one anyway, and its outcome says `permanently deleted; cannot be restored`, `commands cannot be undone` or `packages cannot be restored by crumbs; reinstall with: pacman -S <app> && pacman -S --asdeps <deps>`, where the app is the one `app_id` names and the rest were removed with it; a removal that failed part-way still gives the commands for what it removed, prefixed with `the original removal only partly ran; `). A path selector names the newest successful trash entry for that path that has not been restored yet. `--dry-run` checks and reports without changing anything. A batch that exists but holds nothing that can be put back (it only deleted, ran commands or removed packages, or every trash entry in it failed) is not an error: its outcome is `ok: true`, `entry_id` empty, `path` the selector and `error` the informational text `nothing in this batch can be restored`. Consumers should key on `ok` together with `entry_id`: `ok` true with an empty `entry_id` means a recognised batch with nothing to restore, `ok` false with an empty `entry_id` means the selector matched nothing (`no matching history entry`).
+A batch selector restores the batch's successful `trash` and `edit-file` entries; `delete`, `command`, `privileged-command` and `package-remove` entries are skipped, since nothing of them can be put back (an entry ID names one anyway, and its outcome says `permanently deleted; cannot be restored`, `commands cannot be undone` or `packages cannot be restored by crumbs; reinstall with: <commands>`, where the commands depend on the entry's `source`: `pacman -S <app> && pacman -S --asdeps <deps>`, `apt-get install <app> && apt-get install <deps> && apt-mark auto <deps>`, or `dnf install <all>` (the app is the one `app_id` names and the rest were removed with it); a removal that failed part-way still gives the commands for what it removed, prefixed with `the original removal only partly ran; `). A path selector names the newest successful trash entry for that path that has not been restored yet. `--dry-run` checks and reports without changing anything. A batch that exists but holds nothing that can be put back (it only deleted, ran commands or removed packages, or every trash entry in it failed) is not an error: its outcome is `ok: true`, `entry_id` empty, `path` the selector and `error` the informational text `nothing in this batch can be restored`. Consumers should key on `ok` together with `entry_id`: `ok` true with an empty `entry_id` means a recognised batch with nothing to restore, `ok` false with an empty `entry_id` means the selector matched nothing (`no matching history entry`).
 
 Exit 0 when every outcome is `ok`; 2 when every outcome has an empty `entry_id` and none is `ok` (no selector matched any history entry); otherwise 3. So a nothing-restorable batch alone exits 0, and one together with an unknown selector exits 3.
 
@@ -807,7 +807,7 @@ Two further refusal texts, both with `ok` false and the entry's own `entry_id`:
 | `unknown_sizes` | number | Items whose size is unknown (`size` null). The real total is larger. |
 | `error` | string or null | Set when this category's scanner failed. `items` is then empty. |
 | `skipped` | boolean | `true` for a category that is switched off and was not named: it was not scanned. |
-| `unavailable` | string | Present only when the category cannot run on this system (for example `pacman not installed`). `items` is then empty and `error` null; this is not a failure and does not change the exit code. |
+| `unavailable` | string | Present only when the category cannot run on this system (for example `pacman, apt-get or dnf not installed`). `items` is then empty and `error` null; this is not a failure and does not change the exit code. |
 
 **BloatItem**
 
@@ -831,8 +831,8 @@ The internal fingerprint of an item is never serialized.
 
 | Category | Item | Action | Notes |
 |---|---|---|---|
-| `pkg-cache` | one item, `package cache (keep N versions)` | `privileged`: `paccache -rkN` | `N` is `pkg_cache_keep` (default 2); the size is `paccache -dkN`'s. Without `paccache` (pacman-contrib), `pacman -Sc --noconfirm` with an unknown size and a note. `unavailable` without pacman. |
-| `orphan-pkgs` | one item, `N orphaned packages`, the names in `note` | `privileged`: `pacman -Rn --noconfirm <names>` | Opt-in. The names are the closure of `pacman -Rs --print` over `pacman -Qdtq`, so exactly what was simulated goes. |
+| `pkg-cache` | one item, `package cache (keep N versions)` | `privileged`: `paccache -rkN`, `apt-get clean` or `dnf clean packages` | Uses the first of pacman, apt-get and dnf. pacman: `N` is `pkg_cache_keep` (default 2); the size is `paccache -dkN`'s; without `paccache` (pacman-contrib), `pacman -Sc --noconfirm` with an unknown size and a note. apt: the `.deb` files in `/var/cache/apt/archives`. dnf: the `.rpm` files under `/var/cache/libdnf5` (or `/var/cache/dnf`). `unavailable` without any of them. |
+| `orphan-pkgs` | one item, `N orphaned packages`, the names in `note` | `privileged`: `pacman -Rn --noconfirm <names>`, `apt-get purge -y --no-install-recommends <names>` or `dnf remove -y --setopt=clean_requirements_on_remove=False <names>` | Opt-in. The names are exactly what the simulation listed: the closure of `pacman -Rs --print` over `pacman -Qdtq`, `apt-get -s autoremove --purge`, or `dnf autoremove --assumeno` (size unknown on dnf). |
 | `journal` | one item, `systemd journal` | `privileged`: `journalctl --vacuum-size=<journal_max>` | Listed only when the journal is larger than `journal_max` (default `500M`); the size is the excess. |
 | `coredumps` | one item per `core.*` file in `/var/lib/systemd/coredump` | `delete` with `scope` `system` (run as `rm -f -- <path>` in the batch) | Regular files only, with every directory from `/` root-owned and not writable by others. `unavailable` without the directory. |
 | `system-temp` | one item, `stale system temporary files` | `privileged`: `systemd-tmpfiles --clean --prefix=/tmp --prefix=/var/tmp` | Size unknown: systemd decides by its age rules. |
@@ -1078,7 +1078,7 @@ The internal fingerprint of an item is never serialized.
 }
 ```
 
-On a system without pacman, `crumbs scan --category pkg-cache --json` lists the category as unavailable (not an error, exit 0):
+On a system without pacman, apt-get or dnf, `crumbs scan --category pkg-cache --json` lists the category as unavailable (not an error, exit 0):
 
 ```json
 {
@@ -1088,11 +1088,11 @@ On a system without pacman, `crumbs scan --category pkg-cache --json` lists the 
   "unknown_sizes": 0,
   "error": null,
   "skipped": false,
-  "unavailable": "pacman not installed"
+  "unavailable": "pacman, apt-get or dnf not installed"
 }
 ```
 
-and the table says `unavailable (pacman not installed)` in the note column.
+and the table says `unavailable (pacman, apt-get or dnf not installed)` in the note column. As root, `temp` is `unavailable` with `not available as root`.
 
 When a scanner fails, its category has `error` set and the exit code is 3. Here `flatpak` itself failed, so the Flatpak app source is reported as well:
 

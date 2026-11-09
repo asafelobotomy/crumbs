@@ -432,7 +432,7 @@ Each milestone gets its own implementation plan and ends in a working, tested CL
    - **4c. MCP server** — MCP server (`crumbs mcp`), spec
      `docs/superpowers/specs/2026-11-08-crumbs-mcp-design.md`; deferred items
      in `docs/superpowers/notes/2026-11-08-m4c-review-followups.md`. — done
-5. **Cross-distro** — dpkg, rpm, Snap sources; distro CI matrix.
+5. **Cross-distro** — dpkg, rpm, Snap sources; distro CI matrix. — done (apt and dnf removal and package categories; zypper and `rpm -e` deferred)
 6. **Packaging** — musl build, AppImage, AUR, deb, rpm, release workflow.
 
 The GUI follows as a separate spec once milestones 4 and 4b are complete.
