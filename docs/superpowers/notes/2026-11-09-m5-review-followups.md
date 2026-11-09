@@ -11,6 +11,8 @@ M5 left these out on purpose, or noticed them on the way. None of them is a know
 
 ## Known limits
 
+(The final review fixed the exact-list removal: root now runs `dpkg --purge` and `rpm -e`, which refuse rather than widen.)
+
 5. **rpm file names that are not valid UTF-8.** The `CommandRunner` returns text, so such a name fails the whole `rpm -qa` query. That disables rpm listing and system leftovers until the runner can return bytes. This fails closed.
 6. **Post-checks for snap removals.** Like system Flatpak removals (an M4 follow-up), these are judged by `snap`'s own exit status. `snap_still_installed` exists, but the executor post-checks only `package-remove` actions.
 7. **dnf orphan size.** The size of `orphan-pkgs` on dnf is unknown: dnf's table sizes are rounded and use mixed units.
@@ -21,3 +23,16 @@ M5 left these out on purpose, or noticed them on the way. None of them is a know
 
 10. **Not yet run on GitHub.** `.github/workflows/ci.yml` gained a `distro` matrix job running `scripts/distro-check.sh --inside`, but it has never run there, because the repo has no remote. The same script passed locally with podman for archlinux, debian:trixie, ubuntu and fedora.
 11. **Network.** The script installs rustup and the build tools in each container, so it needs network. The toolchain is cached in podman volumes (`crumbs-cargo-*`, `crumbs-rustup-*`, `crumbs-target-*`).
+
+## Deferred from the final review (minor)
+
+12. **Root preview wording.** A root run's preview still says "you will be asked once", though nothing asks.
+13. **Misplaced doc comment.** The comment for `not_installed` in `bloat/system/mod.rs` now sits on `PackageManager`.
+14. **Mixed systems.** `pkg-cache` and `orphan-pkgs` pick the first installed tool (pacman, then apt-get, then dnf), while ownership combines every database.
+15. **dpkg multiarch.** A package installed for two architectures becomes two apps with the same id, `dpkg:<name>`.
+16. **Content snaps.** Snaps such as `gtk-common-themes` are listed as GUI apps.
+17. **dnf multilib.** `foo.x86_64` and `foo.i686` show as one package with one version, and both are removed.
+18. **Dead code.** The snap branch of the reinstall hint is unreachable: snaps are a `privileged-command`, not a `package-remove`.
+19. **History source values.** A history line with an unknown future `source` value fails to deserialize as a whole.
+20. **Root test skips.** Some tests could assert the root behaviour instead of skipping, for example doctor's "running as root".
+21. **Half-installed fixture.** The dpkg fixture has no half-installed stanza.
