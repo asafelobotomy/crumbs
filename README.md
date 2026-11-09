@@ -36,7 +36,7 @@ cargo build --release
 - `crumbs history [--limit N] [--json]` lists past removals, newest first, each batch labelled with the app it uninstalled, `orphans`, `clean` or `restore`.
 - `crumbs restore <batch | entry | path>... [--dry-run] [--json]` puts items back. Restoring a batch skips what was permanently deleted, run as a command or removed as a package; naming such an entry by its ID says why it cannot come back.
 - `crumbs scan [--category <name>]... [--details] [--user | --system] [--json]` lists reclaimable space by category. `--system` lists the system categories instead. It only reads: it changes nothing, needs no administrator rights and writes no history. With `--details` every item is listed. Naming categories scans exactly those, even ones switched off in the config.
-- `crumbs clean [<category>...] [-i] [--dry-run] [--yes] [--permanent] [--force] [--user | --system] [--json]` frees the space `scan` found. With no category it cleans every enabled user category; `--system` cleans the system categories instead. Naming categories cleans exactly those, and naming a system category implies `--system`. `-i` opens a checklist over all items. `--user` with `--system`, or a category of the other kind, is a usage error (exit 2).
+- `crumbs clean [<category>...] [-i] [--exclude <pattern>]... [--dry-run] [--yes] [--permanent] [--force] [--user | --system] [--json]` frees the space `scan` found. With no category it cleans every enabled user category; `--system` cleans the system categories instead. Naming categories cleans exactly those, and naming a system category implies `--system`. `-i` opens a checklist over all items. `--exclude` leaves out what a pattern matches for this run, read exactly as `exclude` in the config (repeatable; it starts with `/` or `~/`), for example `crumbs clean cache --exclude '~/.cache/my-project'`. `--user` with `--system`, a category of the other kind, or an `--exclude` pattern that does not start with `/` or `~/`, is a usage error (exit 2).
 - `crumbs doctor [--json]` reports which sources and tools crumbs can use.
 - `crumbs mcp` serves crumbs to an AI agent over the Model Context Protocol on stdin and stdout (see "Using crumbs from an AI agent").
 
@@ -52,11 +52,11 @@ cargo build --release
 | `temp` | your own old files in `/tmp` | yes |
 | `browser-cache` | cache folders of Firefox, Chromium, Chrome, Brave and others, native and Flatpak | yes |
 | `dev-cache` | build-tool caches (cargo, npm, pip, go, gradle, ...) that the tool recreates | no |
-| `flatpak-unused` | Flatpak runtimes no installed app uses | yes, but only runs when named |
+| `flatpak-unused` | Flatpak runtimes no installed app uses, as Flatpak itself counts them (listed by name, or not at all when there are none) | yes, but only runs when named |
 | `appimage-old` | superseded AppImage versions (the newest, any version a launcher points at and any running one are kept) | yes |
 | `logs` | old `.log` files under `~/.local/state` | yes |
 
-An item whose app is running (a cache, a browser cache, an old AppImage) is listed but not selected, and says so. Emptying the trash cannot be undone, so a plain `crumbs clean` never plans it: name the category (`crumbs clean trash`) or tick it with `-i`.
+An item whose app is running (a cache, a browser cache, an old AppImage) is listed but not selected, and says so. `~/.cache` is not only caches, so a folder there is also listed but not selected when it holds a git working tree up to two levels down (`contains a git checkout (<where>)`; it is not counted as rebuildable either) or when a running process works inside it (`in use by cargo (pid 4242)`, its current directory is there). Other work kept in `~/.cache` has no such sign; leave it out with `--exclude` or `exclude` in the config. Emptying the trash cannot be undone, so a plain `crumbs clean` never plans it: name the category (`crumbs clean trash`) or tick it with `-i`.
 
 ### System categories
 
@@ -200,7 +200,9 @@ A removed package is recorded in `history`, but crumbs cannot restore packages; 
 
 ### Trash and freed space
 
-`clean` moves items to the freedesktop trash, the same as `uninstall`. A file in the trash still takes disk space until the trash is emptied, so `clean` says `moved 56.0 KiB to the trash`, not `freed`; `crumbs clean trash` empties the trash, and `--permanent` deletes everything straight away. The two exceptions are always permanent deletes, and the preview says so: `temp` (files in `/tmp`) and `trash` (emptying the trash). `flatpak-unused` runs `flatpak uninstall --user --unused`; Flatpak decides what goes, so crumbs can only report `freed space decided by flatpak`. That cannot be undone, and neither can a permanent delete; the closing `undo with: crumbs restore ...` line appears only when something restorable was trashed.
+`clean` moves items to the freedesktop trash, the same as `uninstall`. A file in the trash still takes disk space until the trash is emptied, so `clean` says `moved 56.0 KiB to the trash`, not `freed`; `crumbs clean trash` empties the trash, and `--permanent` deletes everything straight away. The two exceptions are always permanent deletes, and the preview says so: `temp` (files in `/tmp`) and `trash` (emptying the trash). `flatpak-unused` runs `flatpak uninstall --user --unused`; Flatpak decides what goes. When the disk is over 90% full, the preview says so instead of the usual trash note (`the disk is 97% full (9.4 GiB free): moving to the trash frees nothing until the trash is emptied; use --permanent to free the space now`).
+
+What a cleanup command frees is measured: crumbs sizes the folders it works on before and after it runs (the package cache for `paccache`, `pacman -Sc`, `apt-get clean` and `dnf clean`, the journal for `journalctl --vacuum-size`, `/tmp` and `/var/tmp` for `systemd-tmpfiles`, the Flatpak installation for `flatpak uninstall --unused`), shows it on the step (`✓ ran paccache -rk2 (freed 120.4 MiB)`) and counts it in `freed`. A folder that cannot be read whole (some of `/tmp` belongs to other users) is not measured, and the summary then says `plus space freed by <program>`. That cannot be undone, and neither can a permanent delete; the closing `undo with: crumbs restore ...` line appears only when something restorable was trashed.
 
 Example (a throwaway test tree):
 

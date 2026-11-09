@@ -401,7 +401,7 @@ Orphans are never `high`:
 - `null` on `--dry-run`, and in every error envelope;
 - otherwise an array aligned with `plans`, one entry per plan: `null` for a plan with no actions, else an ExecReport. When nothing at all is to be done, every entry is `null`.
 
-**ExecReport**: `batch` (string, the history batch ID), `freed` (number, bytes), `escalation_failed` (boolean) and `results` (array, one per planned action, same order): `{ action, ok, error, history_id }`. `action` is the planned action's `{ type, path, ... }`; `error` is string or null; `history_id` is the entry ID usable with `restore` (for a command it records the run, and there is nothing to restore).
+**ExecReport**: `batch` (string, the history batch ID), `freed` (number, bytes), `escalation_failed` (boolean) and `results` (array, one per planned action, same order): `{ action, ok, error, history_id, freed? }`. `action` is the planned action's `{ type, path, ... }`; `error` is string or null; `history_id` is the entry ID usable with `restore` (for a command it records the run, and there is nothing to restore). `freed` (number, bytes; present only when measured) is what a successful cleanup command freed: the drop in size of the folders it works on (the package cache for `paccache`, `pacman -Sc`, `apt-get clean` and `dnf clean`, `/var/log/journal` for `journalctl --vacuum-*`, each `--prefix` of `systemd-tmpfiles --clean`, the Flatpak installation for `flatpak uninstall --unused`), measured before and after it ran. It is absent when a folder could not be read whole; the report's `freed` then counts the plan's `size` for that action, as it does for every action without a measurement.
 
 `freed` is the sum of the `size` of every action that succeeded. As in M2 it counts bytes moved to the trash as well as bytes deleted: a trashed item still takes disk space until the trash is emptied. Read it as "removed from where it was", not as "returned to the filesystem". An action skipped because the action it `depends_on` failed has `ok` false and the `error` text `skipped: <path> was not removed`.
 
@@ -818,8 +818,8 @@ Two further refusal texts, both with `ok` false and the entry's own `entry_id`:
 | `label` | string | What to show: a name, a display path, or for a command what it does. |
 | `size` | number or null | Bytes. `null` when unknown. |
 | `rebuildable` | boolean | The owner recreates it on demand (caches). |
-| `preselected` | boolean | Whether `clean` includes it by default. `false` for an item held back (its app is running, see `note`) and for `flatpak-unused`, `trash`, `orphan-pkgs` and `flatpak-unused-system` items, which `clean` includes only when their category is named. |
-| `note` | string or null | Why it is held back (`Firefox is running`), or what to know (`deleted permanently (temporary file)`, `decided by flatpak`). |
+| `preselected` | boolean | Whether `clean` includes it by default. `false` for an item held back (its app is running, or for a `cache` item a git working tree inside it or a process working in it; see `note`) and for `flatpak-unused`, `trash`, `orphan-pkgs` and `flatpak-unused-system` items, which `clean` includes only when their category is named. |
+| `note` | string or null | Why it is held back (`Firefox is running`, `contains a git checkout (repo)`, `in use by cargo (pid 4242)`), or what to know (`deleted permanently (temporary file)`, `decided by flatpak`, or the refs a `flatpak-unused` item removes). |
 | `action` | string or object | `"trash"`, `"delete"`, `{ "command": { "program", "args" } }` (runs as the user) or `{ "privileged": { "program", "args" } }` (runs as root; `program` is a bare name that crumbs resolves in the trusted directories). |
 | `scope` | string | `home`, `user-temp`, `home-trash` or `system` (see the plan action's `scope`). Always present here. |
 | `extra_paths` | array of string | Further paths removed together with the item, for example the `.trashinfo` file of a trashed entry. Paths only: the safety fingerprints are internal and not shown. |
@@ -836,7 +836,7 @@ The internal fingerprint of an item is never serialized.
 | `journal` | one item, `systemd journal` | `privileged`: `journalctl --vacuum-size=<journal_max>` | Listed only when the journal is larger than `journal_max` (default `500M`); the size is the excess. |
 | `coredumps` | one item per `core.*` file in `/var/lib/systemd/coredump` | `delete` with `scope` `system` (run as `rm -f -- <path>` in the batch) | Regular files only, with every directory from `/` root-owned and not writable by others. `unavailable` without the directory. |
 | `system-temp` | one item, `stale system temporary files` | `privileged`: `systemd-tmpfiles --clean --prefix=/tmp --prefix=/var/tmp` | Size unknown: systemd decides by its age rules. |
-| `flatpak-unused-system` | one item, `unused Flatpak runtimes (system)` | `privileged`: `flatpak uninstall --system --unused -y --noninteractive` | Opt-in. Size unknown. |
+| `flatpak-unused-system` | one item, `N unused Flatpak runtimes (system)` with the refs (`id//branch`) in `note`, or none when Flatpak finds nothing unused | `privileged`: `flatpak uninstall --system --unused -y --noninteractive` | Opt-in. Size unknown. crumbs asks Flatpak first with `flatpak uninstall --system --unused` (no `-y`: Flatpak lists its plan and declines on its own, since its output is not a terminal; nothing is removed and no rights are needed). When Flatpak's answer is not understood, the item is `unused Flatpak runtimes (system)` with `decided by flatpak`, as before. The same holds for `flatpak-unused` with `--user`. |
 
 `errors` has one entry per failed scanner (`source` is the category name), then one per failed app source, then config notes. Exit 0, or 3 when a scanner failed (a failed app source alone does not change the exit code). Example (the fixture has a user Flatpak runtime, an old log, an old file in `/tmp` and two AppImage versions):
 
@@ -1437,7 +1437,7 @@ The four preview tools change nothing (`readOnlyHint: true`). A preview builds t
 | Tool | Arguments |
 |---|---|
 | `preview_uninstall` | `app`: string (required, exact match); `leftovers_only`, `keep_data`, `show_low`: boolean; `select`: array of paths |
-| `preview_clean` | `categories`: array of names; `user`, `system`: boolean; `select`: array of paths or category ids |
+| `preview_clean` | `categories`: array of names; `user`, `system`: boolean; `select`: array of paths or category ids; `exclude`: array of patterns, as `clean --exclude` (each starts with `/` or `~/`; otherwise the tool errs with exit code 2) |
 | `preview_orphans` | `paths`: array of absolute paths (required, at least one); `system`, `show_low`: boolean |
 | `preview_restore` | `entry`: string (required): a history entry id, a batch id or a path |
 
