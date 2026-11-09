@@ -26,7 +26,7 @@ anstream = "1.0.0"
 anstyle = "1.0.14"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "env"] }
-crumbs-core = { version = "0.2.0", path = "../crumbs-core" }
+crumbs-core = { version = "0.3.0", path = "../crumbs-core" }
 dialoguer = "0.12.0"
 rmcp = { version = "=3.9.0", optional = true, default-features = false, features = [
     "elicitation",
