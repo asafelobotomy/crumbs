@@ -6,7 +6,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::desktop::{DesktopEntry, exec_basename};
+use crate::desktop::DesktopEntry;
 use crate::env::Env;
 use crate::error::{CoreError, SourceError};
 use crate::model::{App, SourceKind};
@@ -15,7 +15,6 @@ use super::{AppSource, SourceContext, SourceListing};
 
 pub(crate) const STATUS: &str = "/var/lib/dpkg/status";
 pub(crate) const INFO_DIR: &str = "/var/lib/dpkg/info";
-const APPLICATIONS_DIR: &str = "/usr/share/applications/";
 const INSTALLED: &str = "install ok installed";
 
 pub struct DpkgSource;
@@ -171,35 +170,7 @@ impl AppSource for DpkgSource {
             app.version = st.version.clone();
             app.description = st.description.clone();
             app.install_size = st.installed_kib.map(|k| k * 1024);
-            let mut linked: Vec<&DesktopEntry> = Vec::new();
-            for f in &files {
-                let Some(rel) = f
-                    .strip_prefix(APPLICATIONS_DIR)
-                    .ok()
-                    .and_then(|r| r.to_str())
-                else {
-                    continue;
-                };
-                if !rel.ends_with(".desktop") {
-                    continue;
-                }
-                let id = rel.replace('/', "-");
-                if let Some(entry) = by_id.get(id.as_str()) {
-                    linked.push(entry);
-                    listing.claimed_desktop_ids.insert(id);
-                }
-            }
-            for e in &linked {
-                app.desktop_ids.push(e.id.clone());
-                app.exec_names.extend(exec_basename(e));
-                app.wm_classes.extend(e.wm_class.clone());
-            }
-            app.has_gui = linked
-                .iter()
-                .any(|e| e.is_application && !e.no_display && !e.hidden);
-            if let Some(n) = linked.first().and_then(|e| e.name.clone()) {
-                app.display_name = n;
-            }
+            super::link_desktop(&mut app, &files, &by_id, &mut listing.claimed_desktop_ids);
             listing.owned_paths.extend(files);
             if app.has_gui || cx.opts.include_all {
                 listing.apps.push(app);

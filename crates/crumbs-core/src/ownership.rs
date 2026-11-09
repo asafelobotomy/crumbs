@@ -96,11 +96,11 @@ pub fn load_package_db(
     env: &Env,
     runner: &dyn crate::command::CommandRunner,
 ) -> Result<Option<OwnedIndex>, CoreError> {
-    let _ = runner;
     match detect_package_db(env) {
         Some(PackageDb::Pacman) => load_pacman(env),
         Some(PackageDb::Dpkg) => load_dpkg(env),
-        Some(PackageDb::Rpm) | None => Ok(None),
+        Some(PackageDb::Rpm) => load_rpm(env, runner),
+        None => Ok(None),
     }
 }
 
@@ -111,6 +111,21 @@ pub fn load_dpkg(env: &Env) -> Result<Option<OwnedIndex>, CoreError> {
         return Ok(None);
     }
     let files = crate::sources::dpkg::owned_paths(env)?;
+    Ok(Some(OwnedIndex::new(files, Vec::<PathBuf>::new(), true)))
+}
+
+/// Every path the rpm database lists, from one `rpm -qa` query; `None`
+/// when `rpm` is not installed. A failed or undecodable query is an error.
+pub fn load_rpm(
+    env: &Env,
+    runner: &dyn crate::command::CommandRunner,
+) -> Result<Option<OwnedIndex>, CoreError> {
+    if crate::command::resolve_trusted(env, "rpm").is_none() {
+        return Ok(None);
+    }
+    let files = crate::sources::rpm::query(env, runner)?
+        .into_iter()
+        .flat_map(|p| p.files);
     Ok(Some(OwnedIndex::new(files, Vec::<PathBuf>::new(), true)))
 }
 

@@ -39,6 +39,7 @@ pub fn default_sources() -> Vec<Box<dyn AppSource>> {
     vec![
         Box::new(PacmanSource),
         Box::new(crate::sources::dpkg::DpkgSource),
+        Box::new(crate::sources::rpm::RpmSource),
         Box::new(FlatpakSource),
         Box::new(AppImageSource),
     ]
@@ -48,6 +49,7 @@ fn unavailable_reason(kind: SourceKind) -> &'static str {
     match kind {
         SourceKind::Pacman => "no pacman database",
         SourceKind::Dpkg => "no dpkg database",
+        SourceKind::Rpm => "rpm not installed",
         SourceKind::Flatpak => "not installed",
         _ => "not available",
     }
@@ -308,22 +310,27 @@ mod tests {
             [
                 SourceKind::Pacman,
                 SourceKind::Dpkg,
+                SourceKind::Rpm,
                 SourceKind::Flatpak,
                 SourceKind::AppImage,
                 SourceKind::Unmanaged
             ]
         );
         let counts: Vec<_> = inv.statuses.iter().map(|s| s.app_count).collect();
-        assert_eq!(counts, [1, 0, 0, 1, 1]);
+        assert_eq!(counts, [1, 0, 0, 0, 1, 1]);
         assert_eq!(
             inv.statuses[1].skipped_reason.as_deref(),
             Some("no dpkg database")
         );
         assert_eq!(
             inv.statuses[2].skipped_reason.as_deref(),
+            Some("rpm not installed")
+        );
+        assert_eq!(
+            inv.statuses[3].skipped_reason.as_deref(),
             Some("not installed")
         );
-        assert!(!inv.statuses[2].available);
+        assert!(!inv.statuses[3].available);
         let ids: Vec<_> = inv.apps.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(
             ids,
@@ -435,7 +442,7 @@ mod tests {
         assert_eq!(inv.errors[0].source, SourceKind::Flatpak);
         assert!(inv.apps.iter().any(|a| a.source == SourceKind::Pacman));
         assert!(inv.apps.iter().any(|a| a.source == SourceKind::AppImage));
-        assert!(inv.statuses[2].available);
+        assert!(inv.statuses[3].available);
     }
 
     #[test]
@@ -556,7 +563,7 @@ mod tests {
             &Config::default(),
         );
         let v = serde_json::to_value(&inv).unwrap();
-        assert_eq!(v["statuses"][4]["source"], "unmanaged");
+        assert_eq!(v["statuses"][5]["source"], "unmanaged");
         assert!(v["apps"].is_array());
     }
 

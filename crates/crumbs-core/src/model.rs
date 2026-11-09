@@ -8,6 +8,7 @@ use serde::Serialize;
 pub enum SourceKind {
     Pacman,
     Dpkg,
+    Rpm,
     Flatpak,
     #[serde(rename = "appimage")]
     AppImage,
@@ -19,6 +20,7 @@ impl SourceKind {
         match self {
             SourceKind::Pacman => "pacman",
             SourceKind::Dpkg => "dpkg",
+            SourceKind::Rpm => "rpm",
             SourceKind::Flatpak => "flatpak",
             SourceKind::AppImage => "appimage",
             SourceKind::Unmanaged => "unmanaged",
@@ -33,11 +35,12 @@ impl FromStr for SourceKind {
         match s {
             "pacman" => Ok(SourceKind::Pacman),
             "dpkg" => Ok(SourceKind::Dpkg),
+            "rpm" => Ok(SourceKind::Rpm),
             "flatpak" => Ok(SourceKind::Flatpak),
             "appimage" => Ok(SourceKind::AppImage),
             "unmanaged" => Ok(SourceKind::Unmanaged),
             other => Err(format!(
-                "unknown source '{other}' (expected pacman, dpkg, flatpak, appimage or unmanaged)"
+                "unknown source '{other}' (expected pacman, dpkg, rpm, flatpak, appimage or unmanaged)"
             )),
         }
     }
@@ -142,13 +145,15 @@ mod tests {
     fn source_kind_round_trips_from_str() {
         for kind in [
             SourceKind::Pacman,
+            SourceKind::Dpkg,
+            SourceKind::Rpm,
             SourceKind::Flatpak,
             SourceKind::AppImage,
             SourceKind::Unmanaged,
         ] {
             assert_eq!(kind.as_str().parse::<SourceKind>(), Ok(kind));
         }
-        assert!("rpm".parse::<SourceKind>().is_err());
+        assert!("zypper".parse::<SourceKind>().is_err());
     }
 
     #[test]
