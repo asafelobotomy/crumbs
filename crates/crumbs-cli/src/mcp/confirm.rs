@@ -56,6 +56,8 @@ pub(crate) enum Answer {
     TimedOut,
     /// The request itself failed (the client went away, an error reply).
     Failed(String),
+    /// The client turned out not to support form elicitation.
+    CannotAsk,
 }
 
 impl Answer {
@@ -65,7 +67,7 @@ impl Answer {
             Answer::Declined => Some("declined"),
             Answer::Cancelled => Some("cancelled"),
             Answer::TimedOut => Some("timed out"),
-            Answer::Confirmed | Answer::Failed(_) => None,
+            Answer::Confirmed | Answer::Failed(_) | Answer::CannotAsk => None,
         }
     }
 }
@@ -82,6 +84,7 @@ pub(crate) fn from_elicitation(result: Result<Option<Confirm>, ElicitationError>
         | Err(ElicitationError::ParseError { .. }) => Answer::Declined,
         Err(ElicitationError::UserCancelled) => Answer::Cancelled,
         Err(ElicitationError::Service(ServiceError::Timeout { .. })) => Answer::TimedOut,
+        Err(ElicitationError::CapabilityNotSupported) => Answer::CannotAsk,
         Err(e) => Answer::Failed(e.to_string()),
     }
 }
@@ -208,6 +211,10 @@ mod tests {
         assert_eq!(
             from_elicitation(Err(ElicitationError::Service(timeout))),
             Answer::TimedOut
+        );
+        assert_eq!(
+            from_elicitation(Err(ElicitationError::CapabilityNotSupported)),
+            Answer::CannotAsk
         );
         assert!(matches!(
             from_elicitation(Err(ElicitationError::Service(

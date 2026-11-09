@@ -15,7 +15,7 @@ use crumbs_core::testing::FixtureTree;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ClientCapabilities, ClientConfig,
     ElicitRequestParams, ElicitResult, ElicitationAction, InputResponses,
-    LoggingMessageNotificationParam, ProtocolVersion,
+    LoggingMessageNotificationParam, ProtocolVersion, RequestMetaObject,
 };
 use rmcp::service::{
     ClientLifecycleMode, ClientServiceExt, NotificationContext, RequestContext, RunningService,
@@ -55,6 +55,8 @@ pub(crate) enum Answer {
     Cancel,
     /// Never answers.
     Never,
+    /// Answers with an error instead of a result.
+    Error,
 }
 
 impl Answer {
@@ -112,6 +114,9 @@ impl ClientHandler for Asker {
             Answer::Decline => ElicitResult::new(ElicitationAction::Decline),
             Answer::Cancel => ElicitResult::new(ElicitationAction::Cancel),
             Answer::Never => std::future::pending().await,
+            Answer::Error => {
+                return Err(ErrorData::internal_error("the client broke", None));
+            }
         })
     }
 
@@ -239,6 +244,24 @@ impl<C: ClientHandler + Clone> Connected<C> {
         }
         self.client
             .call_tool_once(params)
+            .await
+            .unwrap_or_else(|e| panic!("{tool}: {e}"))
+    }
+
+    /// Calls `tool` with `arguments` and the request `_meta` `meta`.
+    pub(crate) async fn call_with_meta(
+        &self,
+        tool: &'static str,
+        arguments: Value,
+        meta: RequestMetaObject,
+    ) -> CallToolResult {
+        let Value::Object(arguments) = arguments else {
+            panic!("arguments must be an object: {arguments}");
+        };
+        let mut params = CallToolRequestParams::new(tool).with_arguments(arguments);
+        params.meta = Some(meta);
+        self.client
+            .call_tool(params)
             .await
             .unwrap_or_else(|e| panic!("{tool}: {e}"))
     }

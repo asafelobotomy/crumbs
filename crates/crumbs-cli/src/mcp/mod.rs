@@ -137,6 +137,14 @@ mod tests {
             ]
         );
         for tool in &tools {
+            // One paragraph each: a client shows it as it is.
+            let description = tool.description.as_deref().unwrap_or_default();
+            assert!(!description.is_empty(), "{}", tool.name);
+            assert!(
+                !description.contains('\n'),
+                "{}: {description:?}",
+                tool.name
+            );
             let a = tool.annotations.as_ref();
             let read_only = a.and_then(|a| a.read_only_hint);
             let destructive = a.and_then(|a| a.destructive_hint);

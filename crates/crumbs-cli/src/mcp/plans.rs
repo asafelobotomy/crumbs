@@ -61,6 +61,9 @@ pub(crate) struct StoredPlan {
     /// `InputRequiredResult`: made by the server when the plan is stored,
     /// so an answer counts only under the key this server issued.
     pub confirm_key: String,
+    /// The server has returned the `InputRequiredResult` that asks for
+    /// this plan's confirmation: only then can a retry answer it.
+    pub asked: bool,
 }
 
 /// Why [`PlanStore::insert`] did not store a plan.
@@ -93,6 +96,7 @@ impl PlanStore {
         if self.plans.len() >= MAX_PLANS {
             return Err(InsertError::Full);
         }
+        plan.asked = false;
         plan.confirm_key = format!("confirm-{}", PlanId::generate().map_err(InsertError::Id)?.0);
         loop {
             let id = PlanId::generate().map_err(InsertError::Id)?;
@@ -105,6 +109,17 @@ impl PlanStore {
 
     pub(crate) fn peek(&self, id: &PlanId) -> Option<&StoredPlan> {
         self.plans.get(id)
+    }
+
+    /// Records that the server asked for `id`'s confirmation; false when
+    /// there is no such plan.
+    pub(crate) fn mark_asked(&mut self, id: &PlanId) -> bool {
+        self.plans.get_mut(id).map(|p| p.asked = true).is_some()
+    }
+
+    /// Puts back a plan taken out under `id`, as it was (no new id or key).
+    pub(crate) fn put_back(&mut self, id: PlanId, plan: StoredPlan) {
+        self.plans.insert(id, plan);
     }
 
     /// Removes the plan: it can be used once.
@@ -141,6 +156,7 @@ mod tests {
             cli_command: Vec::new(),
             expires_at,
             confirm_key: String::new(),
+            asked: false,
         }
     }
 

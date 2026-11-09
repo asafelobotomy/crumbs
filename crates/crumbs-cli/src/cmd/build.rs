@@ -32,9 +32,6 @@ pub struct Built {
     pub errors: Vec<ErrorEntry>,
     /// Extra `note:` lines of the human preview.
     pub after_preview: Vec<String>,
-    /// Every finding the request could pick from with `select`.
-    #[allow(dead_code, reason = "used by the mcp module in a later task")]
-    pub selectable: Vec<Finding>,
     /// The argv of the equivalent CLI command.
     #[cfg_attr(
         not(feature = "mcp"),
@@ -273,7 +270,6 @@ pub fn restore(env: &Env, selectors: &[String]) -> Result<(Built, Vec<RestoreOut
         targets: Vec::new(),
         errors: notes,
         after_preview: Vec::new(),
-        selectable: Vec::new(),
         cli_command,
     };
     Ok((built, outcomes))
@@ -495,7 +491,6 @@ mod tests {
             .filter_map(|a| a.action.path())
             .collect();
         assert_eq!(paths, [Path::new("/home/user/.cache/inky")]);
-        assert!(built.selectable.len() > 1);
         assert_eq!(built.cli_command.last().map(String::as_str), Some("-i"));
     }
 

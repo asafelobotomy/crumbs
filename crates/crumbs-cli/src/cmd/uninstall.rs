@@ -190,7 +190,6 @@ pub(crate) fn build(env: &Env, args: &UninstallArgs, pick: Pick<PathBuf>) -> Res
         targets,
         errors: cx.errors(),
         after_preview: unselected_note(unselected_system),
-        selectable,
         cli_command: cli_command(args, &pick),
     };
     Ok(Draft {

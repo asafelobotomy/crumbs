@@ -8,14 +8,14 @@
 
 use crumbs_core::Env;
 use rmcp::model::{CallToolResponse, CallToolResult, InputResponses};
-use rmcp::service::RequestContext;
+use rmcp::service::{ElicitationMode, RequestContext};
 use rmcp::{ErrorData as McpError, Peer, RoleServer};
 use serde_json::{Value, json};
 
 use super::confirm::{self, Answer, Confirm, PLAN_NOT_FOUND};
 use super::plans::{PlanId, PlanPayload, StoredPlan};
 use super::server::{PrivilegeFor, Server};
-use super::tools::{refusal_result, shell_line};
+use super::tools::{crumbs_stopped, refusal_result, shell_line};
 use crate::cmd::act::{
     self, AllowedRunning, BATCH_STOPPED, EXIT_NO_RIGHTS, NO_RIGHTS, NOT_GRANTED, NOTE_CHECK_MOUNTS,
     TREE_RM_WORDS, Target,
@@ -51,30 +51,53 @@ fn refused(code: u8, msg: impl Into<String>) -> CallToolResponse {
 const NOT_THIS_CONFIRMATION: &str =
     "that is not the answer to this plan's confirmation; nothing was run";
 
+/// What a client that cannot confirm is told, and the plan it keeps.
+struct NoAsk {
+    line: String,
+    interactive: bool,
+}
+
+impl NoAsk {
+    fn result(&self) -> CallToolResult {
+        refusal_result(&Refusal::new(
+            2,
+            confirm::cannot_confirm(&self.line, self.interactive),
+        ))
+    }
+}
+
 impl Server {
     pub(super) async fn apply_plan(&self, call: Call) -> Result<CallToolResponse, McpError> {
         self.purge_plans();
         let Some(id) = PlanId::parse(&call.plan_id) else {
             return Ok(refused(2, PLAN_NOT_FOUND));
         };
-        let (line, interactive, preview_text, confirm_key) = {
+        let (no_ask, preview_text, confirm_key) = {
             let plans = self.plans();
             let Some(plan) = plans.peek(&id) else {
                 return Ok(refused(2, PLAN_NOT_FOUND));
             };
-            (
-                shell_line(&plan.cli_command),
-                plan.cli_command.last().is_some_and(|a| a == "-i"),
-                plan.preview_text.clone(),
-                plan.confirm_key.clone(),
-            )
+            let no_ask = NoAsk {
+                line: shell_line(&plan.cli_command),
+                interactive: plan.cli_command.last().is_some_and(|a| a == "-i"),
+            };
+            (no_ask, plan.preview_text.clone(), plan.confirm_key.clone())
         };
         let ctx = &call.context;
         if !confirm::supports_form(ctx.client_capabilities().as_ref()) {
-            return Ok(refused(2, confirm::cannot_confirm(&line, interactive)));
+            return Ok(no_ask.result().into());
         }
         if !confirm::uses_input_required(ctx.protocol_version().as_ref()) {
-            return self.apply_elicited(&ctx.peer, &id).await.map(Into::into);
+            // The request's capabilities and the handshake's must both
+            // allow a form, or `elicitation/create` is never sent.
+            let modes = ctx.peer.supported_elicitation_modes();
+            if !modes.contains(&ElicitationMode::Form) {
+                return Ok(no_ask.result().into());
+            }
+            return self
+                .apply_elicited(&ctx.peer, id, &no_ask)
+                .await
+                .map(Into::into);
         }
         let Call {
             request_state,
@@ -83,11 +106,18 @@ impl Server {
         } = call;
         match (request_state, input_responses) {
             // The first round: ask, and keep the plan until the answer.
-            (None, None) => match confirm::input_required(id.as_str(), &confirm_key, &preview_text)
-            {
-                Ok(ask) => Ok(ask.into()),
-                Err(e) => Ok(refused(1, format!("cannot ask for confirmation: {e}"))),
-            },
+            (None, None) => {
+                let ask = match confirm::input_required(id.as_str(), &confirm_key, &preview_text) {
+                    Ok(ask) => ask,
+                    Err(e) => {
+                        return Ok(refused(1, format!("cannot ask for confirmation: {e}")));
+                    }
+                };
+                if !self.plans().mark_asked(&id) {
+                    return Ok(refused(2, PLAN_NOT_FOUND));
+                }
+                Ok(ask.into())
+            }
             (Some(state), Some(responses)) if state == id.as_str() => {
                 let Some(response) = responses.get(&confirm_key) else {
                     return Ok(refused(2, NOT_THIS_CONFIRMATION));
@@ -95,7 +125,17 @@ impl Server {
                 let answer = confirm::from_input_response(response);
                 let _running = self.apply_lock.lock().await;
                 self.purge_plans();
-                let Some(plan) = self.plans().take(&id) else {
+                let plan = {
+                    let mut plans = self.plans();
+                    match plans.peek(&id) {
+                        None => return Ok(refused(2, PLAN_NOT_FOUND)),
+                        // An answer to a question this server never sent.
+                        Some(p) if !p.asked => return Ok(refused(2, NOT_THIS_CONFIRMATION)),
+                        Some(_) => {}
+                    }
+                    plans.take(&id)
+                };
+                let Some(plan) = plan else {
                     return Ok(refused(2, PLAN_NOT_FOUND));
                 };
                 self.finish(&call.context.peer, plan, answer)
@@ -112,11 +152,12 @@ impl Server {
     async fn apply_elicited(
         &self,
         peer: &Peer<RoleServer>,
-        id: &PlanId,
+        id: PlanId,
+        no_ask: &NoAsk,
     ) -> Result<CallToolResult, McpError> {
         let _running = self.apply_lock.lock().await;
         self.purge_plans();
-        let Some(plan) = self.plans().take(id) else {
+        let Some(plan) = self.plans().take(&id) else {
             return Ok(refusal_result(&Refusal::new(2, PLAN_NOT_FOUND)));
         };
         let asked = peer
@@ -125,33 +166,44 @@ impl Server {
                 Some(self.confirm_timeout),
             )
             .await;
-        self.finish(peer, plan, confirm::from_elicitation(asked))
-            .await
+        let answer = confirm::from_elicitation(asked);
+        if answer == Answer::CannotAsk {
+            // Nothing was asked: the plan stays, as when the capability
+            // check refuses.
+            self.plans().put_back(id, plan);
+            return Ok(no_ask.result());
+        }
+        self.finish(peer, plan, answer).await
     }
 
-    /// Runs `plan` when `answer` is the user's yes; otherwise says why not.
+    /// Runs `plan` when `answer` is the user's yes; any other answer,
+    /// including one a later version adds, runs nothing.
     async fn finish(
         &self,
         peer: &Peer<RoleServer>,
         plan: StoredPlan,
         answer: Answer,
     ) -> Result<CallToolResult, McpError> {
-        if let Some(reason) = answer.reason() {
-            return Ok(CallToolResult::structured(
-                json!({ "applied": false, "reason": reason }),
-            ));
-        }
-        if let Answer::Failed(e) = answer {
-            return Ok(refusal_result(&Refusal::new(
-                1,
-                format!("the confirmation failed: {e}; nothing was run"),
-            )));
+        match answer {
+            Answer::Confirmed => {}
+            Answer::Failed(e) => {
+                return Ok(refusal_result(&Refusal::new(
+                    1,
+                    format!("the confirmation failed: {e}; nothing was run"),
+                )));
+            }
+            other => {
+                let reason = other.reason().unwrap_or("declined");
+                return Ok(CallToolResult::structured(
+                    json!({ "applied": false, "reason": reason }),
+                ));
+            }
         }
         let env = self.env.clone();
         let privilege = self.privilege.clone();
         let outcome = tokio::task::spawn_blocking(move || run(&env, &privilege, plan.payload))
             .await
-            .map_err(|e| McpError::internal_error(format!("crumbs stopped: {e}"), None))?;
+            .map_err(|e| crumbs_stopped(&e))?;
         Ok(match outcome {
             Ok((data, is_error, warnings)) => {
                 self.log.warn(peer, &warnings).await;
@@ -204,8 +256,10 @@ fn run_plans(env: &Env, privilege: &PrivilegeFor, targets: &[Target]) -> RunOutc
     let reports = &outcome.reports;
     if outcome.exit_code == EXIT_NO_RIGHTS {
         let not_granted = reports.iter().flatten().any(|r| r.escalation_failed);
+        // `applied` says whether anything ran: after a denied prompt the
+        // user's own files were already handled.
         let mut data = json!({
-            "applied": false,
+            "applied": !reports.is_empty(),
             "exit_code": EXIT_NO_RIGHTS,
             "error": if not_granted { NOT_GRANTED } else { NO_RIGHTS },
             "manual_commands": outcome.manual_commands,

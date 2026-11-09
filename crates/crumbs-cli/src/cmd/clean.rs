@@ -164,7 +164,6 @@ pub(crate) fn build(env: &Env, args: &CleanArgs, pick: Pick<String>) -> Result<D
         targets,
         errors,
         after_preview: Vec::new(),
-        selectable: Vec::new(),
         cli_command: cli_command(args, &which, pick),
     };
     Ok(Draft {

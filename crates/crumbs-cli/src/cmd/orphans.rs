@@ -121,7 +121,6 @@ pub(crate) fn build_clean(
     } else {
         plannable(find_orphans(&cx.idx, args.show_low))
     };
-    let selectable = orphans.clone();
     let mut wanted = Vec::new();
     let chosen = match select {
         None => choose(
@@ -207,7 +206,6 @@ pub(crate) fn build_clean(
         targets,
         errors: cx.errors(),
         after_preview: Vec::new(),
-        selectable,
         cli_command,
     };
     Ok(Draft {

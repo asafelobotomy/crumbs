@@ -112,8 +112,9 @@ struct Server {
     /// Every stdout line so far.
     seen: Vec<String>,
     next_id: u64,
-    /// The result sent back for every `elicitation/create`.
-    elicit_answer: Value,
+    /// The result sent back for every `elicitation/create`; `None`: never
+    /// answered.
+    elicit_answer: Option<Value>,
     /// The message of each `elicitation/create` received.
     asked: Vec<String>,
 }
@@ -151,7 +152,7 @@ impl Server {
             lines,
             seen: Vec::new(),
             next_id: 1,
-            elicit_answer: json!({ "action": "decline" }),
+            elicit_answer: Some(json!({ "action": "decline" })),
             asked: Vec::new(),
         };
         let init = server.request(
@@ -192,8 +193,9 @@ impl Server {
             if v["method"] == "elicitation/create" {
                 let message = v["params"]["message"].as_str().unwrap_or_default();
                 self.asked.push(message.to_string());
-                let answer = self.elicit_answer.clone();
-                self.send(&json!({ "jsonrpc": "2.0", "id": v["id"], "result": answer }));
+                if let Some(answer) = self.elicit_answer.clone() {
+                    self.send(&json!({ "jsonrpc": "2.0", "id": v["id"], "result": answer }));
+                }
                 continue;
             }
             if v.get("method").is_none() && v["id"] == json!(id) {
@@ -318,7 +320,7 @@ fn preview_and_apply(server: &mut Server, select: &[&str]) -> Value {
         .as_str()
         .unwrap()
         .to_string();
-    server.elicit_answer = json!({ "action": "accept", "content": { "confirm": true } });
+    server.elicit_answer = Some(json!({ "action": "accept", "content": { "confirm": true } }));
     let r = server.call("apply", json!({ "plan_id": id }));
     assert_eq!(server.asked.len(), 1, "{:?}", server.asked);
     assert!(server.asked[0].ends_with("\n\nApply this plan?"));
@@ -453,4 +455,36 @@ fn privileged_plan_uses_one_batch_and_dev_null_stdin() {
     );
     let rm = std::fs::read_to_string(t.dir.path().join("rm-args")).unwrap();
     assert_eq!(rm.lines().count(), 2, "{rm}");
+}
+
+#[test]
+fn unanswered_confirmation_times_out_over_stdio() {
+    let t = fixture();
+    with_inky_system(&t);
+    // Set on the child only: the test process's environment is untouched.
+    let mut server = Server::start_with(
+        &t,
+        &[("CRUMBS_TEST_CONFIRM_TIMEOUT_MS", "200")],
+        json!({ "elicitation": {} }),
+    );
+    server.elicit_answer = None;
+    for round in 1..=2 {
+        let r = server.call(
+            "preview_uninstall",
+            json!({ "app": "inky", "leftovers_only": true }),
+        );
+        let id = r["structuredContent"]["plan_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let r = server.call("apply", json!({ "plan_id": id }));
+        assert_eq!(
+            r["structuredContent"],
+            json!({ "applied": false, "reason": "timed out" }),
+            "round {round}: {r}"
+        );
+        assert_eq!(server.asked.len(), round);
+    }
+    assert!(t.dir.path().join("home/user/.cache/inky/blob").exists());
+    server.finish();
 }

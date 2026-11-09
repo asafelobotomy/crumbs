@@ -172,6 +172,12 @@ pub(crate) fn refusal_result(r: &Refusal) -> CallToolResult {
     result
 }
 
+/// The error for a blocking task that never finished (it panicked or was
+/// cancelled), its text sanitised.
+pub(super) fn crumbs_stopped(e: &dyn std::fmt::Display) -> McpError {
+    McpError::internal_error(sanitise(&format!("crumbs stopped: {e}")), None)
+}
+
 /// Flags for a preview: it only plans.
 fn dry_run_flags() -> ActFlags {
     ActFlags {
@@ -275,7 +281,7 @@ impl Server {
         let env = self.env.clone();
         let outcome = tokio::task::spawn_blocking(move || f(&env))
             .await
-            .map_err(|e| McpError::internal_error(format!("crumbs stopped: {e}"), None))?;
+            .map_err(|e| crumbs_stopped(&e))?;
         let preview = match outcome {
             Ok(p) => p,
             Err(refusal) => {
@@ -310,6 +316,7 @@ impl Server {
                 cli_command,
                 expires_at,
                 confirm_key: String::new(),
+                asked: false,
             };
             match self.plans().insert(stored) {
                 Ok(id) => {
@@ -337,7 +344,7 @@ impl Server {
         let env = self.env.clone();
         let outcome = tokio::task::spawn_blocking(move || f(&env))
             .await
-            .map_err(|e| McpError::internal_error(format!("crumbs stopped: {e}"), None))?;
+            .map_err(|e| crumbs_stopped(&e))?;
         Ok(match outcome {
             Ok((data, errors)) => {
                 self.log.warn(&peer, &errors).await;
@@ -353,14 +360,18 @@ impl Server {
 
 #[tool_router(vis = "pub(super)")]
 impl Server {
-    /// Which sources and tools crumbs can use: the data of `crumbs doctor --json`.
-    #[tool(annotations(read_only_hint = true))]
+    #[tool(
+        description = "Which sources and tools crumbs can use: the data of `crumbs doctor --json`.",
+        annotations(read_only_hint = true)
+    )]
     async fn doctor(&self, peer: Peer<RoleServer>) -> Result<CallToolResult, McpError> {
         self.read(peer, build::doctor_data).await
     }
 
-    /// The installed apps: the data of `crumbs apps list --json`.
-    #[tool(annotations(read_only_hint = true))]
+    #[tool(
+        description = "The installed apps: the data of `crumbs apps list --json`.",
+        annotations(read_only_hint = true)
+    )]
     async fn apps_list(
         &self,
         Parameters(p): Parameters<AppsListParams>,
@@ -373,9 +384,11 @@ impl Server {
         .await
     }
 
-    /// One app and its leftovers (confidence, size, reason, scope): the
-    /// data of `crumbs apps show <app> --json`.
-    #[tool(annotations(read_only_hint = true))]
+    #[tool(
+        description = "One app and its leftovers (confidence, size, reason, scope): the data of \
+        `crumbs apps show <app> --json`.",
+        annotations(read_only_hint = true)
+    )]
     async fn app_show(
         &self,
         Parameters(p): Parameters<AppShowParams>,
@@ -387,9 +400,10 @@ impl Server {
         .await
     }
 
-    /// Reclaimable space by category: the data of `crumbs scan --json`.
-    /// Read-only.
-    #[tool(annotations(read_only_hint = true))]
+    #[tool(
+        description = "Reclaimable space by category: the data of `crumbs scan --json`. Read-only.",
+        annotations(read_only_hint = true)
+    )]
     async fn scan(
         &self,
         Parameters(p): Parameters<ScanParams>,
@@ -408,9 +422,10 @@ impl Server {
         .await
     }
 
-    /// Files that belong to no installed app: the data of `crumbs orphans
-    /// --json`.
-    #[tool(annotations(read_only_hint = true))]
+    #[tool(
+        description = "Files that belong to no installed app: the data of `crumbs orphans --json`.",
+        annotations(read_only_hint = true)
+    )]
     async fn orphans(
         &self,
         Parameters(p): Parameters<OrphansParams>,
@@ -433,9 +448,10 @@ impl Server {
         .await
     }
 
-    /// Past removals, newest batch first: the data of `crumbs history
-    /// --json`.
-    #[tool(annotations(read_only_hint = true))]
+    #[tool(
+        description = "Past removals, newest batch first: the data of `crumbs history --json`.",
+        annotations(read_only_hint = true)
+    )]
     async fn history(
         &self,
         Parameters(p): Parameters<HistoryParams>,
@@ -445,10 +461,11 @@ impl Server {
             .await
     }
 
-    /// What uninstalling an app (or only its leftovers) would remove: the
-    /// plan, a `plan_id` for `apply`, and the preview the CLI shows.
-    /// Changes nothing.
-    #[tool(annotations(read_only_hint = true))]
+    #[tool(
+        description = "What uninstalling an app (or only its leftovers) would remove: the plan, a \
+        `plan_id` for `apply`, and the preview the CLI shows. Changes nothing.",
+        annotations(read_only_hint = true)
+    )]
     async fn preview_uninstall(
         &self,
         Parameters(p): Parameters<PreviewUninstallParams>,
@@ -469,10 +486,11 @@ impl Server {
         .await
     }
 
-    /// What cleaning categories (caches, logs, ...) would remove: the
-    /// plan, a `plan_id` for `apply`, and the preview the CLI shows.
-    /// Changes nothing.
-    #[tool(annotations(read_only_hint = true))]
+    #[tool(
+        description = "What cleaning categories (caches, logs, ...) would remove: the plan, a \
+        `plan_id` for `apply`, and the preview the CLI shows. Changes nothing.",
+        annotations(read_only_hint = true)
+    )]
     async fn preview_clean(
         &self,
         Parameters(p): Parameters<PreviewCleanParams>,
@@ -492,9 +510,11 @@ impl Server {
         .await
     }
 
-    /// What removing the named orphans would do: the plan, a `plan_id`
-    /// for `apply`, and the preview the CLI shows. Changes nothing.
-    #[tool(annotations(read_only_hint = true))]
+    #[tool(
+        description = "What removing the named orphans would do: the plan, a `plan_id` for `apply`, \
+        and the preview the CLI shows. Changes nothing.",
+        annotations(read_only_hint = true)
+    )]
     async fn preview_orphans(
         &self,
         Parameters(p): Parameters<PreviewOrphansParams>,
@@ -516,9 +536,11 @@ impl Server {
         .await
     }
 
-    /// What restoring a history entry, batch or path would put back: a
-    /// `plan_id` for `apply` and the list the CLI shows. Changes nothing.
-    #[tool(annotations(read_only_hint = true))]
+    #[tool(
+        description = "What restoring a history entry, batch or path would put back: a `plan_id` for \
+        `apply` and the list the CLI shows. Changes nothing.",
+        annotations(read_only_hint = true)
+    )]
     async fn preview_restore(
         &self,
         Parameters(p): Parameters<PreviewRestoreParams>,
@@ -556,16 +578,18 @@ impl Server {
         .await
     }
 
-    /// Runs a previewed plan, once, after the user confirms it in the
-    /// client: the client shows the user the plan's preview and asks
-    /// "Apply this plan?". Nothing runs without that yes. Returns the
-    /// execution report, as the CLI's `--json` output has it.
-    #[tool(annotations(
-        read_only_hint = false,
-        destructive_hint = true,
-        idempotent_hint = false,
-        open_world_hint = false
-    ))]
+    #[tool(
+        description = "Runs a previewed plan, once, after the user confirms it in the client: the \
+        client shows the user the plan's preview and asks \"Apply this plan?\". \
+        Nothing runs without that yes. Returns the execution report, as the CLI's \
+        `--json` output has it.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
     async fn apply(
         &self,
         Parameters(p): Parameters<ApplyParams>,
@@ -598,6 +622,17 @@ mod tests {
         assert_eq!(structured["exit_code"], 2);
         let detail = structured["details"][0].as_str().unwrap();
         assert!(!detail.contains('\x07'), "{detail:?}");
+    }
+
+    #[test]
+    fn crumbs_stopped_is_sanitised() {
+        let e = crumbs_stopped(&"task \x1b[2Jpanicked\r");
+        assert!(
+            e.message.starts_with("crumbs stopped: task"),
+            "{}",
+            e.message
+        );
+        assert!(!e.message.contains('\x1b') && !e.message.contains('\r'));
     }
 
     #[test]
