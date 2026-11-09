@@ -259,7 +259,7 @@ Package metadata lives in `crates/crumbs-cli/Cargo.toml` (cargo-deb, cargo-gener
 - `--allow-dirty` exists for tests only. Without it, a dirty tree exits 2 with `refusing: the working tree has uncommitted changes`.
 - `release.yml`:
   - **Trigger:** `on: push: tags: ['v*']`. **Permissions:** `contents: write`.
-  - **Job:** `release` runs on `ubuntu-latest` in the `archlinux:latest` container and installs `rust`, `rustup`, `appimagetool` (from the AppImage project's continuous release), `podman` (not needed), `python` and `github-cli`.
+  - **Job:** `release` runs on `ubuntu-latest` in the `archlinux:latest` container and installs `rust`, `rustup`, `appimagetool` (from the AppImage project's continuous release), `python` and `github-cli`.
   - **Steps:** run `scripts/release.sh "${GITHUB_REF_NAME#v}"`, then `gh release create "$GITHUB_REF_NAME" dist/crumbs-* dist/LICENSE dist/SHA256SUMS --notes-file dist/RELEASE_NOTES.md`.
   - Upload `dist/aur/` as a workflow artifact, so the user can push it to the AUR.
 
