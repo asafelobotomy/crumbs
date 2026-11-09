@@ -3,13 +3,16 @@
 
 use crumbs_core::bloat::Category;
 use crumbs_core::{Env, SourceKind};
+use rmcp::handler::server::tool::{InputResponses, RequestState};
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock};
+use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock};
+use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, Peer, RoleServer, tool, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::apply::Call;
 use super::plans::{PLAN_TTL, PlanPayload, StoredPlan};
 use super::server::Server;
 use crate::cmd::act::{self, ActFlags};
@@ -145,6 +148,13 @@ pub(crate) struct PreviewOrphansParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct ApplyParams {
+    /// The `plan_id` a preview returned.
+    pub plan_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PreviewRestoreParams {
     /// A history entry id, a batch id, or a path to put back.
     pub entry: String,
@@ -217,7 +227,7 @@ impl Preview {
 
 /// `argv` as one line for a shell: arguments with anything but plain
 /// characters are single-quoted.
-fn shell_line(argv: &[String]) -> String {
+pub(super) fn shell_line(argv: &[String]) -> String {
     use std::ffi::OsStr;
     let plain = |a: &str| {
         !a.is_empty()
@@ -244,14 +254,14 @@ fn selection<T: From<String>>(select: Vec<String>) -> Option<Vec<T>> {
 }
 
 impl Server {
-    fn plans(&self) -> MutexGuard<'_, super::plans::PlanStore> {
+    pub(super) fn plans(&self) -> MutexGuard<'_, super::plans::PlanStore> {
         self.plans
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Drops the plans that have expired; every tool call starts here.
-    fn purge_plans(&self) {
+    pub(super) fn purge_plans(&self) {
         self.plans().purge_expired(self.env.now());
     }
 
@@ -288,24 +298,25 @@ impl Server {
         let mut expires = Value::Null;
         if has_actions {
             let expires_at = self.env.now() + PLAN_TTL;
+            let Some(expires_text) = crumbs_core::history::rfc3339(expires_at) else {
+                return Ok(refusal_result(&Refusal::new(
+                    1,
+                    "the plan's expiry time is out of range",
+                )));
+            };
             let stored = StoredPlan {
                 payload,
                 preview_text: preview_text.clone(),
-                needs_admin,
                 cli_command,
                 expires_at,
+                confirm_key: String::new(),
             };
             match self.plans().insert(stored) {
                 Ok(id) => {
                     plan_id = json!(id.as_str());
-                    expires = json!(crumbs_core::history::rfc3339(expires_at));
+                    expires = json!(expires_text);
                 }
-                Err(e) => {
-                    return Ok(refusal_result(&Refusal::new(
-                        1,
-                        format!("cannot make a plan id: {e}"),
-                    )));
-                }
+                Err(e) => return Ok(refusal_result(&Refusal::new(1, e.to_string()))),
             }
         }
         data["cli_command"] = json!(line);
@@ -524,18 +535,49 @@ impl Server {
             let mut data = act::dry_run_data(&built.targets);
             data["outcomes"] =
                 serde_json::to_value(&outcomes).map_err(|e| Refusal::new(1, e.to_string()))?;
+            // The entries the dry run would restore, as shown.
+            let entry_ids: Vec<String> = outcomes
+                .iter()
+                .filter(|o| o.ok && !o.entry_id.is_empty())
+                .map(|o| o.entry_id.clone())
+                .collect();
             Ok(Preview {
                 data,
                 preview_text: text,
+                // What deleted as root is never restorable: a restore puts
+                // back only the user's own files.
                 needs_admin: false,
-                has_actions: outcomes.iter().any(|o| o.ok && !o.entry_id.is_empty()),
-                payload: PlanPayload::Restore {
-                    selectors,
-                    outcomes,
-                },
+                has_actions: !entry_ids.is_empty(),
+                payload: PlanPayload::Restore { entry_ids },
                 cli_command: built.cli_command,
                 errors: built.errors,
             })
+        })
+        .await
+    }
+
+    /// Runs a previewed plan, once, after the user confirms it in the
+    /// client: the client shows the user the plan's preview and asks
+    /// "Apply this plan?". Nothing runs without that yes. Returns the
+    /// execution report, as the CLI's `--json` output has it.
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = true,
+        idempotent_hint = false,
+        open_world_hint = false
+    ))]
+    async fn apply(
+        &self,
+        Parameters(p): Parameters<ApplyParams>,
+        context: RequestContext<RoleServer>,
+        RequestState(request_state): RequestState,
+        InputResponses(input_responses): InputResponses,
+    ) -> Result<CallToolResponse, McpError> {
+        self.apply_plan(Call {
+            plan_id: p.plan_id,
+            context,
+            request_state,
+            input_responses,
         })
         .await
     }

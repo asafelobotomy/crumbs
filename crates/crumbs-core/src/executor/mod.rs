@@ -57,6 +57,13 @@ pub struct ExecReport {
     /// carry [`STOPPED_DURING`] and [`STOPPED_BEFORE`].
     #[serde(skip)]
     pub batch_stopped: bool,
+    /// When the privileged batch gave back no marker at all (the escalation
+    /// was denied or never started): what the escalation program wrote on
+    /// stderr, if the runner captured it (see
+    /// [`PrivilegedRun`](crate::privilege::batch::PrivilegedRun)). Not part
+    /// of the JSON.
+    #[serde(skip)]
+    pub escalation_output: Vec<u8>,
 }
 
 /// What a successful action leaves for the history entry.
@@ -200,6 +207,7 @@ fn run_one(
             freed: 0,
             escalation_failed: false,
             batch_stopped: false,
+            escalation_output: Vec::new(),
         })
 }
 
@@ -236,8 +244,12 @@ fn run_plans(
 ) -> Vec<ExecReport> {
     let batches = batch_ids(env, plans.len());
     let checks = Rechecks::default();
-    let (attempts, failed, stopped) =
-        run_privileged(env, cfg, &checks, plans, priv_runner, esc, post_check);
+    let Privileged {
+        attempts,
+        failed,
+        stopped,
+        unmarked_stderr,
+    } = run_privileged(env, cfg, &checks, plans, priv_runner, esc, post_check);
     let mut results: Vec<Vec<Option<ActionResult>>> =
         plans.iter().map(|p| vec![None; p.actions.len()]).collect();
     let mut freed = vec![0u64; plans.len()];
@@ -290,6 +302,11 @@ fn run_plans(
             freed: freed[k],
             escalation_failed: failed[k],
             batch_stopped: stopped[k],
+            escalation_output: if failed[k] {
+                unmarked_stderr.clone()
+            } else {
+                Vec::new()
+            },
         });
     }
     reports
@@ -454,10 +471,22 @@ pub(crate) fn tree_script(lock: &Path, readlink: &Path, rm: &Path) -> OsString {
 /// Per plan, its privileged attempts with their action indices.
 type PlanAttempts = Vec<Vec<(usize, Attempt)>>;
 
+/// What [`run_privileged`] did, per plan.
+struct Privileged {
+    attempts: PlanAttempts,
+    /// Its escalation failed.
+    failed: Vec<bool>,
+    /// The batch stopped part-way through its steps.
+    stopped: Vec<bool>,
+    /// The escalation's captured stderr when the batch gave back no
+    /// marker at all; empty otherwise.
+    unmarked_stderr: Vec<u8>,
+}
+
 /// Runs the privileged actions of every plan as one batch; returns, per
 /// plan, their attempts in plan order (with action indices), whether its
 /// escalation failed, and whether the batch stopped part-way through its
-/// steps.
+/// steps; and the escalation's stderr when no marker came back.
 ///
 /// No marker at all means the escalation was cancelled or denied: every
 /// step is not run, for lack of rights. When some markers came back and
@@ -472,7 +501,7 @@ fn run_privileged(
     priv_runner: &dyn PrivilegedRunner,
     esc: Option<&Escalation>,
     post_check: Option<&PostCheck<'_>>,
-) -> (PlanAttempts, Vec<bool>, Vec<bool>) {
+) -> Privileged {
     let mut attempts: PlanAttempts = plans.iter().map(|_| Vec::new()).collect();
     let mut failed = vec![false; plans.len()];
     let mut stopped = vec![false; plans.len()];
@@ -511,8 +540,14 @@ fn run_privileged(
             attempts[k].push((i, attempt));
         }
     }
+    let done = |attempts, failed, stopped, unmarked_stderr| Privileged {
+        attempts,
+        failed,
+        stopped,
+        unmarked_stderr,
+    };
     if steps.is_empty() {
-        return (attempts, failed, stopped);
+        return done(attempts, failed, stopped, Vec::new());
     }
     let fail_all = |attempts: &mut Vec<Vec<(usize, Attempt)>>, msg: &str| {
         for &(k, j) in &stepped {
@@ -530,20 +565,24 @@ fn run_privileged(
         for &(k, _) in &stepped {
             failed[k] = true;
         }
-        return (attempts, failed, stopped);
+        return done(attempts, failed, stopped, Vec::new());
     };
     let script = match build_script(&steps) {
         Ok(s) => s,
         Err(e) => {
             fail_all(&mut attempts, &e.to_string());
-            return (attempts, failed, stopped);
+            return done(attempts, failed, stopped, Vec::new());
         }
     };
-    let ends: Vec<StepEnd> = match priv_runner.run(esc, &script) {
-        Ok(stdout) => {
-            let outcomes = parse_markers(&stdout, steps.len());
+    let mut unmarked_stderr = Vec::new();
+    let ends: Vec<StepEnd> = match priv_runner.run_captured(esc, &script) {
+        Ok(run) => {
+            let outcomes = parse_markers(&run.stdout, steps.len());
             // Markers come back in order, so this is how many steps ended.
             let ended = outcomes.iter().take_while(|o| o.status.is_some()).count();
+            if ended == 0 {
+                unmarked_stderr = run.stderr;
+            }
             (0..steps.len())
                 .map(|n| match outcomes.get(n).map(|o| (o.status, o)) {
                     Some((Some(0), _)) => StepEnd::Succeeded,
@@ -584,7 +623,7 @@ fn run_privileged(
             },
         };
     }
-    (attempts, failed, stopped)
+    done(attempts, failed, stopped, unmarked_stderr)
 }
 
 /// How a batch step ended.

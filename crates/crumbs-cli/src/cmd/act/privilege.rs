@@ -54,17 +54,27 @@ impl Privilege {
     }
 
     /// For a server whose stdin and stdout carry a protocol: the same
-    /// gating as [`for_run`](Self::for_run), always `needed`, but with no
-    /// terminal: stdin from `/dev/null`, stderr captured, never `sudo`.
-    #[allow(dead_code)] // used by the MCP server
-    pub(crate) fn for_server(env: &Env) -> Privilege {
+    /// gating as [`for_run`](Self::for_run), but with no terminal: stdin
+    /// from `/dev/null`, stderr captured, never `sudo`.
+    #[cfg_attr(
+        not(feature = "mcp"),
+        allow(dead_code, reason = "only the mcp server calls it")
+    )]
+    pub(crate) fn for_server(env: &Env, needed: bool) -> Privilege {
         Privilege::build(
             env,
-            true,
+            needed,
             Interaction::NoTerminal,
             test_runner_var().as_deref(),
             allow_real_var(),
         )
+    }
+
+    /// [`for_server`](Self::for_server) with `test_runner` standing in for
+    /// `CRUMBS_TEST_PRIV_RUNNER`, so in-process tests need not set it.
+    #[cfg(all(test, feature = "mcp"))]
+    pub(crate) fn for_server_with(env: &Env, needed: bool, test_runner: Option<&str>) -> Privilege {
+        Privilege::build(env, needed, Interaction::NoTerminal, test_runner, false)
     }
 
     /// The one place that gates real escalation, so `for_run` and

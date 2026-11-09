@@ -14,8 +14,15 @@ use crumbs_core::privilege::{Escalation, EscalationKind, Interaction};
 /// `/dev/null`; under `NoTerminal` the script's stderr is captured and
 /// returned instead of dropped. Either way it always prints the
 /// `crumbs-test: privileged batch` line to the process's own stderr (a
-/// server's stderr is its log, never the protocol).
+/// server's stderr is its log, never the protocol), and then
+/// `crumbs-test: batch stdin <path>`, where `<path>` is what the batch's
+/// shell itself found on its stdin.
 struct Sh(Interaction);
+
+/// The line the batch's shell writes first, on its stderr: what its stdin is.
+const STDIN_PROBE: &[u8] =
+    b"printf 'crumbs-test: batch stdin %s\\n' \"$(readlink /proc/self/fd/0)\" >&2\n";
+const STDIN_PREFIX: &[u8] = b"crumbs-test: batch stdin ";
 
 impl PrivilegedRunner for Sh {
     fn run(&self, esc: &Escalation, script: &[u8]) -> Result<Vec<u8>, CoreError> {
@@ -30,23 +37,31 @@ impl PrivilegedRunner for Sh {
         // Lets tests count the batches of a run.
         eprintln!("crumbs-test: privileged batch");
         let capture = self.0 == Interaction::NoTerminal;
+        let mut probed = STDIN_PROBE.to_vec();
+        probed.extend_from_slice(script);
         let out = Command::new("/bin/sh")
             .arg("-c")
-            .arg(OsStr::from_bytes(script))
+            .arg(OsStr::from_bytes(&probed))
             .stdin(Stdio::null())
-            .stderr(if capture {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
+            .stderr(Stdio::piped())
             .output()
             .map_err(|e| CoreError::Command {
                 program: "/bin/sh".into(),
                 message: e.to_string(),
             })?;
+        // The probe's line goes to this process's stderr; the rest is the
+        // batch's own, kept only when captured.
+        let mut stderr = Vec::new();
+        for line in out.stderr.split_inclusive(|&b| b == b'\n') {
+            if line.starts_with(STDIN_PREFIX) {
+                eprint!("{}", String::from_utf8_lossy(line));
+            } else if capture {
+                stderr.extend_from_slice(line);
+            }
+        }
         Ok(PrivilegedRun {
             stdout: out.stdout,
-            stderr: cap_stderr(out.stderr),
+            stderr: cap_stderr(stderr),
         })
     }
 }

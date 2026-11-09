@@ -107,12 +107,12 @@ pub fn now_rfc3339() -> String {
     jiff::Timestamp::now().to_string()
 }
 
-/// `t` as an RFC 3339 UTC timestamp. A time outside the range of
-/// timestamps reads as the epoch.
-pub fn rfc3339(t: std::time::SystemTime) -> String {
-    jiff::Timestamp::try_from(t)
-        .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
-        .to_string()
+/// `t` as an RFC 3339 UTC timestamp in whole seconds (any fraction is
+/// dropped), or `None` for a time outside the range of timestamps.
+pub fn rfc3339(t: std::time::SystemTime) -> Option<String> {
+    let ts = jiff::Timestamp::try_from(t).ok()?;
+    let whole = jiff::Timestamp::from_second(ts.as_second()).ok()?;
+    Some(whole.to_string())
 }
 
 fn history_path(env: &Env) -> PathBuf {
@@ -276,6 +276,23 @@ pub fn read_history(env: &Env) -> Result<(Vec<HistoryEntry>, usize), CoreError> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rfc3339_is_whole_seconds_utc_and_refuses_out_of_range() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let at = |secs: u64| super::rfc3339(UNIX_EPOCH + Duration::from_secs(secs));
+        assert_eq!(at(0).as_deref(), Some("1970-01-01T00:00:00Z"));
+        assert_eq!(at(951_868_800).as_deref(), Some("2000-03-01T00:00:00Z"));
+        assert_eq!(at(4_102_444_800).as_deref(), Some("2100-01-01T00:00:00Z"));
+        // A fraction is dropped, not rounded.
+        let fraction = UNIX_EPOCH + Duration::from_millis(951_868_800_999);
+        assert_eq!(
+            super::rfc3339(fraction).as_deref(),
+            Some("2000-03-01T00:00:00Z")
+        );
+        // Past year 9999: no timestamp, not the epoch.
+        assert_eq!(at(300_000_000_000), None);
+    }
+
     use super::*;
     use crate::testing::FixtureTree;
     use std::fs;

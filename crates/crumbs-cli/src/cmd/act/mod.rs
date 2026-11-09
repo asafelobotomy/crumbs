@@ -63,9 +63,9 @@ pub const NOT_GRANTED: &str =
 pub const BATCH_STOPPED: &str = "the privileged run stopped before it finished; \
      the step it was in may have partly run, and the steps after it did not run";
 /// Exit code when administrator rights were needed but not available.
-const EXIT_NO_RIGHTS: u8 = 5;
+pub const EXIT_NO_RIGHTS: u8 = 5;
 /// How a tree delete's manual command reads (see `manual::root_command`).
-const TREE_RM_WORDS: &str = "'-rf' '--one-file-system'";
+pub const TREE_RM_WORDS: &str = "'-rf' '--one-file-system'";
 /// After manual commands with a tree delete (human output only): the
 /// batch's own mount checks do not run by hand.
 pub const NOTE_CHECK_MOUNTS: &str =
@@ -713,7 +713,9 @@ fn run_plans(
 
 /// Debug builds under a fake root only: runs `CRUMBS_TEST_BEFORE_EXECUTE`
 /// with `/bin/sh` after the preview and confirmation and before anything
-/// executes, so a test can change the files between scan and execute.
+/// executes, so a test can change the files between scan and execute. Its
+/// stdin is `/dev/null` and its stdout goes to stderr: under `crumbs mcp`
+/// stdin and stdout carry the protocol.
 fn before_execute_hook(env: &Env) {
     #[cfg(debug_assertions)]
     if env.root != Path::new("/")
@@ -722,6 +724,8 @@ fn before_execute_hook(env: &Env) {
         let _ = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(script)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::io::stderr())
             .status();
     }
     #[cfg(not(debug_assertions))]

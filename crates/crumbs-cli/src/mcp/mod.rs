@@ -4,6 +4,10 @@
 //! warnings go to the client as log messages ([`log`]). Blocking crumbs
 //! work runs on tokio's blocking pool, each call with its own `Env`.
 
+mod apply;
+#[cfg(test)]
+mod apply_tests;
+mod confirm;
 mod log;
 mod plans;
 mod server;
@@ -41,7 +45,7 @@ mod tests {
     use crumbs_core::testing::FixtureTree;
     use serde_json::json;
 
-    use super::testing::Connected;
+    use super::testing::{Connected, inky_with_system};
 
     fn fixture() -> FixtureTree {
         let t = FixtureTree::new();
@@ -110,7 +114,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_tools_are_listed_read_only() {
+    async fn only_apply_is_listed_as_changing_anything() {
         let t = fixture();
         let c = Connected::new(t.env()).await;
         let tools = c.client.list_all_tools().await.unwrap();
@@ -120,6 +124,7 @@ mod tests {
             names,
             [
                 "app_show",
+                "apply",
                 "apps_list",
                 "doctor",
                 "history",
@@ -132,37 +137,17 @@ mod tests {
             ]
         );
         for tool in &tools {
-            let read_only = tool.annotations.as_ref().and_then(|a| a.read_only_hint);
-            assert_eq!(read_only, Some(true), "{}", tool.name);
+            let a = tool.annotations.as_ref();
+            let read_only = a.and_then(|a| a.read_only_hint);
+            let destructive = a.and_then(|a| a.destructive_hint);
+            if tool.name == "apply" {
+                assert_eq!(read_only, Some(false));
+                assert_eq!(destructive, Some(true));
+            } else {
+                assert_eq!(read_only, Some(true), "{}", tool.name);
+            }
         }
         c.close().await;
-    }
-
-    /// A package `inky` with a cache and config of its own, plus unowned
-    /// `/opt/inky` and `/etc/inky`; `/` stands in for root.
-    fn inky_with_system() -> FixtureTree {
-        let t = FixtureTree::new();
-        t.os_release("manjaro", "arch", "Manjaro Linux");
-        t.pacman_pkg("coreutils", "9.5-1", Some(2_000_000), &["usr/bin/ls"]);
-        t.pacman_pkg("inky", "1.0-1", Some(1_000), &["usr/bin/inky"]);
-        t.write_exec("/usr/bin/inky", b"");
-        t.write("/home/user/.cache/inky/blob", b"cache");
-        t.write("/opt/inky/bin/inky", b"x");
-        t.write("/etc/inky/inky.conf", b"x");
-        t.mkdir("etc");
-        t.mkdir("opt");
-        for rel in ["", "etc", "opt"] {
-            std::fs::set_permissions(
-                t.dir.path().join(rel),
-                std::os::unix::fs::PermissionsExt::from_mode(0o755),
-            )
-            .unwrap();
-        }
-        t.write(
-            "/proc/self/mountinfo",
-            b"36 35 98:0 /mnt1 / rw,noatime master:1 - ext3 /dev/root rw\n",
-        );
-        t
     }
 
     fn paths(plan_id_result: &serde_json::Value) -> Vec<(String, String)> {

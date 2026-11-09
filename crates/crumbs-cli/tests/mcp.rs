@@ -52,12 +52,47 @@ fn fixture_with_warnings() -> FixtureTree {
     t
 }
 
+/// Adds a package `inky` with unowned `/opt/inky` and `/etc/inky`, and
+/// makes `/`, `/etc` and `/opt` pass the system-tree checks (this user
+/// stands in for root).
+fn with_inky_system(t: &FixtureTree) {
+    t.pacman_pkg("inky", "1.0-1", Some(1_000), &["usr/bin/inky"]);
+    t.write_exec("/usr/bin/inky", b"");
+    t.write("/home/user/.cache/inky/blob", b"cache");
+    t.write("/opt/inky/bin/inky", b"x");
+    t.write("/etc/inky/inky.conf", b"x");
+    t.mkdir("etc");
+    t.mkdir("opt");
+    for rel in ["", "etc", "opt"] {
+        std::fs::set_permissions(
+            t.dir.path().join(rel),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    t.write_exec(
+        "/usr/bin/rm",
+        b"#!/bin/sh\necho \"$@\" >> \"$(dirname \"$0\")/../../rm-args\"\nexec /usr/bin/rm \"$@\"\n",
+    );
+    t.write_exec("/usr/bin/sh", b"#!/bin/sh\nexec /bin/sh \"$@\"\n");
+    t.write_exec(
+        "/usr/bin/readlink",
+        b"#!/bin/sh\nexec /usr/bin/readlink \"$@\"\n",
+    );
+    t.write(
+        "/proc/self/mountinfo",
+        b"36 35 98:0 /mnt1 / rw,noatime master:1 - ext3 /dev/root rw\n",
+    );
+}
+
 fn command(t: &FixtureTree) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_crumbs"));
     cmd.env("CRUMBS_ROOT", t.dir.path());
     cmd.env_remove("NO_COLOR");
     cmd.env_remove("CRUMBS_TEST_PRIV_RUNNER");
     cmd.env_remove("CRUMBS_ALLOW_REAL_ESCALATION");
+    cmd.env_remove("CRUMBS_TEST_BEFORE_EXECUTE");
+    cmd.env_remove("CRUMBS_TEST_CONFIRM_TIMEOUT_MS");
     cmd
 }
 
@@ -77,11 +112,22 @@ struct Server {
     /// Every stdout line so far.
     seen: Vec<String>,
     next_id: u64,
+    /// The result sent back for every `elicitation/create`.
+    elicit_answer: Value,
+    /// The message of each `elicitation/create` received.
+    asked: Vec<String>,
 }
 
 impl Server {
     fn start(t: &FixtureTree) -> Server {
-        let mut child = command(t)
+        Server::start_with(t, &[], json!({}))
+    }
+
+    /// `crumbs mcp` with `envs` set, for a client declaring `capabilities`.
+    fn start_with(t: &FixtureTree, envs: &[(&str, &str)], capabilities: Value) -> Server {
+        let mut cmd = command(t);
+        cmd.envs(envs.iter().copied());
+        let mut child = cmd
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -105,12 +151,14 @@ impl Server {
             lines,
             seen: Vec::new(),
             next_id: 1,
+            elicit_answer: json!({ "action": "decline" }),
+            asked: Vec::new(),
         };
         let init = server.request(
             "initialize",
             json!({
                 "protocolVersion": "2025-11-25",
-                "capabilities": {},
+                "capabilities": capabilities,
                 "clientInfo": { "name": "crumbs-test", "version": "0" },
             }),
         );
@@ -125,7 +173,8 @@ impl Server {
         stdin.flush().unwrap();
     }
 
-    /// Sends a request and waits for its response.
+    /// Sends a request and waits for its response, answering each
+    /// `elicitation/create` on the way with `elicit_answer`.
     fn request(&mut self, method: &str, params: Value) -> Value {
         let id = self.next_id;
         self.next_id += 1;
@@ -137,9 +186,17 @@ impl Server {
                 Err(RecvTimeoutError::Disconnected) => panic!("stdout closed before {method}"),
             };
             self.seen.push(line.clone());
-            if let Ok(v) = serde_json::from_str::<Value>(&line)
-                && v["id"] == json!(id)
-            {
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if v["method"] == "elicitation/create" {
+                let message = v["params"]["message"].as_str().unwrap_or_default();
+                self.asked.push(message.to_string());
+                let answer = self.elicit_answer.clone();
+                self.send(&json!({ "jsonrpc": "2.0", "id": v["id"], "result": answer }));
+                continue;
+            }
+            if v.get("method").is_none() && v["id"] == json!(id) {
                 return v;
             }
         }
@@ -236,14 +293,70 @@ fn read_tools_match_cli_json() {
     server.finish();
 }
 
+/// The stand-in privileged runner, and a before-execute hook that writes
+/// on stdout and stderr.
+const APPLY_ENVS: [(&str, &str); 2] = [
+    ("CRUMBS_TEST_PRIV_RUNNER", "sh"),
+    (
+        "CRUMBS_TEST_BEFORE_EXECUTE",
+        "echo hook-stdout; echo hook-stderr >&2; cat >/dev/null",
+    ),
+];
+
+/// Previews `inky`'s cache plus `select` and applies it, answering the
+/// confirmation with yes; the apply result.
+fn preview_and_apply(server: &mut Server, select: &[&str]) -> Value {
+    let mut all = vec!["/home/user/.cache/inky"];
+    all.extend_from_slice(select);
+    let r = server.call(
+        "preview_uninstall",
+        json!({ "app": "inky", "leftovers_only": true, "select": all }),
+    );
+    assert_ne!(r["isError"], json!(true), "{r}");
+    assert_eq!(r["structuredContent"]["needs_admin"], true, "{r}");
+    let id = r["structuredContent"]["plan_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    server.elicit_answer = json!({ "action": "accept", "content": { "confirm": true } });
+    let r = server.call("apply", json!({ "plan_id": id }));
+    assert_eq!(server.asked.len(), 1, "{:?}", server.asked);
+    assert!(server.asked[0].ends_with("\n\nApply this plan?"));
+    r
+}
+
 #[test]
 fn stdout_carries_only_protocol() {
     let t = fixture_with_warnings();
-    let mut server = Server::start(&t);
+    with_inky_system(&t);
+    let mut server = Server::start_with(&t, &APPLY_ENVS, json!({ "elicitation": {} }));
     let scan = server.call("scan", json!({}));
     assert_ne!(scan["isError"], json!(true), "{scan}");
+    // A privileged apply, whose hook and root batch both write output.
+    let r = preview_and_apply(&mut server, &["/opt/inky"]);
+    assert_ne!(r["isError"], json!(true), "{r}");
+    assert_eq!(r["structuredContent"]["applied"], true, "{r}");
+    assert_eq!(r["structuredContent"]["exit_code"], 0, "{r}");
+    assert!(!t.dir.path().join("opt/inky").exists());
+    // The protocol still works after the run.
+    let doctor = server.call("doctor", json!({}));
+    assert_ne!(doctor["isError"], json!(true), "{doctor}");
     let (lines, stderr) = server.finish();
-    assert!(stderr.is_empty(), "stderr: {stderr}");
+    // stderr holds only what the test stand-ins write; the hook's stdout
+    // went there too.
+    assert!(stderr.lines().any(|l| l == "hook-stdout"), "{stderr}");
+    for line in stderr.lines() {
+        assert!(
+            [
+                "hook-stdout",
+                "hook-stderr",
+                "crumbs-test: privileged batch"
+            ]
+            .contains(&line)
+                || line.starts_with("crumbs-test: batch stdin "),
+            "stderr: {stderr}"
+        );
+    }
     let mut warnings = Vec::new();
     for line in &lines {
         let v: Value =
@@ -311,4 +424,33 @@ fn preview_tools_match_cli_dry_run() {
             .exists()
     );
     server.finish();
+}
+
+#[test]
+fn privileged_plan_uses_one_batch_and_dev_null_stdin() {
+    let t = fixture();
+    with_inky_system(&t);
+    let mut server = Server::start_with(&t, &APPLY_ENVS, json!({ "elicitation": {} }));
+    let r = preview_and_apply(&mut server, &["/opt/inky", "/etc/inky"]);
+    assert_ne!(r["isError"], json!(true), "{r}");
+    assert_eq!(r["structuredContent"]["exit_code"], 0, "{r}");
+    assert!(!t.dir.path().join("opt/inky").exists());
+    assert!(!t.dir.path().join("etc/inky").exists());
+    assert!(!t.dir.path().join("home/user/.cache/inky").exists());
+    let (_, stderr) = server.finish();
+    // Both trees in one batch, whose shell found /dev/null on its stdin
+    // (not the protocol pipe).
+    assert_eq!(
+        stderr.matches("crumbs-test: privileged batch").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(
+        stderr
+            .lines()
+            .any(|l| l == "crumbs-test: batch stdin /dev/null"),
+        "{stderr}"
+    );
+    let rm = std::fs::read_to_string(t.dir.path().join("rm-args")).unwrap();
+    assert_eq!(rm.lines().count(), 2, "{rm}");
 }

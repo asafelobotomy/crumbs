@@ -5,12 +5,16 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::time::{Duration, SystemTime};
 
-use crumbs_core::restore::RestoreOutcome;
-
 use crate::cmd::act::Target;
 
 /// How long a previewed plan can be applied.
 pub(crate) const PLAN_TTL: Duration = Duration::from_secs(600);
+
+/// The most plans held at once.
+pub(crate) const MAX_PLANS: usize = 64;
+
+/// Why a preview past [`MAX_PLANS`] is refused.
+pub(crate) const TOO_MANY_PLANS: &str = "too many pending plans; apply or let some expire first";
 
 /// 128 random bits as 32 lowercase hex characters.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -26,7 +30,6 @@ impl PlanId {
     }
 
     /// The id `s` spells, if it is shaped like one.
-    #[cfg_attr(not(test), allow(dead_code, reason = "used by apply in a later task"))]
     pub(crate) fn parse(s: &str) -> Option<PlanId> {
         let ok = s.len() == 32 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
         ok.then(|| PlanId(s.to_string()))
@@ -38,27 +41,44 @@ impl PlanId {
 }
 
 /// What `apply` runs.
-#[allow(dead_code, reason = "apply reads the payload in a later task")]
 pub(crate) enum PlanPayload {
     /// Plans with their scan-time fingerprints, for `execute_many`.
     Plans(Vec<Target>),
-    /// The core restores without a plan: the selectors run again, and the
-    /// dry run's outcomes are what the user was shown.
-    Restore {
-        selectors: Vec<String>,
-        outcomes: Vec<RestoreOutcome>,
-    },
+    /// The core restores without a plan: these are the history entries the
+    /// dry run said it would restore, as the user was shown them. Apply
+    /// restores exactly those, never what the selectors match by then.
+    Restore { entry_ids: Vec<String> },
 }
 
 /// A previewed plan and what the user is shown for it.
-#[allow(dead_code, reason = "apply reads the stored plan in a later task")]
 pub(crate) struct StoredPlan {
     pub payload: PlanPayload,
     pub preview_text: String,
-    pub needs_admin: bool,
     /// The equivalent `crumbs …` argv, for a client that cannot confirm.
     pub cli_command: Vec<String>,
     pub expires_at: SystemTime,
+    /// The key of this plan's confirmation among the input requests of an
+    /// `InputRequiredResult`: made by the server when the plan is stored,
+    /// so an answer counts only under the key this server issued.
+    pub confirm_key: String,
+}
+
+/// Why [`PlanStore::insert`] did not store a plan.
+#[derive(Debug)]
+pub(crate) enum InsertError {
+    /// [`MAX_PLANS`] are held already.
+    Full,
+    /// No random id could be made.
+    Id(std::io::Error),
+}
+
+impl std::fmt::Display for InsertError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InsertError::Full => f.write_str(TOO_MANY_PLANS),
+            InsertError::Id(e) => write!(f, "cannot make a plan id: {e}"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -67,9 +87,15 @@ pub(crate) struct PlanStore {
 }
 
 impl PlanStore {
-    pub(crate) fn insert(&mut self, plan: StoredPlan) -> std::io::Result<PlanId> {
+    /// Stores `plan` under a fresh id, with a fresh `confirm_key` (whatever
+    /// the caller put there is replaced).
+    pub(crate) fn insert(&mut self, mut plan: StoredPlan) -> Result<PlanId, InsertError> {
+        if self.plans.len() >= MAX_PLANS {
+            return Err(InsertError::Full);
+        }
+        plan.confirm_key = format!("confirm-{}", PlanId::generate().map_err(InsertError::Id)?.0);
         loop {
-            let id = PlanId::generate()?;
+            let id = PlanId::generate().map_err(InsertError::Id)?;
             if !self.plans.contains_key(&id) {
                 self.plans.insert(id.clone(), plan);
                 return Ok(id);
@@ -77,13 +103,11 @@ impl PlanStore {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code, reason = "used by apply in a later task"))]
     pub(crate) fn peek(&self, id: &PlanId) -> Option<&StoredPlan> {
         self.plans.get(id)
     }
 
     /// Removes the plan: it can be used once.
-    #[cfg_attr(not(test), allow(dead_code, reason = "used by apply in a later task"))]
     pub(crate) fn take(&mut self, id: &PlanId) -> Option<StoredPlan> {
         self.plans.remove(id)
     }
@@ -114,24 +138,45 @@ mod tests {
         StoredPlan {
             payload: PlanPayload::Plans(Vec::new()),
             preview_text: String::new(),
-            needs_admin: false,
             cli_command: Vec::new(),
             expires_at,
+            confirm_key: String::new(),
         }
     }
 
     #[test]
     fn plan_ids_are_unique() {
-        let mut store = PlanStore::default();
         let ids: HashSet<String> = (0..1000)
             .map(|_| {
+                let mut store = PlanStore::default();
                 let id = store.insert(plan(SystemTime::now())).unwrap();
                 assert!(PlanId::parse(id.as_str()).is_some(), "{}", id.as_str());
                 id.as_str().to_string()
             })
             .collect();
         assert_eq!(ids.len(), 1000);
-        assert_eq!(store.len(), 1000);
+    }
+
+    #[test]
+    fn store_holds_at_most_64_plans_each_with_its_own_confirm_key() {
+        let mut store = PlanStore::default();
+        let mut keys = HashSet::new();
+        for _ in 0..MAX_PLANS {
+            let id = store.insert(plan(SystemTime::now())).unwrap();
+            let key = &store.peek(&id).unwrap().confirm_key;
+            assert!(key.starts_with("confirm-") && key.len() == 40, "{key}");
+            assert_ne!(key.trim_start_matches("confirm-"), id.as_str());
+            keys.insert(key.clone());
+        }
+        assert_eq!(keys.len(), MAX_PLANS);
+        let err = store.insert(plan(SystemTime::now())).unwrap_err();
+        assert!(matches!(err, InsertError::Full));
+        assert_eq!(err.to_string(), TOO_MANY_PLANS);
+        assert_eq!(store.len(), MAX_PLANS);
+        // Room again once one is gone.
+        let some = store.plans.keys().next().unwrap().clone();
+        store.take(&some);
+        assert!(store.insert(plan(SystemTime::now())).is_ok());
     }
 
     #[test]
