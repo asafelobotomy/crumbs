@@ -69,6 +69,40 @@ impl OwnedIndex {
     }
 }
 
+/// The package database ownership is read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageDb {
+    Pacman,
+    Dpkg,
+    Rpm,
+}
+
+/// The first package database present, in the order pacman, dpkg, rpm.
+pub fn detect_package_db(env: &Env) -> Option<PackageDb> {
+    if env.sys(DB_DIR).is_dir() {
+        Some(PackageDb::Pacman)
+    } else if env.sys("/var/lib/dpkg/status").is_file() {
+        Some(PackageDb::Dpkg)
+    } else if crate::command::resolve_trusted(env, "rpm").is_some() {
+        Some(PackageDb::Rpm)
+    } else {
+        None
+    }
+}
+
+/// The owned index from whichever package database is present; `None`
+/// when there is none. See [`load_pacman`] for the error contract.
+pub fn load_package_db(
+    env: &Env,
+    runner: &dyn crate::command::CommandRunner,
+) -> Result<Option<OwnedIndex>, CoreError> {
+    let _ = runner;
+    match detect_package_db(env) {
+        Some(PackageDb::Pacman) => load_pacman(env),
+        Some(PackageDb::Dpkg) | Some(PackageDb::Rpm) | None => Ok(None),
+    }
+}
+
 /// Reads every package's file list from the pacman database. `None` when the
 /// database is missing. Any unreadable entry is an error: a partial index
 /// would report owned paths as unowned.
@@ -416,6 +450,34 @@ mod tests {
             d.add_line(l);
         }
         d
+    }
+
+    #[test]
+    fn detect_prefers_pacman_then_dpkg_then_rpm() {
+        let t = FixtureTree::new();
+        assert_eq!(detect_package_db(&t.env()), None);
+        t.write_exec("/usr/bin/rpm", b"#!/bin/sh\n");
+        assert_eq!(detect_package_db(&t.env()), Some(PackageDb::Rpm));
+        t.write("/var/lib/dpkg/status", b"");
+        assert_eq!(detect_package_db(&t.env()), Some(PackageDb::Dpkg));
+        t.write("/var/lib/pacman/local/ALPM_DB_VERSION", b"9\n");
+        assert_eq!(detect_package_db(&t.env()), Some(PackageDb::Pacman));
+    }
+
+    #[test]
+    fn load_package_db_dispatches_to_pacman() {
+        let t = FixtureTree::new();
+        t.write(
+            "/var/lib/pacman/local/foo-1-1/files",
+            b"%FILES%\nopt/foo/\nopt/foo/bin\n\n",
+        );
+        let runner = crate::testing::FakeRunner::new();
+        let idx = load_package_db(&t.env(), &runner).unwrap().unwrap();
+        assert!(idx.owns_at_or_below(Path::new("/opt/foo")));
+        assert_eq!(
+            load_package_db(&FixtureTree::new().env(), &runner).unwrap(),
+            None
+        );
     }
 
     fn covers(d: &TmpfilesDeclared, p: &str) -> bool {

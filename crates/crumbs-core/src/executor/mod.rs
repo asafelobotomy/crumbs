@@ -22,7 +22,7 @@ use crate::env::{Env, display_path};
 use crate::history::{self, HistoryAction, HistoryEntry};
 use crate::model::{App, SourceKind};
 use crate::mounts::mounts_at_or_below;
-use crate::ownership::{OwnedIndex, TmpfilesDeclared, load_pacman, tmpfiles_declared};
+use crate::ownership::{OwnedIndex, TmpfilesDeclared, load_package_db, tmpfiles_declared};
 use crate::plan::{Action, Plan};
 use crate::privilege::Escalation;
 use crate::privilege::batch::{
@@ -243,7 +243,7 @@ fn run_plans(
     post_check: Option<&PostCheck<'_>>,
 ) -> Vec<ExecReport> {
     let batches = batch_ids(env, plans.len());
-    let checks = Rechecks::default();
+    let checks = Rechecks::new(runner);
     let Privileged {
         attempts,
         failed,
@@ -359,8 +359,9 @@ fn verify_path(
 
 /// State the re-checks share across one run: the package database and
 /// `tmpfiles.d` are each read at most once, however many targets need them.
-#[derive(Default)]
-struct Rechecks {
+struct Rechecks<'a> {
+    /// Runs the package database's own queries (rpm).
+    runner: &'a dyn CommandRunner,
     /// The owned index, or `None` when it could not be read completely.
     owned: OnceCell<Option<OwnedIndex>>,
     /// The `tmpfiles.d` declarations, or `None` when they could not be read.
@@ -373,13 +374,21 @@ thread_local! {
     pub(crate) static PACMAN_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-impl Rechecks {
+impl<'a> Rechecks<'a> {
+    fn new(runner: &'a dyn CommandRunner) -> Self {
+        Rechecks {
+            runner,
+            owned: OnceCell::new(),
+            declared: OnceCell::new(),
+        }
+    }
+
     fn owned(&self, env: &Env) -> Option<&OwnedIndex> {
         self.owned
             .get_or_init(|| {
                 #[cfg(test)]
                 PACMAN_LOADS.with(|n| n.set(n.get() + 1));
-                match load_pacman(env) {
+                match load_package_db(env, self.runner) {
                     Ok(Some(idx)) if idx.is_complete() => Some(idx),
                     _ => None,
                 }
