@@ -2,9 +2,21 @@
 
 crumBS is a Linux command-line tool that lists the apps installed on your system across pacman, Flatpak, AppImage and unmanaged `.desktop` sources, finds the files they leave behind, finds space you can reclaim (caches, the trash, old temporary files, logs, superseded AppImages), and moves the items you pick to the trash. It is pre-alpha software.
 
-**Status:** M4c: `crumbs mcp` serves crumbs to AI agents, with the user's confirmation for every change. M4b: `uninstall` fully removes pacman and Flatpak apps (and AppImages), and now also unmanaged apps by path; `uninstall` and `orphans --system` find system leftovers in `/etc` and `/opt`. `scan` and `clean` handle system bloat with `--system`, on top of M3's reclaimable space in your own files and M2's leftovers, orphans, history and restore. Everything that needs administrator rights runs in one batch behind one prompt. M5: Debian/Ubuntu (dpkg, apt), Fedora (rpm, dnf) and Snap work like Arch, checked in containers by `scripts/distro-check.sh`.
+**Status:** M4c: `crumbs mcp` serves crumbs to AI agents, with the user's confirmation for every change. M4b: `uninstall` fully removes pacman and Flatpak apps (and AppImages), and now also unmanaged apps by path; `uninstall` and `orphans --system` find system leftovers in `/etc` and `/opt`. `scan` and `clean` handle system bloat with `--system`, on top of M3's reclaimable space in your own files and M2's leftovers, orphans, history and restore. Everything that needs administrator rights runs in one batch behind one prompt. M5: Debian/Ubuntu (dpkg, apt), Fedora (rpm, dnf) and Snap work like Arch, checked in containers by `scripts/distro-check.sh`. M6: releases ship as an AppImage, `.deb`, `.rpm`, AUR packages and a static binary (see "Install").
 
-## Build
+## Install
+
+Every release on [GitHub](https://github.com/asafelobotomy/crumbs/releases) has the same static x86_64 binary in several wrappings, and a `SHA256SUMS` file to check them with (`sha256sum -c SHA256SUMS --ignore-missing`). crumbs is a command-line tool: run it from a terminal.
+
+- **AppImage** (any distro): download `crumbs-<version>-x86_64.AppImage`, then `chmod +x` it and run it. It needs no `libfuse2`; where FUSE is not available at all (some containers), run it with `--appimage-extract-and-run` or `APPIMAGE_EXTRACT_AND_RUN=1`. Kept in `~/Applications`, `~/.local/bin` or `~/Downloads`, crumbs lists its own AppImage like any other, so `crumbs uninstall` can remove it.
+- **Debian and Ubuntu:** `sudo apt install ./crumbs_<version>_amd64.deb`.
+- **Fedora:** `sudo dnf install ./crumbs-<version>-1.x86_64.rpm`.
+- **Arch and Manjaro:** once published to the AUR, `yay -S crumbs` builds from source and `yay -S crumbs-bin` installs the release binary.
+- **Static binary:** `crumbs-<version>-x86_64-linux-musl` has no dependencies; put it on your `PATH` as `crumbs`.
+
+The packages install `/usr/bin/crumbs`, so crumbs lists itself as an app of your package manager (`dpkg:crumbs`, `rpm:crumbs`, `pacman:crumbs` or `pacman:crumbs-bin`) and can uninstall itself.
+
+### From source
 
 ```sh
 cargo build --release
@@ -326,3 +338,26 @@ System leftovers and unmanaged-app removal under `/opt` use every package databa
 - [JSON output schema](docs/json-schema.md), with the `crumbs mcp` tools
 - [MCP server design](docs/superpowers/specs/2026-11-08-crumbs-mcp-design.md)
 - [Design](docs/superpowers/specs/2026-11-08-crumbs-design.md)
+
+## Releasing
+
+Every artifact comes from one script, which also runs in CI on a tag push:
+
+1. Set the version in `Cargo.toml` (`[workspace.package]`) and add a `## <version>` section to `CHANGELOG.md`, then commit.
+2. Run `scripts/release.sh <version>` on a clean tree. It builds into `dist/`:
+   - the static binary;
+   - the AppImage;
+   - the `.deb` and `.rpm`;
+   - `LICENSE`, `SHA256SUMS` and `RELEASE_NOTES.md`;
+   - `dist/aur/{crumbs,crumbs-bin}` with real checksums.
+
+   It needs `appimagetool` (or `APPIMAGETOOL`), `rustup`, `python3` and `git`. It installs `cargo-deb` and `cargo-generate-rpm` into `~/.cache/crumbs-tools` when they are missing.
+3. Check the artifacts with `scripts/test-packaging.sh`, which needs podman. It runs each artifact in containers: the binary on four distros, the AppImage without FUSE, install and removal of the `.deb` and `.rpm`, and an AUR build.
+4. Tag and push: `git tag v<version> && git push origin v<version>`. `.github/workflows/release.yml` then runs `scripts/release.sh` and creates the GitHub release with every artifact.
+5. Publish to the AUR: download the workflow's `aur` artifact, or use your local `dist/aur/`, and push each folder to its AUR repository (`ssh://aur@aur.archlinux.org/crumbs.git`, `.../crumbs-bin.git`). The `crumbs` checksum is that of `git archive` at the tagged commit: check it against GitHub's tag tarball first (`curl -sL <url>/archive/refs/tags/v<version>.tar.gz | sha256sum`).
+
+`scripts/check-licenses.sh` lists any dependency whose licence is not GPL-compatible permissive.
+
+## Licence
+
+crumBS is free software under the GNU General Public License, version 3 or (at your option) any later version. See [LICENSE](LICENSE).
