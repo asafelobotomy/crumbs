@@ -273,6 +273,21 @@ pub trait PrivilegedRunner: Send + Sync {
     }
 }
 
+/// Most captured stderr kept; the tail, since the end says why it failed.
+pub const MAX_STDERR_BYTES: usize = 64 * 1024;
+const TRUNCATED: &[u8] = "… (truncated)\n".as_bytes();
+
+/// Keeps the last [`MAX_STDERR_BYTES`] of `buf`, prefixed with
+/// `… (truncated)\n` when it was cut.
+pub fn cap_stderr(mut buf: Vec<u8>) -> Vec<u8> {
+    if buf.len() <= MAX_STDERR_BYTES {
+        return buf;
+    }
+    let mut out = TRUNCATED.to_vec();
+    out.extend(buf.drain(buf.len() - MAX_STDERR_BYTES..));
+    out
+}
+
 /// How one standard stream of the escalation program is set up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdioMode {
@@ -408,7 +423,7 @@ impl PrivilegedRunner for SystemPrivilegedRunner {
         };
         Ok(PrivilegedRun {
             stdout: join(out),
-            stderr: join(err),
+            stderr: cap_stderr(join(err)),
         })
     }
 }
@@ -804,6 +819,22 @@ mod tests {
         let run = f.run_captured(&esc(), b"echo out; echo err >&2").unwrap();
         assert_eq!(run.stdout, b"out\n");
         assert!(run.stderr.is_empty());
+    }
+
+    #[test]
+    fn captured_stderr_is_capped_to_its_tail() {
+        let f = FakePrivilegedRunner::with_interaction(Interaction::NoTerminal);
+        // 100000 'a' then a distinctive tail, all on stderr.
+        let script = b"head -c 100000 /dev/zero | tr '\\0' a >&2; printf TAIL >&2";
+        let run = f.run_captured(&esc(), script).unwrap();
+        let prefix = "… (truncated)\n".as_bytes();
+        assert_eq!(run.stderr.len(), prefix.len() + MAX_STDERR_BYTES);
+        assert!(run.stderr.starts_with(prefix));
+        assert!(run.stderr.ends_with(b"aTAIL"));
+        // Under the cap it is untouched.
+        assert_eq!(cap_stderr(b"small".to_vec()), b"small");
+        let exact = vec![b'x'; MAX_STDERR_BYTES];
+        assert_eq!(cap_stderr(exact.clone()), exact);
     }
 
     #[test]

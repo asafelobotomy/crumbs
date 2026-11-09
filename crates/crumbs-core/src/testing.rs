@@ -13,7 +13,9 @@ use std::sync::Mutex;
 use crate::command::{CmdOutput, CommandRunner};
 use crate::env::Env;
 use crate::error::CoreError;
-use crate::privilege::batch::{PrivilegedRun, PrivilegedRunner, StdioMode, stdio_modes};
+use crate::privilege::batch::{
+    PrivilegedRun, PrivilegedRunner, StdioMode, cap_stderr, stdio_modes,
+};
 use crate::privilege::{Escalation, Interaction};
 
 pub struct FixtureTree {
@@ -214,7 +216,7 @@ impl PrivilegedRunner for FakePrivilegedRunner {
             })?;
         Ok(PrivilegedRun {
             stdout: out.stdout,
-            stderr: out.stderr,
+            stderr: cap_stderr(out.stderr),
         })
     }
 }

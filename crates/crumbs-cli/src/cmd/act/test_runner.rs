@@ -7,13 +7,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crumbs_core::CoreError;
-use crumbs_core::privilege::batch::{PrivilegedRun, PrivilegedRunner};
+use crumbs_core::privilege::batch::{PrivilegedRun, PrivilegedRunner, cap_stderr};
 use crumbs_core::privilege::{Escalation, EscalationKind, Interaction};
 
 /// Runs the script with `/bin/sh` as the current user. Stdin is always
-/// `/dev/null`; under `NoTerminal` stderr is captured and returned instead
-/// of dropped, and the marker line below is not printed (a server's own
-/// stderr is for its log).
+/// `/dev/null`; under `NoTerminal` the script's stderr is captured and
+/// returned instead of dropped. Either way it always prints the
+/// `crumbs-test: privileged batch` line to the process's own stderr (a
+/// server's stderr is its log, never the protocol).
 struct Sh(Interaction);
 
 impl PrivilegedRunner for Sh {
@@ -45,7 +46,7 @@ impl PrivilegedRunner for Sh {
             })?;
         Ok(PrivilegedRun {
             stdout: out.stdout,
-            stderr: out.stderr,
+            stderr: cap_stderr(out.stderr),
         })
     }
 }
