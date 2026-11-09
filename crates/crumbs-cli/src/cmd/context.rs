@@ -111,14 +111,27 @@ impl Context {
 /// Prints notes as `warning: <source>: <message>` on stderr, or for
 /// `config` as `warning: <message>`.
 pub fn print_notes(notes: &[ErrorEntry]) -> std::io::Result<()> {
-    let mut err = anstream::stderr().lock();
+    anstream::stderr()
+        .lock()
+        .write_all(notes_text(notes).as_bytes())
+}
+
+/// The lines [`print_notes`] prints, sanitised.
+pub fn notes_text(notes: &[ErrorEntry]) -> String {
+    let mut text = String::new();
     for n in notes {
-        let message = sanitise(&n.message);
-        if n.source == "config" {
-            writeln!(err, "warning: {message}")?;
-        } else {
-            writeln!(err, "warning: {}: {message}", n.source)?;
-        }
+        text.push_str(&format!("warning: {}\n", note_line(n)));
     }
-    Ok(())
+    text
+}
+
+/// A note as a warning shows it, without `warning: `: `<source>:
+/// <message>`, or for `config` the message alone. Sanitised.
+pub fn note_line(n: &ErrorEntry) -> String {
+    let message = sanitise(&n.message);
+    if n.source == "config" {
+        message
+    } else {
+        format!("{}: {message}", sanitise(&n.source))
+    }
 }

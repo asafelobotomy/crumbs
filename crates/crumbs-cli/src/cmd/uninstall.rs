@@ -19,8 +19,10 @@ use crumbs_core::safety::{self, Fingerprint, Scope};
 use crumbs_core::{App, Env, SourceKind};
 
 use super::act::{
-    ActFlags, Out, Target, apply, choose, drop_overlaps, plannable, precheck, refuse_source_errors,
+    ActFlags, Out, Target, apply, choose, default_selection, drop_overlaps, plannable, precheck,
+    refuse_source_errors, stop,
 };
+use super::build::{Built, Draft, Pick, Refusal, Stop, select_findings};
 use super::context::Context;
 use super::render::sanitise;
 
@@ -51,16 +53,34 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
     if let Some(code) = precheck(out, &args.act)? {
         return Ok(code);
     }
+    let pick = if args.act.interactive {
+        Pick::Checklist
+    } else {
+        Pick::Defaults
+    };
+    let Draft { built, cfg, .. } = match build(env, args, pick) {
+        Ok(draft) => draft,
+        Err(s) => return stop(out, s),
+    };
+    apply(
+        env,
+        &cfg,
+        &built.errors,
+        out,
+        &built.targets,
+        &args.act,
+        &built.after_preview,
+    )
+}
+
+/// Plans the removal of `args.apps` and the leftovers `pick` chooses.
+pub(crate) fn build(env: &Env, args: &UninstallArgs, pick: Pick<PathBuf>) -> Result<Draft, Stop> {
     let cx = Context::load(env)?;
     let mut apps: Vec<&App> = Vec::new();
     for query in &args.apps {
-        match resolve(out, &cx.inv, query)? {
-            Ok(app) => {
-                if !apps.iter().any(|a| a.id == app.id) {
-                    apps.push(app);
-                }
-            }
-            Err(code) => return Ok(code),
+        let app = resolve(&cx.inv, query)?;
+        if !apps.iter().any(|a| a.id == app.id) {
+            apps.push(app);
         }
     }
     // How each app itself goes, in `apps` order; none with --leftovers-only.
@@ -77,7 +97,7 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
                 plan_removal(env, &SystemRunner::new(), app).map(|r| removal = Some(r))
             };
             if let Err(e) = planned {
-                return refuse_removal(out, app, &e);
+                return Err(removal_refusal(app, &e).into());
             }
         }
         removals.push(removal);
@@ -90,43 +110,58 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
                     "cannot remove {}: {reason}; use --leftovers-only to remove only its leftovers",
                     app.id
                 );
-                return out.fail(1, &msg);
+                return Err(Refusal::new(1, msg).into());
             }
         }
     }
-    if let Some(code) = refuse_source_errors(out, &cx.inv, &args.act)? {
-        return Ok(code);
-    }
+    refuse_source_errors(&cx.inv, &args.act)?;
     let opts = PlanOptions {
         permanent: args.act.permanent,
         // `--keep-data` is applied to the findings below, before choosing.
         keep_data: false,
         leftovers_only: args.leftovers_only,
     };
+    let found: Vec<Vec<Finding>> = apps
+        .iter()
+        .map(|app| {
+            let mut found = plannable(find_leftovers(&cx.idx, app, args.show_low));
+            // Offered, never pre-selected: root deletes only on an explicit pick.
+            found.extend(find_system_leftovers(
+                env,
+                &cx.cfg,
+                &cx.idx,
+                app,
+                args.show_low,
+            ));
+            found.retain(|f| keeps(env, app, f, args));
+            found
+        })
+        .collect();
+    let selectable: Vec<Finding> = found.iter().flatten().cloned().collect();
+    let wanted = match pick {
+        Pick::Named(select) => select_findings(env, &selectable, select)?,
+        Pick::Defaults | Pick::Checklist => Vec::new(),
+    };
     let mut targets = Vec::new();
     let mut unselected_system = 0usize;
-    for ((app, removal), target) in apps.into_iter().zip(removals).zip(unmanaged) {
-        let mut found = plannable(find_leftovers(&cx.idx, app, args.show_low));
-        // Offered, never pre-selected: root deletes only on an explicit pick.
-        found.extend(find_system_leftovers(
-            env,
-            &cx.cfg,
-            &cx.idx,
-            app,
-            args.show_low,
-        ));
-        found.retain(|f| keeps(env, app, f, args));
+    for (((app, removal), target), found) in
+        apps.into_iter().zip(removals).zip(unmanaged).zip(found)
+    {
         let system_found: Vec<PathBuf> = found
             .iter()
             .filter(|f| f.scope == Scope::SystemTree)
             .map(|f| f.path.clone())
             .collect();
-        let prompt_text = format!("Leftovers of {} to remove", sanitise(&app.display_name));
-        let Some(chosen) = choose(env, &prompt_text, found, args.act.interactive, |f| {
-            f.preselected
-        })?
-        else {
-            return out.aborted();
+        let chosen = match pick {
+            Pick::Defaults => default_selection(found, |f| f.preselected),
+            Pick::Named(_) => found
+                .into_iter()
+                .filter(|f| wanted.contains(&f.path))
+                .collect(),
+            Pick::Checklist => {
+                let prompt_text = format!("Leftovers of {} to remove", sanitise(&app.display_name));
+                choose(env, &prompt_text, found, true, |f| f.preselected)?.ok_or(Stop::Aborted)?
+            }
         };
         let chosen_paths: Vec<PathBuf> = chosen.iter().map(|f| f.path.clone()).collect();
         let mut plan = build_plan_unmanaged(env, Some(app), target.as_ref(), &chosen, &opts)?;
@@ -146,13 +181,43 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
             .count();
         targets.push(Target {
             heading: format!("{}  {}", sanitise(&app.display_name), sanitise(&app.id)),
-            app: Some(app),
+            app: Some(app.clone()),
             plan,
         });
     }
     drop_overlaps(&mut targets);
-    let notes = unselected_note(unselected_system);
-    apply(env, &cx.cfg, &cx.errors(), out, &targets, &args.act, &notes)
+    let built = Built {
+        targets,
+        errors: cx.errors(),
+        after_preview: unselected_note(unselected_system),
+        cli_command: cli_command(args, &pick),
+    };
+    Ok(Draft {
+        built,
+        cfg: cx.cfg,
+        held: Vec::new(),
+    })
+}
+
+/// The CLI command that plans the same: a picked selection is `-i`.
+fn cli_command(args: &UninstallArgs, pick: &Pick<PathBuf>) -> Vec<String> {
+    let mut argv = vec!["crumbs".to_string(), "uninstall".to_string()];
+    argv.extend(args.apps.iter().cloned());
+    let flags = [
+        (args.leftovers_only, "--leftovers-only"),
+        (args.keep_data, "--keep-data"),
+        (args.show_low, "--show-low"),
+        (args.act.permanent, "--permanent"),
+        (args.act.force, "--force"),
+        (!matches!(pick, Pick::Defaults), "-i"),
+    ];
+    argv.extend(
+        flags
+            .iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, f)| f.to_string()),
+    );
+    argv
 }
 
 /// The preview note for system leftovers that were offered but not picked.
@@ -212,13 +277,13 @@ fn attach_removal(plan: &mut Plan, removal: RemovalPlan) {
     plan.notes.push(NOTE_NO_UNDO.into());
 }
 
-/// Explains why the app itself cannot be removed: exit 2 when crumbs does
-/// not support it, else 1. Text from the package manager may span lines;
-/// the first goes into the error line, the rest below it (sanitised).
-fn refuse_removal(out: Out, app: &App, e: &RemovalError) -> anyhow::Result<ExitCode> {
+/// Why the app itself cannot be removed: exit 2 when crumbs does not
+/// support it, else 1. Text from the package manager may span lines; the
+/// first goes into the error line, the rest below it.
+fn removal_refusal(app: &App, e: &RemovalError) -> Refusal {
     match e {
-        RemovalError::Unsupported(msg) => out.fail(2, msg),
-        RemovalError::Busy(msg) => out.fail(1, msg),
+        RemovalError::Unsupported(msg) => Refusal::new(2, msg.clone()),
+        RemovalError::Busy(msg) => Refusal::new(1, msg.clone()),
         RemovalError::Refused(text) | RemovalError::InvalidName(text) => {
             let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
             // pacman starts its summary with its own `error: `.
@@ -226,7 +291,7 @@ fn refuse_removal(out: Out, app: &App, e: &RemovalError) -> anyhow::Result<ExitC
                 .next()
                 .map_or("refused", |l| l.strip_prefix("error: ").unwrap_or(l));
             let rest: Vec<String> = lines.map(str::to_string).collect();
-            out.fail_with(1, &format!("cannot remove {}: {first}", app.id), &rest)
+            Refusal::new(1, format!("cannot remove {}: {first}", app.id)).with_details(rest)
         }
     }
 }
@@ -311,37 +376,31 @@ fn runs_app_file(env: &Env, app: &App, name: &str, path: &Path) -> bool {
     })
 }
 
-/// The app for one query (exact matches only), or the exit code after
-/// explaining why not.
-fn resolve<'a>(
-    out: Out,
-    inv: &'a Inventory,
-    query: &str,
-) -> anyhow::Result<Result<&'a App, ExitCode>> {
+/// The app for one query (exact matches only), or why not.
+fn resolve<'a>(inv: &'a Inventory, query: &str) -> Result<&'a App, Refusal> {
     let list = |c: Vec<&App>| -> Vec<String> {
         c.iter()
             .map(|a| format!("{}  {}  {}", a.id, a.display_name, a.source.as_str()))
             .collect()
     };
-    let code = match find_app_exact(inv, query) {
-        Resolved::Found(app) => return Ok(Ok(app)),
+    Err(match find_app_exact(inv, query) {
+        Resolved::Found(app) => return Ok(app),
         Resolved::Ambiguous(c) => {
-            out.fail_with(2, &format!("'{query}' matches several apps:"), &list(c))?
+            Refusal::new(2, format!("'{query}' matches several apps:")).with_details(list(c))
         }
         Resolved::NotFound => match find_app(inv, query) {
-            Resolved::Found(app) => out.fail(
+            Resolved::Found(app) => Refusal::new(
                 2,
-                &format!("no app is exactly '{query}'; did you mean '{}'?", app.id),
-            )?,
-            Resolved::Ambiguous(c) => out.fail_with(
+                format!("no app is exactly '{query}'; did you mean '{}'?", app.id),
+            ),
+            Resolved::Ambiguous(c) => Refusal::new(
                 2,
-                &format!("no app is exactly '{query}'; did you mean one of these?"),
-                &list(c),
-            )?,
-            Resolved::NotFound => out.fail(2, &format!("no installed app matches '{query}'"))?,
+                format!("no app is exactly '{query}'; did you mean one of these?"),
+            )
+            .with_details(list(c)),
+            Resolved::NotFound => Refusal::new(2, format!("no installed app matches '{query}'")),
         },
-    };
-    Ok(Err(code))
+    })
 }
 
 #[cfg(test)]

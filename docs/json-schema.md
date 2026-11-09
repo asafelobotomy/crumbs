@@ -1402,3 +1402,151 @@ The history entry that running the Flatpak command leaves (see `history`):
   "trashed": null
 }
 ```
+
+## MCP tools (`crumbs mcp`)
+
+`crumbs mcp` serves the commands above to AI agents over MCP (stdio). It does not use the envelope: a tool's result is the command's `data` object, as `structuredContent` and, as compact JSON, in a text content block. Warnings that the CLI prints as `warning: ...` and puts in `errors` are sent as MCP log messages (level `warning`, logger `crumbs`) instead. The tool list is the output of `tools/list`; the argument tables below come from it. Every argument is optional unless the table says so, unknown arguments are rejected, and the server's tools carry no output schema.
+
+### Read tools
+
+Each returns exactly the `data` of the CLI command with `--json`. All six have `readOnlyHint: true`.
+
+| Tool | Arguments | Result is the `data` of |
+|---|---|---|
+| `doctor` | none | `doctor` |
+| `apps_list` | `source`: array of `pacman`, `flatpak`, `appimage`, `unmanaged`; `all`: boolean | `apps list` |
+| `app_show` | `app`: string (required); `show_low`: boolean | `apps show` |
+| `scan` | `categories`: array of names; `user`, `system`: boolean | `scan` (without `--details`) |
+| `orphans` | `system`, `user`, `show_low`: boolean | `orphans`, or `orphans --system` |
+| `history` | `limit`: integer, default 50 | `history` |
+
+`user` together with `system` is refused, as the CLI refuses `--user --system`.
+
+### Preview tools
+
+The four preview tools change nothing (`readOnlyHint: true`). A preview builds the plan the matching CLI command would run with `--dry-run`, keeps it in the server's memory, and returns that command's dry-run `data` (`plans` and `report: null`, see `uninstall` above) plus these fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `plan_id` | string or null | 32 lowercase hex characters, to give to `apply`. `null` when the plan has nothing to do (nothing is stored then). |
+| `expires_at` | string or null | RFC 3339 UTC time, to the second, 10 minutes after the preview. `null` exactly when `plan_id` is. |
+| `needs_admin` | boolean | Whether running the plan needs administrator rights. Always `false` for `preview_restore`: only your own files are restorable. |
+| `cli_command` | string | The `crumbs ...` command line that would make the same plan, quoted for a shell. For an `uninstall` with `select` it is the plain command with `-i` appended: there is no flag for the selection. |
+| `preview_text` | string | What the CLI prints for the plan, without colour, ending with the CLI's `note:` lines; this is what the user is shown when `apply` asks. |
+
+| Tool | Arguments |
+|---|---|
+| `preview_uninstall` | `app`: string (required, exact match); `leftovers_only`, `keep_data`, `show_low`: boolean; `select`: array of paths |
+| `preview_clean` | `categories`: array of names; `user`, `system`: boolean; `select`: array of paths or category ids |
+| `preview_orphans` | `paths`: array of absolute paths (required, at least one); `system`, `show_low`: boolean |
+| `preview_restore` | `entry`: string (required): a history entry id, a batch id or a path |
+
+`select` and `paths` name only what crumbs finds for the same request: a value it did not find is refused with `not found by crumbs: ...` (exit_code 2) and nothing is stored. An empty `select` means the CLI's defaults. A system leftover (`scope` `system-tree`) is planned only when `select` names it. `preview_orphans` without a path is refused (`orphans --clean needs --select <path>... or -i`).
+
+`preview_restore` also has `outcomes` in its data: the dry-run outcomes of `restore` (see `restore` above), and its `plans` is empty. `apply` restores exactly the entries with `ok` true and a non-empty `entry_id` listed there, not whatever the selector matches by then. Its `preview_text` lists the destinations (`✓ would restore <path>`), not where each item comes from.
+
+```json
+{
+  "cli_command": "crumbs uninstall Tool",
+  "expires_at": "2026-11-09T01:49:37Z",
+  "needs_admin": false,
+  "plan_id": "84e03527099a3d01b73f2a368ca09336",
+  "plans": [
+    {
+      "actions": [
+        {
+          "action": { "path": "/home/user/Applications/Tool-1.0-x86_64.AppImage", "type": "trash" },
+          "reason": "AppImage file",
+          "size": 4096
+        },
+        {
+          "action": { "path": "/home/user/.config/Tool", "type": "trash" },
+          "depends_on": 0,
+          "reason": "named after the app name",
+          "size": 4096
+        }
+      ],
+      "app_id": "appimage:~/Applications/Tool-1.0-x86_64.AppImage",
+      "notes": [],
+      "total_size": 8192
+    }
+  ],
+  "preview_text": "Tool  appimage:~/Applications/Tool-1.0-x86_64.AppImage\nACTION  SIZE     PATH   ...\n",
+  "report": null
+}
+```
+
+`preview_text` is shortened in this example.
+
+### `apply`
+
+`apply` takes `plan_id` (required) and nothing else: no argument can confirm a plan. It has `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: false`. It runs the previewed plan once, only after the user confirms it in the client:
+
+- a client that starts with `initialize` gets the server's own `elicitation/create` (a form with one boolean, `confirm`), and the server waits up to 10 minutes for the answer. This holds even when `initialize` asks for protocol 2026-07-28: the server negotiates 2025-11-25;
+- a client on the 2026-07-28 inline lifecycle (`server/discover`, then `_meta` carrying `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities` on every request) gets an `InputRequiredResult`. The first `apply` returns one input request (an elicitation under a key `confirm-<32 hex>`) with the plan id as `requestState`, and the client calls `apply` again with `requestState` and `inputResponses`. An answer counts only under that key and only after the server issued it.
+
+On the inline lifecycle a request without `_meta` is rejected by `rmcp` with JSON-RPC error -32602 and runs nothing. Every other mismatch fails closed: a client whose capabilities (in the handshake or the request) do not allow a form is refused, and a retry with another plan's state, a missing state or answer, or an answer under another key is refused with `that is not the answer to this plan's confirmation; nothing was run`, the plan kept.
+
+Both need a form `accept` with `confirm` true. The plan is removed when it runs, and on a no, a cancel or a timeout, and a plan that is used or has expired is `plan not found or expired; preview again`. A malformed `plan_id` is refused the same way. On the `elicitation/create` path a yes that arrives after the plan expired runs nothing and is refused with `the plan expired while waiting for your answer; preview again` (exit_code 2); the plan stays removed. While one `apply` waits for that answer, other `apply` calls wait.
+
+The result is one of the following. `exit_code` is the CLI's exit code for the same run.
+
+| Shape | When |
+|---|---|
+| `{ "applied": false, "reason": "declined" }` | The user said no (`confirm` false, or `decline`). `reason` is also `"cancelled"` or `"timed out"`. Not an error. |
+| `{ "applied": true, "report": [...], "exit_code": 0 }` | The plan ran. `report` is the array `data.report` has for `uninstall`, `orphans --clean` and `clean`. |
+| the same with `exit_code` 3, tool error | Partial failure; `applied` is `false` when no action succeeded. When the privileged run stopped part-way, also `"error": "the privileged run stopped before it finished; the step it was in may have partly run, and the steps after it did not run"`. |
+| `{ "applied": true, "outcomes": [...], "exit_code": 0 }` | A restore ran. `outcomes` as in `restore` above. `exit_code` 3 and a tool error when any outcome is not `ok`; `applied` is `false` when none is. |
+| `{ "applied": ..., "exit_code": 5, "error": ..., "manual_commands": [...] }` | Administrator rights were needed and not available or not granted. Not an error result. See below. |
+
+`applied` is `true` when at least one action result is `ok` across the plans (for a restore, at least one outcome), and `false` otherwise. A plan whose user-level steps ran before its root steps were denied (exit 5) gives `true`; a plan made only of root steps with a denied prompt gives `false`.
+
+**Exit 5 result.** Fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `applied` | boolean | `true` when at least one action succeeded: user-level steps ran and only the root steps did not. `false` when nothing succeeded (no escalation program, or a denied prompt for a plan of root steps only). |
+| `exit_code` | number | `5`. |
+| `error` | string | `no way to get administrator rights` (no escalation program: nothing ran, no history) or `administrator rights were not granted; nothing that needs them was changed` (the prompt was cancelled, denied or failed). |
+| `manual_commands` | array of string | The commands to run yourself, as in the CLI's exit-5 `data.manual_commands`. |
+| `note` | string | Present only when a command is an `rm -rf --one-file-system`: `check that nothing is mounted inside these paths before running the rm commands`. |
+| `report` | array | Present only when `applied` is `true` (something ran): the reports, with `escalation_failed` true on the root steps. |
+| `escalation_output` | string | Present only when the escalation program printed something (the first non-empty output, sanitised). |
+
+```json
+{
+  "applied": false,
+  "error": "no way to get administrator rights",
+  "exit_code": 5,
+  "manual_commands": [
+    "sudo 'rm' '-rf' '--one-file-system' '--' '/opt/inky'"
+  ],
+  "note": "check that nothing is mounted inside these paths before running the rm commands"
+}
+```
+
+Root steps run through `run0` or `pkexec` and never `sudo`, with stdin from `/dev/null`. With no graphical polkit agent the escalation fails and the result is the exit-5 one.
+
+A client that cannot show a form gets a refusal naming the command to run instead, and the plan stays:
+
+```json
+{
+  "content": [
+    { "type": "text", "text": "this client can't ask you to confirm; run this in a terminal instead: crumbs uninstall Tool" },
+    { "type": "text", "text": "{\"details\":[],\"exit_code\":2}" }
+  ],
+  "structuredContent": { "details": [], "exit_code": 2 },
+  "isError": true
+}
+```
+
+### Refusals
+
+A refusal is a tool result with `isError: true`. The first text block is the CLI's message (sanitised of control characters), and `structuredContent` is `{ "exit_code": number, "details": [string] }`. Usage errors and domain refusals use the CLI's exit codes (2 for an unknown app, a conflicting flag, an unknown category, a `select` crumbs did not find, an unknown plan; 1 for failures such as an unreadable config, a plan id that cannot be made, a failed confirmation, a running app, or too many pending plans). `details` holds the refusal's further lines, and is empty for most. Example:
+
+```json
+{ "content": [{ "type": "text", "text": "no installed app matches 'nope'" }],
+  "structuredContent": { "details": [], "exit_code": 2 }, "isError": true }
+```
+
+A running app is refused when the plan is applied, with exit_code 1 and text such as `Inky is running (pid 79); close it, then preview again`: the server cannot ask whether the app may be closed.

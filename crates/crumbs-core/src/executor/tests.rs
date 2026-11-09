@@ -1115,6 +1115,61 @@ fn escalation_denied_marks_all_failed_and_skips_dependents() {
     assert!(hist.iter().all(|h| !h.ok));
 }
 
+/// Denies like [`DeniedRunner`], with what the escalation wrote on stderr.
+struct DeniedWithStderr;
+
+impl PrivilegedRunner for DeniedWithStderr {
+    fn run(&self, _: &Escalation, _: &[u8]) -> Result<Vec<u8>, crate::error::CoreError> {
+        Ok(Vec::new())
+    }
+
+    fn run_captured(
+        &self,
+        _: &Escalation,
+        _: &[u8],
+    ) -> Result<crate::privilege::batch::PrivilegedRun, crate::error::CoreError> {
+        Ok(crate::privilege::batch::PrivilegedRun {
+            stdout: Vec::new(),
+            stderr: b"polkit: not authorized\n".to_vec(),
+        })
+    }
+}
+
+#[test]
+fn denied_batch_keeps_the_escalation_stderr_and_a_run_one_does_not() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "flatpak", &log, "", 0);
+    let env = t.env();
+    let plan = plan_of(vec![priv_cmd(
+        "flatpak",
+        &["uninstall", "--system", "-y", "org.x.App"],
+    )]);
+    let run = |pr: &dyn PrivilegedRunner| {
+        execute_full(
+            &env,
+            &Config::default(),
+            &plan,
+            &FakeRunner::new(),
+            pr,
+            Some(&esc()),
+            &|_, _, _| Ok(Vec::new()),
+        )
+    };
+    let report = run(&DeniedWithStderr);
+    assert!(report.escalation_failed);
+    assert_eq!(report.escalation_output, b"polkit: not authorized\n");
+    // Not in the JSON.
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(!json.contains("polkit"), "{json}");
+    // Markers came back: nothing kept, whatever was on stderr.
+    let report = run(&FakePrivilegedRunner::with_interaction(
+        crate::privilege::Interaction::NoTerminal,
+    ));
+    assert!(!report.escalation_failed, "{report:?}");
+    assert!(report.escalation_output.is_empty());
+}
+
 #[test]
 fn no_escalation_tool_reports_and_flags() {
     let t = FixtureTree::new();

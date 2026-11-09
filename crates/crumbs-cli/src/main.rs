@@ -1,4 +1,6 @@
 mod cmd;
+#[cfg(feature = "mcp")]
+mod mcp;
 mod output;
 mod prompt;
 
@@ -64,6 +66,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Serve crumbs to AI agents: an MCP server on stdin and stdout
+    #[cfg(feature = "mcp")]
+    Mcp,
 }
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
@@ -74,6 +79,12 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     };
     #[cfg(not(debug_assertions))]
     let env = Env::from_system()?;
+    // The server keeps stdout for the protocol and sends warnings to the
+    // client instead.
+    #[cfg(feature = "mcp")]
+    if matches!(cli.command, Command::Mcp) {
+        return mcp::serve(env);
+    }
     for w in crumbs_core::history::harden_files(&env) {
         eprintln!("warning: history: {}", cmd::render::sanitise(&w));
     }
@@ -90,6 +101,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Scan(args) => cmd::scan::run(&env, &args),
         Command::Clean(args) => cmd::clean::run(&env, &args),
         Command::Doctor { json } => cmd::doctor::run(&env, json),
+        #[cfg(feature = "mcp")]
+        Command::Mcp => unreachable!("served above"),
     }
 }
 

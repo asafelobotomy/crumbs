@@ -2,6 +2,7 @@
 //! then the shared confirm-and-execute flow in [`super::act`].
 
 use std::io::Write;
+use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Args;
@@ -11,7 +12,8 @@ use crumbs_core::command::SystemRunner;
 use crumbs_core::plan::{PlanOptions, build_clean_plan};
 use serde_json::json;
 
-use super::act::{ActFlags, Out, Target, apply, precheck, refuse_failed};
+use super::act::{ActFlags, Out, Target, apply, precheck, refuse_failed, stop};
+use super::build::{Built, Draft, Pick, Refusal, Stop, expand_home, not_found};
 use super::context::{ScanSetup, print_notes};
 use super::render::sanitise;
 use super::scan::{USER_AND_SYSTEM, cross_kind};
@@ -41,14 +43,41 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
         command: "clean",
         json: act.json,
     };
-    if args.user && args.system {
-        return out.fail(2, USER_AND_SYSTEM);
-    }
-    if let Some(msg) = cross_kind(&args.categories, args.user, args.system) {
-        return out.fail(2, &msg);
+    if let Some(refusal) = usage(args) {
+        return out.fail(refusal.exit_code, &refusal.message);
     }
     if let Some(code) = precheck(out, act)? {
         return Ok(code);
+    }
+    let pick = if act.interactive {
+        Pick::Checklist
+    } else {
+        Pick::Defaults
+    };
+    let Draft { built, cfg, held } = match build(env, args, pick) {
+        Ok(draft) => draft,
+        Err(s) => return stop(out, s),
+    };
+    if built.targets.is_empty() {
+        return nothing_to_clean(out, act, &held, &built.errors);
+    }
+    apply(env, &cfg, &built.errors, out, &built.targets, act, &[])
+}
+
+/// `--user` with `--system`, or a named category of the other kind.
+fn usage(args: &CleanArgs) -> Option<Refusal> {
+    if args.user && args.system {
+        return Some(Refusal::new(2, USER_AND_SYSTEM));
+    }
+    cross_kind(&args.categories, args.user, args.system).map(|msg| Refusal::new(2, msg))
+}
+
+/// Scans the chosen categories and plans the items `pick` chooses; no
+/// target when none is chosen.
+pub(crate) fn build(env: &Env, args: &CleanArgs, pick: Pick<String>) -> Result<Draft, Stop> {
+    let act = &args.act;
+    if let Some(refusal) = usage(args) {
+        return Err(refusal.into());
     }
     let setup = ScanSetup::load(env)?;
     let named = !args.categories.is_empty();
@@ -81,9 +110,7 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
             .as_ref()
             .map(|m| ErrorEntry::new(r.category.as_str(), m.clone()))
     }));
-    if let Some(code) = refuse_failed(out, &errors, act)? {
-        return Ok(code);
-    }
+    refuse_failed(&errors, act)?;
     errors.extend(setup.notes.iter().cloned());
 
     let items: Vec<BloatItem> = report
@@ -94,49 +121,125 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
     let defaults: Vec<bool> = items.iter().map(|i| preselect(i, named)).collect();
     // Items a scanner held back (a running app); the opt-in Flatpak
     // command and trash entries are not among them.
-    let held: Vec<&str> = if act.interactive {
+    let held: Vec<String> = if matches!(pick, Pick::Checklist) {
         Vec::new()
     } else {
         items
             .iter()
             .filter(|i| !i.preselected && !opt_in(i.category))
-            .map(|i| i.note.as_deref().unwrap_or(&i.label))
+            .map(|i| i.note.as_deref().unwrap_or(&i.label).to_string())
             .collect()
     };
-    let held: Vec<String> = held.into_iter().map(String::from).collect();
-    let chosen: Vec<BloatItem> = if act.interactive && !items.is_empty() {
-        let lines: Vec<String> = items.iter().map(checklist_line).collect();
-        let Some(picked) = prompt::multi_select("Items to clean", &lines, &defaults)? else {
-            return out.aborted();
-        };
-        items
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| picked.contains(i))
-            .map(|(_, item)| item)
-            .collect()
-    } else {
-        items
-            .into_iter()
-            .zip(defaults)
-            .filter_map(|(item, on)| on.then_some(item))
-            .collect()
+    let ticks: Vec<bool> = match pick {
+        Pick::Checklist if !items.is_empty() => {
+            let lines: Vec<String> = items.iter().map(checklist_line).collect();
+            let picked =
+                prompt::multi_select("Items to clean", &lines, &defaults)?.ok_or(Stop::Aborted)?;
+            (0..items.len()).map(|i| picked.contains(&i)).collect()
+        }
+        Pick::Named(select) => named_ticks(env, &which, &items, select)?,
+        Pick::Defaults | Pick::Checklist => defaults,
     };
-    if chosen.is_empty() {
-        return nothing_to_clean(out, act, &held, &errors);
-    }
+    let chosen: Vec<BloatItem> = items
+        .into_iter()
+        .zip(ticks)
+        .filter_map(|(item, on)| on.then_some(item))
+        .collect();
 
     // Planned only after choosing: `depends_on` indexes the plan's actions.
-    let opts = PlanOptions {
-        permanent: act.permanent,
-        ..PlanOptions::default()
+    let targets = if chosen.is_empty() {
+        Vec::new()
+    } else {
+        let opts = PlanOptions {
+            permanent: act.permanent,
+            ..PlanOptions::default()
+        };
+        vec![Target {
+            heading: "Clean".into(),
+            app: None,
+            plan: build_clean_plan(env, &chosen, &opts)?,
+        }]
     };
-    let targets = [Target {
-        heading: "Clean".into(),
-        app: None,
-        plan: build_clean_plan(env, &chosen, &opts)?,
-    }];
-    apply(env, &setup.cfg, &errors, out, &targets, act, &[])
+    let built = Built {
+        targets,
+        errors,
+        after_preview: Vec::new(),
+        cli_command: cli_command(args, &which, pick),
+    };
+    Ok(Draft {
+        built,
+        cfg: setup.cfg,
+        held,
+    })
+}
+
+/// Which of `items` the `select` values name: a category id (one of
+/// `which`) stands for its items that would be ticked were it named, a
+/// path for the item at it.
+fn named_ticks(
+    env: &Env,
+    which: &[Category],
+    items: &[BloatItem],
+    select: &[String],
+) -> Result<Vec<bool>, Refusal> {
+    let mut ticks = vec![false; items.len()];
+    for s in select {
+        if let Some(c) = which.iter().find(|c| c.as_str() == s) {
+            for (tick, item) in ticks.iter_mut().zip(items) {
+                *tick |= item.category == *c && preselect(item, true);
+            }
+            continue;
+        }
+        let path = expand_home(env, Path::new(s));
+        let at = items.iter().position(|i| i.path.as_ref() == Some(&path));
+        match at.and_then(|i| ticks.get_mut(i)) {
+            Some(tick) => *tick = true,
+            None => return Err(not_found(s)),
+        }
+    }
+    Ok(ticks)
+}
+
+/// The CLI command that plans the same. Categories named in `select` are
+/// named; an item path needs the checklist (`-i`).
+fn cli_command(args: &CleanArgs, which: &[Category], pick: Pick<String>) -> Vec<String> {
+    let mut argv = vec!["crumbs".to_string(), "clean".to_string()];
+    let mut interactive = matches!(pick, Pick::Checklist);
+    match pick {
+        Pick::Named(select) => {
+            for s in select {
+                match which.iter().find(|c| c.as_str() == s) {
+                    Some(c) if !argv.iter().any(|a| a == c.as_str()) => {
+                        argv.push(c.as_str().to_string());
+                    }
+                    Some(_) => {}
+                    None => interactive = true,
+                }
+            }
+            if interactive {
+                // The checklist offers what the command scans.
+                argv.truncate(2);
+                argv.extend(args.categories.iter().map(|c| c.as_str().to_string()));
+            }
+        }
+        Pick::Defaults | Pick::Checklist => {
+            argv.extend(args.categories.iter().map(|c| c.as_str().to_string()));
+        }
+    }
+    let flags = [
+        (args.user, "--user"),
+        (args.system, "--system"),
+        (args.act.permanent, "--permanent"),
+        (args.act.force, "--force"),
+        (interactive, "-i"),
+    ];
+    argv.extend(
+        flags
+            .iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, f)| f.to_string()),
+    );
+    argv
 }
 
 /// Categories whose items are never ticked unless the category is named:

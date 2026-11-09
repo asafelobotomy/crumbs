@@ -52,8 +52,8 @@ fn label(es: &[&HistoryEntry]) -> String {
     }
 }
 
-pub fn run(env: &Env, limit: usize, json: bool) -> anyhow::Result<ExitCode> {
-    let (entries, skipped) = read_history(env)?;
+/// The newest `limit` batches of `entries`, newest first.
+fn batches(entries: &[HistoryEntry], limit: usize) -> Vec<Batch<'_>> {
     let restored: HashSet<&str> = entries
         .iter()
         .filter(|e| e.action == HistoryAction::Restore && e.ok)
@@ -61,12 +61,12 @@ pub fn run(env: &Env, limit: usize, json: bool) -> anyhow::Result<ExitCode> {
         .collect();
     // Batches in file order (the file is append-only), then newest first.
     let mut order: Vec<&str> = Vec::new();
-    for e in &entries {
+    for e in entries {
         if !order.contains(&e.batch.as_str()) {
             order.push(&e.batch);
         }
     }
-    let batches: Vec<Batch> = order
+    order
         .iter()
         .rev()
         .take(limit)
@@ -86,14 +86,43 @@ pub fn run(env: &Env, limit: usize, json: bool) -> anyhow::Result<ExitCode> {
                 entries: es,
             }
         })
+        .collect()
+}
+
+/// The note about unreadable history lines, if any.
+fn skipped_note(skipped: usize) -> Option<String> {
+    (skipped > 0).then(|| format!("{skipped} unreadable lines skipped"))
+}
+
+/// The envelope's `data` and `errors` for `--json`.
+fn json_parts(batches: &[Batch], note: Option<String>) -> (serde_json::Value, Vec<ErrorEntry>) {
+    let errors: Vec<ErrorEntry> = note
+        .into_iter()
+        .map(|m| ErrorEntry::new("history", m))
         .collect();
-    let note = (skipped > 0).then(|| format!("{skipped} unreadable lines skipped"));
+    (json!({ "batches": batches }), errors)
+}
+
+/// `history --json` data and errors.
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(dead_code, reason = "only the mcp server calls it")
+)]
+pub(crate) fn data(
+    env: &Env,
+    limit: usize,
+) -> anyhow::Result<(serde_json::Value, Vec<ErrorEntry>)> {
+    let (entries, skipped) = read_history(env)?;
+    Ok(json_parts(&batches(&entries, limit), skipped_note(skipped)))
+}
+
+pub fn run(env: &Env, limit: usize, json: bool) -> anyhow::Result<ExitCode> {
+    let (entries, skipped) = read_history(env)?;
+    let batches = batches(&entries, limit);
+    let note = skipped_note(skipped);
     if json {
-        let errors: Vec<ErrorEntry> = note
-            .into_iter()
-            .map(|m| ErrorEntry::new("history", m))
-            .collect();
-        print_json_entries("history", &json!({ "batches": batches }), &errors)?;
+        let (data, errors) = json_parts(&batches, note);
+        print_json_entries("history", &data, &errors)?;
         return Ok(ExitCode::SUCCESS);
     }
     let mut out = anstream::stdout().lock();

@@ -10,14 +10,24 @@ use super::context::{load_cfg, print_notes};
 use super::render::sanitise;
 use crate::output::{ErrorEntry, print_json_entries};
 
-pub fn run(env: &Env, json: bool) -> anyhow::Result<ExitCode> {
+/// The doctor report and the config warnings.
+pub(crate) fn gather(env: &Env) -> anyhow::Result<(DoctorReport, Vec<ErrorEntry>)> {
     let (cfg, notes) = load_cfg(env)?;
-    let report = doctor(env, &SystemRunner::new(), &cfg);
+    Ok((doctor(env, &SystemRunner::new(), &cfg), notes))
+}
+
+/// The envelope's `errors`: failed sources, then `notes`.
+pub(crate) fn json_errors(report: &DoctorReport, notes: Vec<ErrorEntry>) -> Vec<ErrorEntry> {
+    let mut errors: Vec<ErrorEntry> = report.errors.iter().map(ErrorEntry::from).collect();
+    errors.extend(notes);
+    errors
+}
+
+pub fn run(env: &Env, json: bool) -> anyhow::Result<ExitCode> {
+    let (report, notes) = gather(env)?;
     let code = crate::output::source_exit_code(&report.sources, &report.errors);
     if json {
-        let mut errors: Vec<ErrorEntry> = report.errors.iter().map(ErrorEntry::from).collect();
-        errors.extend(notes);
-        print_json_entries("doctor", &report, &errors)?;
+        print_json_entries("doctor", &report, &json_errors(&report, notes))?;
     } else {
         print_human(&report)?;
         let mut err = anstream::stderr().lock();

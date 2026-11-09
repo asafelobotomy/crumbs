@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Args;
@@ -8,12 +8,14 @@ use crumbs_core::leftovers::{Finding, find_orphans, find_system_orphans};
 use crumbs_core::plan::{PlanOptions, build_plan};
 use serde_json::json;
 
-use super::act::{ActFlags, Out, Target, apply, choose, plannable, precheck, refuse_source_errors};
+use super::act::{
+    ActFlags, Out, Target, apply, choose, plannable, precheck, refuse_source_errors, stop,
+};
+use super::build::{Built, Draft, Pick, Refusal, Stop, expand_home};
 use super::context::{Context, print_notes};
 use super::render::{finding_size, sanitise, shown_path};
 use crate::output::{
-    ErrorEntry, confidence, finding_kind, fmt_size, partial_failure, print_json_entries,
-    print_table,
+    confidence, finding_kind, fmt_size, partial_failure, print_json_entries, print_table,
 };
 
 #[derive(Args, Debug)]
@@ -38,6 +40,9 @@ pub struct OrphansArgs {
     pub act: ActFlags,
 }
 
+pub const USER_AND_SYSTEM: &str = "use either --user or --system";
+const NEEDS_SELECT: &str = "orphans --clean needs --select <path>... or -i";
+
 pub fn run(env: &Env, args: &OrphansArgs) -> anyhow::Result<ExitCode> {
     let act = &args.act;
     let out = Out {
@@ -45,7 +50,7 @@ pub fn run(env: &Env, args: &OrphansArgs) -> anyhow::Result<ExitCode> {
         json: act.json,
     };
     if args.user && args.system {
-        return out.fail(2, "use either --user or --system");
+        return out.fail(2, USER_AND_SYSTEM);
     }
     if args.clean {
         return clean(env, out, args);
@@ -66,15 +71,8 @@ pub fn run(env: &Env, args: &OrphansArgs) -> anyhow::Result<ExitCode> {
 }
 
 /// An in-system path from a `--select` value; a leading `~` is the home.
-fn select_path(env: &Env, s: &str) -> Option<PathBuf> {
-    let home = env.unsys(&env.home);
-    let p = if s == "~" {
-        home
-    } else if let Some(rest) = s.strip_prefix("~/") {
-        home.join(rest)
-    } else {
-        PathBuf::from(s)
-    };
+fn select_path(env: &Env, s: &Path) -> Option<PathBuf> {
+    let p = expand_home(env, s);
     p.is_absolute().then_some(p)
 }
 
@@ -82,22 +80,50 @@ fn select_path(env: &Env, s: &str) -> Option<PathBuf> {
 fn clean(env: &Env, out: Out, args: &OrphansArgs) -> anyhow::Result<ExitCode> {
     let act = &args.act;
     if !act.interactive && args.select.is_empty() {
-        return out.fail(2, "orphans --clean needs --select <path>... or -i");
+        return out.fail(2, NEEDS_SELECT);
     }
     if let Some(code) = precheck(out, act)? {
         return Ok(code);
     }
-    let cx = Context::load(env)?;
-    if let Some(code) = refuse_source_errors(out, &cx.inv, act)? {
-        return Ok(code);
+    let select: Vec<PathBuf> = args.select.iter().map(PathBuf::from).collect();
+    let pick = if act.interactive {
+        Pick::Checklist
+    } else {
+        Pick::Named(&select)
+    };
+    let Draft { built, cfg, .. } = match build_clean(env, args, pick) {
+        Ok(draft) => draft,
+        Err(s) => return stop(out, s),
+    };
+    apply(env, &cfg, &built.errors, out, &built.targets, act, &[])
+}
+
+/// Plans removing the orphans `pick` names (or the user ticks); nothing is
+/// planned by default.
+pub(crate) fn build_clean(
+    env: &Env,
+    args: &OrphansArgs,
+    pick: Pick<PathBuf>,
+) -> Result<Draft, Stop> {
+    let act = &args.act;
+    if args.user && args.system {
+        return Err(Refusal::new(2, USER_AND_SYSTEM).into());
     }
+    let select = match pick {
+        Pick::Named(select) if !select.is_empty() => Some(select),
+        Pick::Checklist => None,
+        Pick::Named(_) | Pick::Defaults => return Err(Refusal::new(2, NEEDS_SELECT).into()),
+    };
+    let cx = Context::load(env)?;
+    refuse_source_errors(&cx.inv, act)?;
     let orphans = if args.system {
         find_system_orphans(env, &cx.cfg, &cx.idx)
     } else {
         plannable(find_orphans(&cx.idx, args.show_low))
     };
-    let chosen = if act.interactive {
-        match choose(
+    let mut wanted = Vec::new();
+    let chosen = match select {
+        None => choose(
             env,
             if args.system {
                 "System orphans to remove"
@@ -107,44 +133,44 @@ fn clean(env: &Env, out: Out, args: &OrphansArgs) -> anyhow::Result<ExitCode> {
             orphans,
             true,
             |_| false,
-        )? {
-            Some(c) => c,
-            None => return out.aborted(),
-        }
-    } else {
-        let mut wanted = Vec::new();
-        for s in &args.select {
-            let Some(p) = select_path(env, s) else {
-                return out.fail(2, &format!("not an absolute path: {s}"));
-            };
-            if !wanted.contains(&p) {
-                wanted.push(p);
-            }
-        }
-        for p in &wanted {
-            if !orphans.iter().any(|f| &f.path == p) {
-                let hint = if !args.system
-                    && !args.show_low
-                    && find_orphans(&cx.idx, true).iter().any(|f| &f.path == p)
-                {
-                    " (it is low confidence; add --show-low)"
-                } else {
-                    ""
+        )?
+        .ok_or(Stop::Aborted)?,
+        Some(select) => {
+            for s in select {
+                let Some(p) = select_path(env, s) else {
+                    let msg = format!("not an absolute path: {}", s.display());
+                    return Err(Refusal::new(2, msg).into());
                 };
-                return out.fail(2, &format!("not an orphan: {}{hint}", shown_path(env, p)));
+                if !wanted.contains(&p) {
+                    wanted.push(p);
+                }
             }
+            for p in &wanted {
+                if !orphans.iter().any(|f| &f.path == p) {
+                    let hint = if !args.system
+                        && !args.show_low
+                        && find_orphans(&cx.idx, true).iter().any(|f| &f.path == p)
+                    {
+                        " (it is low confidence; add --show-low)"
+                    } else {
+                        ""
+                    };
+                    let msg = format!("not an orphan: {}{hint}", shown_path(env, p));
+                    return Err(Refusal::new(2, msg).into());
+                }
+            }
+            orphans
+                .into_iter()
+                .filter(|f| wanted.contains(&f.path))
+                .collect()
         }
-        orphans
-            .into_iter()
-            .filter(|f| wanted.contains(&f.path))
-            .collect()
     };
     let opts = PlanOptions {
         permanent: act.permanent,
         ..PlanOptions::default()
     };
     let plan = build_plan(env, None, &chosen, &opts)?;
-    let targets = [Target {
+    let targets = vec![Target {
         heading: if args.system {
             "System orphans"
         } else {
@@ -154,21 +180,60 @@ fn clean(env: &Env, out: Out, args: &OrphansArgs) -> anyhow::Result<ExitCode> {
         app: None,
         plan,
     }];
-    apply(env, &cx.cfg, &cx.errors(), out, &targets, act, &[])
+    let mut cli_command = vec![
+        "crumbs".to_string(),
+        "orphans".to_string(),
+        "--clean".to_string(),
+    ];
+    let flags = [
+        (args.system, "--system"),
+        (args.show_low, "--show-low"),
+        (act.permanent, "--permanent"),
+        (act.force, "--force"),
+        (select.is_none(), "-i"),
+    ];
+    cli_command.extend(
+        flags
+            .iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, f)| f.to_string()),
+    );
+    for p in &wanted {
+        cli_command.push("--select".into());
+        cli_command.push(p.to_string_lossy().into_owned());
+    }
+    let built = Built {
+        targets,
+        errors: cx.errors(),
+        after_preview: Vec::new(),
+        cli_command,
+    };
+    Ok(Draft {
+        built,
+        cfg: cx.cfg,
+        held: Vec::new(),
+    })
 }
 
-fn list(env: &Env, args: &OrphansArgs, json: bool) -> anyhow::Result<ExitCode> {
+/// The orphans the listing shows, with the context they came from.
+pub(crate) fn find_listed(
+    env: &Env,
+    args: &OrphansArgs,
+) -> anyhow::Result<(Context, Vec<Finding>)> {
     let cx = Context::load(env)?;
     let orphans: Vec<Finding> = if args.system {
         find_system_orphans(env, &cx.cfg, &cx.idx)
     } else {
         find_orphans(&cx.idx, args.show_low)
     };
+    Ok((cx, orphans))
+}
+
+fn list(env: &Env, args: &OrphansArgs, json: bool) -> anyhow::Result<ExitCode> {
+    let (cx, orphans) = find_listed(env, args)?;
     let code = if partial_failure(&cx.inv) { 3 } else { 0 };
     if json {
-        let mut errors: Vec<ErrorEntry> = cx.inv.errors.iter().map(ErrorEntry::from).collect();
-        errors.extend(cx.notes);
-        print_json_entries("orphans", &json!({ "orphans": orphans }), &errors)?;
+        print_json_entries("orphans", &json!({ "orphans": orphans }), &cx.errors())?;
     } else {
         let rows: Vec<Vec<String>> = orphans
             .iter()
