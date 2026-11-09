@@ -107,6 +107,14 @@ pub fn now_rfc3339() -> String {
     jiff::Timestamp::now().to_string()
 }
 
+/// `t` as an RFC 3339 UTC timestamp. A time outside the range of
+/// timestamps reads as the epoch.
+pub fn rfc3339(t: std::time::SystemTime) -> String {
+    jiff::Timestamp::try_from(t)
+        .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+        .to_string()
+}
+
 fn history_path(env: &Env) -> PathBuf {
     env.state_home.join("crumbs/history.jsonl")
 }

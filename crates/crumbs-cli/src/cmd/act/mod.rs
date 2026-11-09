@@ -381,7 +381,10 @@ fn after_text(after_preview: &[String]) -> String {
 /// The human preview without colour: every plan, the `after_preview`
 /// notes, then the warnings in `errors`, as the CLI shows them (it prints
 /// the warnings on stderr).
-#[allow(dead_code, reason = "used by the mcp module in a later task")]
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(dead_code, reason = "only the mcp server calls it")
+)]
 pub fn preview_text(
     env: &Env,
     targets: &[Target],

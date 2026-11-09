@@ -10,14 +10,22 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::plans::{PLAN_TTL, PlanPayload, StoredPlan};
 use super::server::Server;
-use crate::cmd::act::ActFlags;
+use crate::cmd::act::{self, ActFlags};
 use crate::cmd::apps::Sort;
-use crate::cmd::build::{self, Refusal};
+use crate::cmd::build::{self, Built, Refusal};
+use crate::cmd::clean::CleanArgs;
+use crate::cmd::context::notes_text;
+use crate::cmd::manual::is_privileged;
 use crate::cmd::orphans::OrphansArgs;
 use crate::cmd::render::sanitise;
+use crate::cmd::restore::outcome_line;
 use crate::cmd::scan::ScanArgs;
+use crate::cmd::uninstall::UninstallArgs;
 use crate::output::ErrorEntry;
+use std::path::PathBuf;
+use std::sync::MutexGuard;
 
 /// What a read tool computes: the `--json` data and its warnings.
 type ReadOutcome = Result<(Value, Vec<ErrorEntry>), Refusal>;
@@ -83,6 +91,65 @@ pub(crate) struct HistoryParams {
     pub limit: usize,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreviewUninstallParams {
+    /// App id, name, desktop id or display name (exact match).
+    pub app: String,
+    /// Keep the app itself; remove only its leftovers.
+    #[serde(default)]
+    pub leftovers_only: bool,
+    /// Keep data and settings; remove only caches.
+    #[serde(default)]
+    pub keep_data: bool,
+    /// Include low-confidence leftovers among the findings `select` can name.
+    #[serde(default)]
+    pub show_low: bool,
+    /// Plan exactly the leftovers at these paths, each one crumbs found
+    /// for this app (`app_show` lists them). System leftovers are planned
+    /// only when named here. Without it, crumbs' defaults apply.
+    #[serde(default)]
+    pub select: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreviewCleanParams {
+    /// Only these categories, even if switched off in the config.
+    #[serde(default)]
+    pub categories: Vec<String>,
+    /// Your own files (the default).
+    #[serde(default)]
+    pub user: bool,
+    /// The system categories (needs administrator rights to apply).
+    #[serde(default)]
+    pub system: bool,
+    /// Plan exactly these items (paths, or category ids for a category's
+    /// items), each one `scan` found. Without it, the defaults apply.
+    #[serde(default)]
+    pub select: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreviewOrphansParams {
+    /// The orphans to remove: absolute paths `orphans` found.
+    pub paths: Vec<String>,
+    /// Unowned directories in /opt instead of per-user orphans.
+    #[serde(default)]
+    pub system: bool,
+    /// Include low-confidence findings among the orphans `paths` can name.
+    #[serde(default)]
+    pub show_low: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreviewRestoreParams {
+    /// A history entry id, a batch id, or a path to put back.
+    pub entry: String,
+}
+
 /// A refusal as a tool error: the text is the message, the structured
 /// content `{ exit_code, details }`, all sanitised.
 pub(crate) fn refusal_result(r: &Refusal) -> CallToolResult {
@@ -95,6 +162,15 @@ pub(crate) fn refusal_result(r: &Refusal) -> CallToolResult {
     result
 }
 
+/// Flags for a preview: it only plans.
+fn dry_run_flags() -> ActFlags {
+    ActFlags {
+        dry_run: true,
+        json: true,
+        ..ActFlags::default()
+    }
+}
+
 /// Each `name` as `T`, or the usage error clap would give.
 fn parse_all<T: std::str::FromStr<Err = String>>(names: &[String]) -> Result<Vec<T>, Refusal> {
     names
@@ -103,13 +179,150 @@ fn parse_all<T: std::str::FromStr<Err = String>>(names: &[String]) -> Result<Vec
         .collect()
 }
 
+/// A preview before it is stored: what the result holds, and what
+/// `apply` would run.
+struct Preview {
+    payload: PlanPayload,
+    /// `dry_run_data`, an object.
+    data: Value,
+    preview_text: String,
+    needs_admin: bool,
+    cli_command: Vec<String>,
+    errors: Vec<ErrorEntry>,
+    /// A plan with nothing to do is shown, never stored.
+    has_actions: bool,
+}
+
+impl Preview {
+    fn of_plans(env: &Env, built: Built) -> Preview {
+        let Built {
+            targets,
+            errors,
+            after_preview,
+            cli_command,
+            ..
+        } = built;
+        let actions = || targets.iter().flat_map(|t| &t.plan.actions);
+        Preview {
+            data: act::dry_run_data(&targets),
+            preview_text: act::preview_text(env, &targets, &after_preview, &errors),
+            needs_admin: actions().any(is_privileged),
+            has_actions: actions().next().is_some(),
+            payload: PlanPayload::Plans(targets),
+            cli_command,
+            errors,
+        }
+    }
+}
+
+/// `argv` as one line for a shell: arguments with anything but plain
+/// characters are single-quoted.
+fn shell_line(argv: &[String]) -> String {
+    use std::ffi::OsStr;
+    let plain = |a: &str| {
+        !a.is_empty()
+            && a.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&b))
+    };
+    let words: Vec<String> = argv
+        .iter()
+        .map(|a| {
+            if plain(a) {
+                a.clone()
+            } else {
+                let quoted = crumbs_core::privilege::batch::sh_quote(OsStr::new(a));
+                String::from_utf8_lossy(&quoted).into_owned()
+            }
+        })
+        .collect();
+    words.join(" ")
+}
+
+/// `select` as the builders take it: none means the CLI's defaults.
+fn selection<T: From<String>>(select: Vec<String>) -> Option<Vec<T>> {
+    (!select.is_empty()).then(|| select.into_iter().map(T::from).collect())
+}
+
 impl Server {
+    fn plans(&self) -> MutexGuard<'_, super::plans::PlanStore> {
+        self.plans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Drops the plans that have expired; every tool call starts here.
+    fn purge_plans(&self) {
+        self.plans().purge_expired(self.env.now());
+    }
+
+    /// Runs `f` off the async thread, stores what it previews and returns
+    /// the plan, its `plan_id` and the human preview.
+    async fn preview<F>(&self, peer: Peer<RoleServer>, f: F) -> Result<CallToolResult, McpError>
+    where
+        F: FnOnce(&Env) -> Result<Preview, Refusal> + Send + 'static,
+    {
+        self.purge_plans();
+        let env = self.env.clone();
+        let outcome = tokio::task::spawn_blocking(move || f(&env))
+            .await
+            .map_err(|e| McpError::internal_error(format!("crumbs stopped: {e}"), None))?;
+        let preview = match outcome {
+            Ok(p) => p,
+            Err(refusal) => {
+                self.log.flush(&peer).await;
+                return Ok(refusal_result(&refusal));
+            }
+        };
+        self.log.warn(&peer, &preview.errors).await;
+        let Preview {
+            payload,
+            mut data,
+            preview_text,
+            needs_admin,
+            cli_command,
+            has_actions,
+            ..
+        } = preview;
+        let line = shell_line(&cli_command);
+        let mut plan_id = Value::Null;
+        let mut expires = Value::Null;
+        if has_actions {
+            let expires_at = self.env.now() + PLAN_TTL;
+            let stored = StoredPlan {
+                payload,
+                preview_text: preview_text.clone(),
+                needs_admin,
+                cli_command,
+                expires_at,
+            };
+            match self.plans().insert(stored) {
+                Ok(id) => {
+                    plan_id = json!(id.as_str());
+                    expires = json!(crumbs_core::history::rfc3339(expires_at));
+                }
+                Err(e) => {
+                    return Ok(refusal_result(&Refusal::new(
+                        1,
+                        format!("cannot make a plan id: {e}"),
+                    )));
+                }
+            }
+        }
+        data["cli_command"] = json!(line);
+        data["plan_id"] = plan_id;
+        data["expires_at"] = expires;
+        data["needs_admin"] = json!(needs_admin);
+        data["preview_text"] = json!(preview_text);
+        Ok(CallToolResult::structured(data))
+    }
+
     /// Runs `f` off the async thread, then sends its warnings and returns
     /// its data.
     async fn read<F>(&self, peer: Peer<RoleServer>, f: F) -> Result<CallToolResult, McpError>
     where
         F: FnOnce(&Env) -> ReadOutcome + Send + 'static,
     {
+        self.purge_plans();
         let env = self.env.clone();
         let outcome = tokio::task::spawn_blocking(move || f(&env))
             .await
@@ -219,6 +432,112 @@ impl Server {
     ) -> Result<CallToolResult, McpError> {
         self.read(peer, move |env| build::history_data(env, p.limit))
             .await
+    }
+
+    /// What uninstalling an app (or only its leftovers) would remove: the
+    /// plan, a `plan_id` for `apply`, and the preview the CLI shows.
+    /// Changes nothing.
+    #[tool(annotations(read_only_hint = true))]
+    async fn preview_uninstall(
+        &self,
+        Parameters(p): Parameters<PreviewUninstallParams>,
+        peer: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.preview(peer, move |env| {
+            let args = UninstallArgs {
+                apps: vec![p.app],
+                leftovers_only: p.leftovers_only,
+                keep_data: p.keep_data,
+                show_low: p.show_low,
+                act: dry_run_flags(),
+            };
+            let select: Option<Vec<PathBuf>> = selection(p.select);
+            let built = build::uninstall(env, &args, select.as_deref())?;
+            Ok(Preview::of_plans(env, built))
+        })
+        .await
+    }
+
+    /// What cleaning categories (caches, logs, ...) would remove: the
+    /// plan, a `plan_id` for `apply`, and the preview the CLI shows.
+    /// Changes nothing.
+    #[tool(annotations(read_only_hint = true))]
+    async fn preview_clean(
+        &self,
+        Parameters(p): Parameters<PreviewCleanParams>,
+        peer: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.preview(peer, move |env| {
+            let args = CleanArgs {
+                categories: parse_all::<Category>(&p.categories)?,
+                user: p.user,
+                system: p.system,
+                act: dry_run_flags(),
+            };
+            let select = selection::<String>(p.select);
+            let built = build::clean(env, &args, select.as_deref())?;
+            Ok(Preview::of_plans(env, built))
+        })
+        .await
+    }
+
+    /// What removing the named orphans would do: the plan, a `plan_id`
+    /// for `apply`, and the preview the CLI shows. Changes nothing.
+    #[tool(annotations(read_only_hint = true))]
+    async fn preview_orphans(
+        &self,
+        Parameters(p): Parameters<PreviewOrphansParams>,
+        peer: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.preview(peer, move |env| {
+            let args = OrphansArgs {
+                show_low: p.show_low,
+                clean: true,
+                system: p.system,
+                user: false,
+                select: p.paths.clone(),
+                act: dry_run_flags(),
+            };
+            let paths: Vec<PathBuf> = p.paths.into_iter().map(PathBuf::from).collect();
+            let built = build::orphans(env, &args, &paths)?;
+            Ok(Preview::of_plans(env, built))
+        })
+        .await
+    }
+
+    /// What restoring a history entry, batch or path would put back: a
+    /// `plan_id` for `apply` and the list the CLI shows. Changes nothing.
+    #[tool(annotations(read_only_hint = true))]
+    async fn preview_restore(
+        &self,
+        Parameters(p): Parameters<PreviewRestoreParams>,
+        peer: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.preview(peer, move |env| {
+            let selectors = vec![p.entry];
+            let (built, outcomes) = build::restore(env, &selectors)?;
+            let mut text: String = outcomes
+                .iter()
+                .map(|o| format!("{}\n", outcome_line(env, o, true)))
+                .collect();
+            text.push_str(&notes_text(&built.errors));
+            let mut data = act::dry_run_data(&built.targets);
+            data["outcomes"] =
+                serde_json::to_value(&outcomes).map_err(|e| Refusal::new(1, e.to_string()))?;
+            Ok(Preview {
+                data,
+                preview_text: text,
+                needs_admin: false,
+                has_actions: outcomes.iter().any(|o| o.ok && !o.entry_id.is_empty()),
+                payload: PlanPayload::Restore {
+                    selectors,
+                    outcomes,
+                },
+                cli_command: built.cli_command,
+                errors: built.errors,
+            })
+        })
+        .await
     }
 }
 

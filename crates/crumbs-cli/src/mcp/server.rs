@@ -11,16 +11,22 @@ use rmcp::model::{Implementation, ServerCapabilities, ServerConfig, SetLevelRequ
 use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, tool_handler};
 
+use std::sync::{Arc, Mutex};
+
 use super::log::Log;
+use super::plans::PlanStore;
 
 const INSTRUCTIONS: &str = "crumbs inspects installed Linux apps, their leftover files and \
-reclaimable space. These tools only read; they change nothing.";
+reclaimable space. The read tools change nothing, and so do the preview tools: \
+each returns the exact plan and a plan_id.";
 
 /// One server per connection. Clones share the log.
 #[derive(Clone)]
 pub(crate) struct Server {
     pub(super) env: Env,
     pub(super) log: Log,
+    /// The previewed plans. Never held across an await.
+    pub(super) plans: Arc<Mutex<PlanStore>>,
     tool_router: ToolRouter<Server>,
 }
 
@@ -29,6 +35,7 @@ impl Server {
         Server {
             env,
             log,
+            plans: Arc::default(),
             tool_router: Server::tool_router(),
         }
     }

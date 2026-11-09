@@ -17,6 +17,7 @@ use rmcp::{ClientHandler, RoleClient, ServiceExt};
 use serde_json::Value;
 
 use super::log::Log;
+use super::plans::PlanStore;
 use super::server::Server;
 
 /// A client that records the server's log messages.
@@ -39,22 +40,31 @@ impl ClientHandler for TestClient {
 pub(crate) struct Connected<C: ClientHandler = TestClient> {
     pub client: RunningService<RoleClient, C>,
     pub handler: C,
+    /// The server's plan store.
+    pub plans: Arc<Mutex<PlanStore>>,
 }
 
 impl<C: ClientHandler + Clone> Connected<C> {
     /// Starts a server on `env` (on the current runtime) and connects
     /// `handler` to it.
     pub(crate) async fn start(env: Env, handler: C) -> Connected<C> {
+        Connected::start_server(Server::new(env, Log::default()), handler).await
+    }
+
+    /// Serves `server` and connects `handler` to it.
+    pub(crate) async fn start_server(server: Server, handler: C) -> Connected<C> {
+        let plans = server.plans.clone();
         let (server_io, client_io) = tokio::io::duplex(1 << 16);
         tokio::spawn(async move {
-            let running = Server::new(env, Log::default())
-                .serve(server_io)
-                .await
-                .expect("server starts");
+            let running = server.serve(server_io).await.expect("server starts");
             let _ = running.waiting().await;
         });
         let client = handler.clone().serve(client_io).await.expect("connects");
-        Connected { client, handler }
+        Connected {
+            client,
+            handler,
+            plans,
+        }
     }
 
     /// Calls `tool` with `arguments` (a JSON object).

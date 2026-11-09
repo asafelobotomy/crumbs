@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crumbs_core::config::Config;
 use crumbs_core::leftovers::Finding;
+use crumbs_core::restore::RestoreOutcome;
 use crumbs_core::{CoreError, Env, SourceKind};
 use serde::Serialize;
 
@@ -35,7 +36,10 @@ pub struct Built {
     #[allow(dead_code, reason = "used by the mcp module in a later task")]
     pub selectable: Vec<Finding>,
     /// The argv of the equivalent CLI command.
-    #[allow(dead_code, reason = "used by the mcp module in a later task")]
+    #[cfg_attr(
+        not(feature = "mcp"),
+        allow(dead_code, reason = "only the mcp server reads it")
+    )]
     pub cli_command: Vec<String>,
 }
 
@@ -201,7 +205,10 @@ fn failed(e: anyhow::Error) -> Refusal {
 
 /// `uninstall`: the apps in `args.apps` and their leftovers. With
 /// `select`, exactly the findings at those paths (system leftovers too).
-#[allow(dead_code, reason = "used by the mcp module in a later task")]
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(dead_code, reason = "only the mcp server calls it")
+)]
 pub fn uninstall(
     env: &Env,
     args: &UninstallArgs,
@@ -215,7 +222,10 @@ pub fn uninstall(
 
 /// `clean`: the chosen categories' items. With `select`, exactly the
 /// named items: a category id stands for its items that are not held back.
-#[allow(dead_code, reason = "used by the mcp module in a later task")]
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(dead_code, reason = "only the mcp server calls it")
+)]
 pub fn clean(env: &Env, args: &CleanArgs, select: Option<&[String]>) -> Result<Built, Refusal> {
     let pick = select.map_or(Pick::Defaults, Pick::Named);
     clean::build(env, args, pick)
@@ -224,7 +234,10 @@ pub fn clean(env: &Env, args: &CleanArgs, select: Option<&[String]>) -> Result<B
 }
 
 /// `orphans --clean` of the orphans at `select`.
-#[allow(dead_code, reason = "used by the mcp module in a later task")]
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(dead_code, reason = "only the mcp server calls it")
+)]
 pub fn orphans(env: &Env, args: &OrphansArgs, select: &[PathBuf]) -> Result<Built, Refusal> {
     orphans::build_clean(env, args, Pick::Named(select))
         .map(|d| d.built)
@@ -233,9 +246,13 @@ pub fn orphans(env: &Env, args: &OrphansArgs, select: &[PathBuf]) -> Result<Buil
 
 /// `restore`: checks the selectors with a dry run. The core restores
 /// without a plan, so `targets` is empty; refused when no selector names a
-/// history entry.
-#[allow(dead_code, reason = "used by the mcp module in a later task")]
-pub fn restore(env: &Env, selectors: &[String]) -> Result<Built, Refusal> {
+/// history entry. Also the dry run's outcomes, which say what would be
+/// restored.
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(dead_code, reason = "only the mcp server calls it")
+)]
+pub fn restore(env: &Env, selectors: &[String]) -> Result<(Built, Vec<RestoreOutcome>), Refusal> {
     let (outcomes, notes) = restore_cmd::outcomes(env, selectors, true).map_err(failed)?;
     if restore_cmd::none_selected(&outcomes) {
         let details = outcomes
@@ -252,13 +269,14 @@ pub fn restore(env: &Env, selectors: &[String]) -> Result<Built, Refusal> {
     }
     let mut cli_command = vec!["crumbs".to_string(), "restore".to_string()];
     cli_command.extend(selectors.iter().cloned());
-    Ok(Built {
+    let built = Built {
         targets: Vec::new(),
         errors: notes,
         after_preview: Vec::new(),
         selectable: Vec::new(),
         cli_command,
-    })
+    };
+    Ok((built, outcomes))
 }
 
 /// `scan --json` data and errors.

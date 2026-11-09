@@ -264,3 +264,51 @@ fn stdout_carries_only_protocol() {
         "{lines:#?}"
     );
 }
+
+#[test]
+fn preview_tools_match_cli_dry_run() {
+    let t = fixture();
+    let want = cli_data(&t, &["uninstall", "Tool", "--dry-run"]);
+    let mut server = Server::start(&t);
+    let r = server.call("preview_uninstall", json!({ "app": "Tool" }));
+    assert_ne!(r["isError"], json!(true), "{r}");
+    let got = &r["structuredContent"];
+    assert_eq!(got["plans"], want["plans"]);
+    assert_eq!(got["report"], Value::Null);
+    assert_eq!(got["cli_command"], "crumbs uninstall Tool");
+    assert!(got["plan_id"].as_str().is_some_and(|id| id.len() == 32));
+    assert!(got["preview_text"].as_str().unwrap().contains("ACTION"));
+    // The preview changed nothing.
+    assert!(
+        t.dir
+            .path()
+            .join("home/user/Applications/Tool-1.0-x86_64.AppImage")
+            .exists()
+    );
+
+    // After a real removal (by the CLI, in the fixture), restore previews.
+    let out = command(&t)
+        .args(["uninstall", "Tool", "--yes"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let r = server.call(
+        "preview_restore",
+        json!({ "entry": "/home/user/.config/Tool" }),
+    );
+    assert_ne!(r["isError"], json!(true), "{r}");
+    let got = &r["structuredContent"];
+    assert!(got["plan_id"].is_string(), "{got}");
+    assert_eq!(got["needs_admin"], false);
+    assert_eq!(got["plans"], json!([]));
+    let text = got["preview_text"].as_str().unwrap();
+    assert!(text.contains("would restore ~/.config/Tool"), "{text}");
+    // Previewing restored nothing.
+    assert!(
+        !t.dir
+            .path()
+            .join("home/user/.config/Tool/settings")
+            .exists()
+    );
+    server.finish();
+}
