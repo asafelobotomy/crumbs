@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # The .deb and .rpm: metadata, and install / run / remove in a container.
 . "$(dirname "$0")/lib.sh"
 DEB=$DIST/crumbs_${VERSION}_amd64.deb

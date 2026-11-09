@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # The AppImage: contents, desktop entry, runs without libfuse2 or /dev/fuse,
 # works from a path with spaces and quotes, and keeps MCP stdout pure.
 . "$(dirname "$0")/lib.sh"

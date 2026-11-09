@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # The static musl binary: linkage, runs on every distro, release guards.
 . "$(dirname "$0")/lib.sh"
 
@@ -18,7 +19,7 @@ check static_binary_keeps_release_guards
 st=0; err=$(CRUMBS_ROOT=/nonexistent "$STATIC" scan 2>&1 >/dev/null) || st=$?
 [ "$st" -eq 2 ] || fail "CRUMBS_ROOT: exit $st"
 echo "$err" | grep -q 'honoured only by debug builds' || fail "CRUMBS_ROOT: $err"
-st=0; CRUMBS_TEST_PRIV_RUNNER=sh "$STATIC" doctor >/dev/null 2>&1 || st=$?
+st=0; CRUMBS_TEST_PRIV_RUNNER="sh" "$STATIC" doctor >/dev/null 2>&1 || st=$?
 [ "$st" -eq 2 ] || fail "CRUMBS_TEST_PRIV_RUNNER: exit $st"
 
 pass

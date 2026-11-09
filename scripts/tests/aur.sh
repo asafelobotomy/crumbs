@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # The AUR packages: .SRCINFO in sync, namcap, and both build, install and
 # run in an Arch container (as a non-root user: makepkg refuses root).
 . "$(dirname "$0")/lib.sh"
