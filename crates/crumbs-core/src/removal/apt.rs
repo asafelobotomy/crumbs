@@ -1,5 +1,6 @@
 //! Removing Debian/Ubuntu packages with apt: simulated as the user with
-//! `apt-get -s purge`, then the exact simulated list is purged as root.
+//! `apt-get -s purge`, then the exact simulated list is purged as root
+//! with `dpkg --purge`.
 
 use std::fs;
 
@@ -40,6 +41,11 @@ fn error_lines(out: &CmdOutput) -> Vec<String> {
 /// refusal when the simulation would also install or configure something,
 /// or would remove an essential package.
 pub(crate) fn parse_simulation(out: &CmdOutput) -> Result<Vec<(String, String)>, RemovalError> {
+    if out.timed_out {
+        return Err(RemovalError::Refused(
+            "apt-get did not finish its simulation".into(),
+        ));
+    }
     let text = format!("{}\n{}", out.stdout, out.stderr);
     if text.contains("Could not get lock")
         || text.contains("Unable to acquire the dpkg frontend lock")
@@ -90,20 +96,19 @@ pub(crate) fn parse_simulation(out: &CmdOutput) -> Result<Vec<(String, String)>,
     Ok(removed)
 }
 
-/// The purge action for an exact list: never `autoremove`, never
-/// `--auto-remove`, so apt cannot remove more than the preview listed.
+/// The purge action for an exact list: `dpkg --purge <names>`. Unlike
+/// `apt-get purge -y`, dpkg never adds packages of its own (it refuses with
+/// "dependency problems" when something still depends on one) and never
+/// reads a name as a pattern, so it cannot remove more than the preview
+/// listed.
 pub(crate) fn purge_action(names: Vec<String>, versions: Vec<String>) -> Action {
-    let mut args = vec![
-        "purge".to_string(),
-        "-y".to_string(),
-        "--no-install-recommends".to_string(),
-    ];
+    let mut args = vec!["--purge".to_string()];
     args.extend(names.iter().cloned());
     Action::PackageRemove {
         source: SourceKind::Dpkg,
         names,
         versions,
-        program: "apt-get".into(),
+        program: "dpkg".into(),
         args,
     }
 }
@@ -242,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn apt_exact_list_never_autoremoves() {
+    fn apt_runs_dpkg_purge_on_the_exact_list() {
         let p = plan_with("sl", out(0, PURGE_SL, "")).unwrap();
         assert_eq!(
             p.actions,
@@ -250,13 +255,8 @@ mod tests {
                 source: SourceKind::Dpkg,
                 names: vec!["sl".into()],
                 versions: vec!["5.02-1+b1".into()],
-                program: "apt-get".into(),
-                args: vec![
-                    "purge".into(),
-                    "-y".into(),
-                    "--no-install-recommends".into(),
-                    "sl".into(),
-                ],
+                program: "dpkg".into(),
+                args: vec!["--purge".into(), "sl".into()],
             }]
         );
         assert!(p.also_removed.is_empty());

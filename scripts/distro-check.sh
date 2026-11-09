@@ -61,6 +61,14 @@ inside() {
         debian) apt-get install -y -qq sl >/dev/null; ID=dpkg:sl ;;
         fedora) dnf install -y -q sl >/dev/null; ID=rpm:sl ;;
     esac
+    count() {
+        case "$DISTRO" in
+            arch) pacman -Qq | wc -l ;;
+            debian) dpkg-query -W -f '${db:Status-Abbrev}\n' | grep -c '^ii' ;;
+            fedora) rpm -qa | wc -l ;;
+        esac
+    }
+    before=$(count)
     CRUMBS_ALLOW_REAL_ESCALATION=1 "$CRUMBS" uninstall "$ID" --yes --json > /tmp/uninstall.json
     python3 -m json.tool /tmp/uninstall.json >/dev/null
     case "$DISTRO" in
@@ -68,6 +76,9 @@ inside() {
         debian) ! dpkg -s sl 2>/dev/null | grep -q '^Status: install ok installed' ;;
         fedora) ! rpm -q sl >/dev/null 2>&1 ;;
     esac
+    step "end to end: exactly one package removed"
+    after=$(count)
+    [ "$after" -eq $((before - 1)) ] || { echo "expected $((before - 1)) packages, found $after"; exit 1; }
 
     trap - EXIT
     echo "PASS"

@@ -1,6 +1,6 @@
 //! Removing Fedora packages with dnf (dnf5, and dnf4's table format):
 //! simulated as the user with `dnf remove --assumeno`, then the exact
-//! simulated list is removed as root with dependency clean-up turned off.
+//! simulated list is removed as root with `rpm -e`.
 
 use crate::command::{CmdOutput, CommandRunner, resolve_trusted};
 use crate::env::Env;
@@ -27,6 +27,11 @@ fn version(v: &str) -> String {
 /// transaction table. dnf exits non-zero after `--assumeno` by design, so
 /// the status is not used; the text decides. An unknown layout refuses.
 pub(crate) fn parse_transaction(out: &CmdOutput) -> Result<Vec<(String, String)>, RemovalError> {
+    if out.timed_out {
+        return Err(RemovalError::Refused(
+            "dnf did not finish its simulation".into(),
+        ));
+    }
     let text = format!("{}\n{}", out.stdout, out.stderr);
     if let Some(at) = text.find("Failed to resolve the transaction") {
         let problems: Vec<&str> = text[at..]
@@ -57,6 +62,19 @@ pub(crate) fn parse_transaction(out: &CmdOutput) -> Result<Vec<(String, String)>
             seen_section = true;
             continue;
         }
+        // Any other section header inside the table (an install, upgrade
+        // or downgrade, or a renamed removal section) could hide packages
+        // the preview would not show: refuse rather than skip it.
+        if !line.starts_with(' ')
+            && trimmed.ends_with(':')
+            && !trimmed.starts_with("Transaction Summary")
+            && (seen_section
+                || ["Installing", "Upgrading", "Downgrading", "Reinstalling"]
+                    .iter()
+                    .any(|w| trimmed.starts_with(w)))
+        {
+            return Err(RemovalError::Refused(MSG_UNREADABLE.into()));
+        }
         if !in_section {
             continue;
         }
@@ -82,20 +100,18 @@ pub(crate) fn parse_transaction(out: &CmdOutput) -> Result<Vec<(String, String)>
     Ok(removed)
 }
 
-/// The remove action for an exact list. `clean_requirements_on_remove` is
-/// off, so dnf can never remove more than the preview listed.
+/// The remove action for an exact list: `rpm -e <names>`. Unlike
+/// `dnf remove -y`, rpm never adds dependent packages (it refuses when
+/// something still requires one), so it cannot remove more than the
+/// preview listed.
 pub(crate) fn remove_action(names: Vec<String>, versions: Vec<String>) -> Action {
-    let mut args = vec![
-        "remove".to_string(),
-        "-y".to_string(),
-        "--setopt=clean_requirements_on_remove=False".to_string(),
-    ];
+    let mut args = vec!["-e".to_string()];
     args.extend(names.iter().cloned());
     Action::PackageRemove {
         source: SourceKind::Rpm,
         names,
         versions,
-        program: "dnf".into(),
+        program: "rpm".into(),
         args,
     }
 }
@@ -224,26 +240,48 @@ mod tests {
     }
 
     #[test]
-    fn dnf_exact_list_disables_clean_requirements() {
+    fn dnf_runs_rpm_e_on_the_exact_list() {
         let p = plan_with("sl", out(1, SL)).unwrap();
         let (n, v, args) = names(&p);
         assert_eq!(n, ["sl"]);
         assert_eq!(v, ["5.02-25.fc44"]);
-        assert_eq!(
-            args,
-            [
-                "remove",
-                "-y",
-                "--setopt=clean_requirements_on_remove=False",
-                "sl"
-            ]
-        );
+        assert_eq!(args, ["-e", "sl"]);
+        let Action::PackageRemove { program, .. } = &p.actions[0] else {
+            panic!()
+        };
+        assert_eq!(program, "rpm");
     }
 
     #[test]
     fn dnf_unknown_table_refuses() {
         let e = plan_with("sl", out(1, "Something new:\n sl x86_64 1-1 repo 1 KiB\n")).unwrap_err();
         assert_eq!(e, RemovalError::Refused(MSG_UNREADABLE.into()));
+    }
+
+    #[test]
+    fn dnf_unknown_section_inside_table_refuses() {
+        let text = SL.replace(
+            "Removing:",
+            "Removing:\n sl x86_64 0:5.02-25.fc44 fedora 21.2 KiB\nRemoving dependents:",
+        );
+        let e = plan_with("sl", out(1, &text)).unwrap_err();
+        assert_eq!(e, RemovalError::Refused(MSG_UNREADABLE.into()));
+    }
+
+    #[test]
+    fn dnf_install_section_refuses() {
+        let text = format!("{SL}Installing:\n libfoo x86_64 0:1-1.fc44 fedora 1.0 KiB\n");
+        assert!(matches!(
+            plan_with("sl", out(1, &text)),
+            Err(RemovalError::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn dnf_timed_out_refuses() {
+        let mut o = out(1, SL);
+        o.timed_out = true;
+        assert!(matches!(plan_with("sl", o), Err(RemovalError::Refused(_))));
     }
 
     #[test]

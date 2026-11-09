@@ -251,6 +251,9 @@ fn run_plans(env: &Env, privilege: &PrivilegeFor, targets: &[Target]) -> RunOutc
         privilege(env, needed),
         AllowedRunning::None,
     );
+    if let Some(msg) = outcome.refusal {
+        return Err(Refusal::new(2, msg));
+    }
     if outcome.reports.is_empty()
         && let Some(running) = outcome.running.first()
     {

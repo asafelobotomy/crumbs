@@ -406,6 +406,38 @@ impl<'a> Rechecks<'a> {
 /// Why a [`Scope::SystemTree`] target is refused right before its step.
 pub const TREE_LOCKED: &str = "pacman is busy (database lock present)";
 pub const TREE_MOUNT_BELOW: &str = "a mount point is below it";
+pub const TREE_PM_RUNNING: &str = "a package manager is running";
+
+/// Process names (`/proc/<pid>/comm`, cut to 15 bytes by the kernel) of
+/// package managers. dpkg and rpm hold fcntl locks on files that always
+/// exist, so unlike pacman's `db.lck` their lock cannot be seen from a file;
+/// a running one is seen from its process instead.
+const PACKAGE_MANAGERS: [&str; 13] = [
+    "pacman",
+    "dpkg",
+    "apt",
+    "apt-get",
+    "aptitude",
+    "unattended-upgr",
+    "dnf",
+    "dnf5",
+    "dnf-automatic",
+    "yum",
+    "rpm",
+    "zypper",
+    "packagekitd",
+];
+
+/// Whether any process under `/proc` is a package manager.
+fn package_manager_running(env: &Env) -> bool {
+    let Ok(dir) = fs::read_dir(env.sys_path(Path::new("/proc"))) else {
+        return false;
+    };
+    dir.flatten().any(|e| {
+        fs::read_to_string(e.path().join("comm"))
+            .is_ok_and(|c| PACKAGE_MANAGERS.contains(&c.trim_end()))
+    })
+}
 pub const TREE_MOUNTS_UNREADABLE: &str = "the mount table could not be read";
 pub const TREE_DB_UNREADABLE: &str = "the package database could not be read";
 pub const TREE_OWNED: &str = "a package owns files in it now";
@@ -427,6 +459,9 @@ fn recheck_system_tree(env: &Env, checks: &Rechecks, path: &Path) -> Result<OsSt
     match fs::symlink_metadata(lock_path(env)) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         _ => return Err(TREE_LOCKED.into()),
+    }
+    if package_manager_running(env) {
+        return Err(TREE_PM_RUNNING.into());
     }
     match mounts_at_or_below(env, path) {
         Ok(found) if found.is_empty() => {}

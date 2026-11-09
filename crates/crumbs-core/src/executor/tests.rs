@@ -2270,6 +2270,29 @@ fn system_tree_delete_refused_while_pacman_locked() {
 }
 
 #[test]
+fn system_tree_delete_refused_while_a_package_manager_runs() {
+    for name in ["dpkg", "apt-get", "dnf5", "rpm", "unattended-upgr"] {
+        let (t, env) = system_tree_fixture();
+        t.write("proc/4242/comm", format!("{name}\n").as_bytes());
+        let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+        let (report, calls) = run_tree(&env, &plan);
+        assert_eq!(
+            report.results[0].error.as_deref(),
+            Some(TREE_PM_RUNNING),
+            "{name}"
+        );
+        assert!(calls.is_empty());
+        assert!(env.sys("/opt/inky/a").exists());
+    }
+    // An unrelated process does not block.
+    let (t, env) = system_tree_fixture();
+    t.write("proc/4242/comm", b"bash\n");
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, _) = run_tree(&env, &plan);
+    assert_ne!(report.results[0].error.as_deref(), Some(TREE_PM_RUNNING));
+}
+
+#[test]
 fn system_tree_delete_refused_without_package_database() {
     let (t, env) = system_tree_fixture();
     fs::remove_dir_all(t.dir.path().join("var/lib/pacman/local")).unwrap();

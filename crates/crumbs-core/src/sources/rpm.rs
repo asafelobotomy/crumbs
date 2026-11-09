@@ -99,7 +99,7 @@ impl AppSource for RpmSource {
     }
 
     fn available(&self, env: &Env) -> bool {
-        resolve_trusted(env, "rpm").is_some()
+        crate::ownership::rpm_present(env)
     }
 
     fn is_package_db(&self) -> bool {
@@ -153,6 +153,7 @@ mod tests {
     fn fedora() -> FixtureTree {
         let t = FixtureTree::new();
         t.write_exec("/usr/bin/rpm", b"#!/bin/sh\n");
+        t.write("/usr/lib/sysimage/rpm/rpmdb.sqlite", b"x");
         t.write(
             "/usr/share/applications/firefox.desktop",
             FIREFOX_DESKTOP.as_bytes(),

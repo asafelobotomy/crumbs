@@ -169,6 +169,19 @@ impl Env {
 
     /// Test hook: sets [`Env::clock_shift`].
     #[cfg(any(test, feature = "test-support", debug_assertions))]
+    /// When crumbs runs as root with a home directory that root does not
+    /// own (`sudo -E`, `su -m`): that home, in-system. Acting there as root
+    /// would leave root-owned history, trash entries and edits in another
+    /// user's home, so callers refuse.
+    pub fn foreign_home_as_root(&self) -> Option<PathBuf> {
+        use std::os::unix::fs::MetadataExt;
+        if self.uid != 0 {
+            return None;
+        }
+        let owner = fs::metadata(&self.home).map(|m| m.uid()).ok();
+        (owner != Some(0)).then(|| self.unsys(&self.home))
+    }
+
     pub fn set_clock_shift(&mut self, shift: Duration) {
         self.clock_shift = shift;
     }

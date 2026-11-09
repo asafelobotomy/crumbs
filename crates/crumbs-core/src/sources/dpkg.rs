@@ -15,7 +15,6 @@ use super::{AppSource, SourceContext, SourceListing};
 
 pub(crate) const STATUS: &str = "/var/lib/dpkg/status";
 pub(crate) const INFO_DIR: &str = "/var/lib/dpkg/info";
-const INSTALLED: &str = "install ok installed";
 
 pub struct DpkgSource;
 
@@ -32,8 +31,10 @@ pub(crate) struct Stanza {
 }
 
 impl Stanza {
+    /// The package is unpacked and configured: the third word of `Status`
+    /// is `installed` (`install ok installed`, `hold ok installed`, ...).
     pub fn installed(&self) -> bool {
-        self.status == INSTALLED
+        self.status.split_whitespace().nth(2) == Some("installed")
     }
 }
 
@@ -124,14 +125,60 @@ fn read_lists(env: &Env) -> Lists {
     (lists, errors)
 }
 
-/// Every path the dpkg database lists as owned. Any unreadable list is an
-/// error, like [`crate::ownership::load_pacman`].
+pub(crate) const DIVERSIONS: &str = "/var/lib/dpkg/diversions";
+
+/// The diverted-to paths of `/var/lib/dpkg/diversions` (triples of lines:
+/// original, diverted-to, package). They belong to the package that
+/// diverted them, though no `.list` names them. A missing file is fine.
+fn diverted_paths(env: &Env) -> Result<Vec<PathBuf>, CoreError> {
+    let path = env.sys(DIVERSIONS);
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(CoreError::Io { path, source }),
+    };
+    Ok(bytes
+        .split(|&b| b == b'\n')
+        .skip(1)
+        .step_by(3)
+        .filter(|l| l.starts_with(b"/"))
+        .map(|l| PathBuf::from(OsStr::from_bytes(l)))
+        .collect())
+}
+
+/// The installed packages whose `.list` file is missing; each one makes
+/// the owned index incomplete.
+fn missing_lists(stanzas: &[Stanza], lists: &HashMap<String, Vec<PathBuf>>) -> Vec<String> {
+    stanzas
+        .iter()
+        .filter(|s| s.installed() && !lists.contains_key(&s.name))
+        .map(|s| s.name.clone())
+        .collect()
+}
+
+/// Every path the dpkg database lists as owned, diversions included. Any
+/// unreadable list, or an installed package without one, is an error, like
+/// [`crate::ownership::load_pacman`].
 pub(crate) fn owned_paths(env: &Env) -> Result<Vec<PathBuf>, CoreError> {
+    let status_path = env.sys(STATUS);
+    let status = fs::read(&status_path).map_err(|source| CoreError::Io {
+        path: status_path.clone(),
+        source,
+    })?;
+    let stanzas = parse_status(&String::from_utf8_lossy(&status));
     let (lists, errors) = read_lists(env);
     if let Some((path, source)) = errors.into_iter().next() {
         return Err(CoreError::Io { path, source });
     }
-    Ok(lists.into_values().flatten().collect())
+    if let Some(name) = missing_lists(&stanzas, &lists).into_iter().next() {
+        return Err(CoreError::Parse {
+            what: "dpkg database".into(),
+            message: format!("installed package {name} has no file list"),
+        });
+    }
+    let mut all: Vec<PathBuf> = lists.into_values().flatten().collect();
+    all.extend(diverted_paths(env)?);
+    Ok(all)
 }
 
 impl AppSource for DpkgSource {
@@ -140,7 +187,7 @@ impl AppSource for DpkgSource {
     }
 
     fn available(&self, env: &Env) -> bool {
-        env.sys(STATUS).is_file()
+        crate::ownership::dpkg_present(env)
     }
 
     fn is_package_db(&self) -> bool {
@@ -161,6 +208,19 @@ impl AppSource for DpkgSource {
                 source: SourceKind::Dpkg,
                 message: format!("cannot read {}: {e}", display(&cx.env.unsys(&path))),
             });
+        }
+        for name in missing_lists(&stanzas, &lists) {
+            listing.errors.push(SourceError {
+                source: SourceKind::Dpkg,
+                message: format!("installed package {name} has no file list"),
+            });
+        }
+        match diverted_paths(cx.env) {
+            Ok(p) => listing.owned_paths.extend(p),
+            Err(e) => listing.errors.push(SourceError {
+                source: SourceKind::Dpkg,
+                message: e.to_string(),
+            }),
         }
         let by_id: HashMap<&str, &DesktopEntry> =
             cx.desktop.iter().map(|d| (d.id.as_str(), d)).collect();
@@ -262,6 +322,43 @@ mod tests {
         names.sort();
         assert_eq!(names, ["coreutils", "firefox-esr", "libacl1"]);
         assert!(l.errors.is_empty(), "{:?}", l.errors);
+    }
+
+    #[test]
+    fn dpkg_held_packages_are_listed() {
+        let t = debian();
+        let status = String::from_utf8_lossy(STATUS).replace(
+            "Package: coreutils\nEssential: yes\nStatus: install ok installed",
+            "Package: coreutils\nEssential: yes\nStatus: hold ok installed",
+        );
+        t.write("/var/lib/dpkg/status", status.as_bytes());
+        let all = list(&t, true);
+        assert!(all.apps.iter().any(|a| a.name == "coreutils"));
+    }
+
+    #[test]
+    fn dpkg_installed_package_without_list_is_incomplete() {
+        let t = debian();
+        std::fs::remove_file(t.env().sys("/var/lib/dpkg/info/coreutils.list")).unwrap();
+        let l = list(&t, true);
+        assert!(!l.errors.is_empty());
+        assert!(load_dpkg(&t.env()).is_err());
+    }
+
+    #[test]
+    fn dpkg_diverted_paths_are_owned() {
+        let t = debian();
+        t.write(
+            "/var/lib/dpkg/diversions",
+            b"/etc/foo.conf\n/etc/foo.conf.distrib\nfoo-tweaks\n",
+        );
+        let idx = load_dpkg(&t.env()).unwrap().unwrap();
+        assert!(idx.owns(Path::new("/etc/foo.conf.distrib")));
+        assert!(
+            list(&t, true)
+                .owned_paths
+                .contains(Path::new("/etc/foo.conf.distrib"))
+        );
     }
 
     #[test]

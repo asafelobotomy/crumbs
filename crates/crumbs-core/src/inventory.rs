@@ -557,6 +557,31 @@ mod tests {
     }
 
     #[test]
+    fn empty_dpkg_and_rpm_on_arch_are_unavailable_not_failed() {
+        // An Arch host with dpkg and rpm-tools installed from pacman: an
+        // empty dpkg status, no info dir, an rpm binary and no rpm database.
+        let t = FixtureTree::new();
+        t.mkdir("/var/lib/pacman/local");
+        t.write("/var/lib/dpkg/status", b"");
+        t.write_exec("/usr/bin/rpm", b"#!/bin/sh\nexit 1\n");
+        let inv = discover(
+            &t.env(),
+            &FakeRunner::new(),
+            &ListOptions::default(),
+            &Config::default(),
+        );
+        assert!(inv.errors.is_empty(), "{:?}", inv.errors);
+        let st = |k| inv.statuses.iter().find(|s| s.source == k).unwrap();
+        assert!(!st(SourceKind::Dpkg).available);
+        assert!(!st(SourceKind::Rpm).available);
+        assert!(inv.owned.is_complete());
+        assert_eq!(
+            crate::ownership::detect_package_db(&t.env()),
+            Some(crate::ownership::PackageDb::Pacman)
+        );
+    }
+
+    #[test]
     fn inventory_serializes() {
         let t = FixtureTree::new();
         let inv = discover(

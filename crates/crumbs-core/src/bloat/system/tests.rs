@@ -508,9 +508,9 @@ fn apt_orphans_exact_purge_list() {
     let ItemAction::Privileged { program, args } = &i.action else {
         panic!("{i:?}");
     };
-    assert_eq!(program, "apt-get");
-    assert_eq!(&args[..3], ["purge", "-y", "--no-install-recommends"]);
-    assert_eq!(args.len(), 3 + 8);
+    assert_eq!(program, "dpkg");
+    assert_eq!(args[0], "--purge");
+    assert_eq!(args.len(), 1 + 8);
     assert!(args.contains(&"netbase".to_string()));
     assert!(!args.iter().any(|a| a.contains("autoremove")));
     assert_eq!(i.size, Some(150 * 1024));
@@ -542,16 +542,7 @@ fn dnf_orphans_exact_remove_list() {
     assert_eq!(rep.items.len(), 1, "{rep:?}");
     assert_eq!(
         rep.items[0].action,
-        priv_action(
-            "dnf",
-            &[
-                "remove",
-                "-y",
-                "--setopt=clean_requirements_on_remove=False",
-                "cowsay",
-                "perl-Text-CharWidth"
-            ]
-        )
+        priv_action("rpm", &["-e", "cowsay", "perl-Text-CharWidth"])
     );
     assert!(!rep.items[0].preselected);
 
