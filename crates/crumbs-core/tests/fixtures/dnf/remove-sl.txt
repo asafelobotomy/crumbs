@@ -1,0 +1,9 @@
+Package Arch   Version        Repository      Size
+Removing:
+ sl     x86_64 0:5.02-25.fc44 fedora      21.2 KiB
+
+Transaction Summary:
+ Removing:           1 package
+
+After this operation, 21 KiB will be freed (install 0 B, remove 21 KiB).
+Operation aborted by the user.

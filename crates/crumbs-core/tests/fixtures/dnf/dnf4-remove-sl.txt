@@ -1,0 +1,17 @@
+Dependencies resolved.
+================================================================================
+ Package           Architecture   Version               Repository        Size
+================================================================================
+Removing:
+ sl                x86_64         5.02-25.fc40          @fedora           21 k
+Removing dependent packages:
+ sl-extra          noarch         1:1.0-1.fc40          @fedora          4.0 k
+Removing unused dependencies:
+ ncurses           x86_64         6.4-12.20240127.fc40  @fedora          627 k
+
+Transaction Summary
+================================================================================
+Remove  3 Packages
+
+Freed space: 652 k
+Operation aborted.

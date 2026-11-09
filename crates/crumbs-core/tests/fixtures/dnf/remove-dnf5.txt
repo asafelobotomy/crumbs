@@ -1,0 +1,2 @@
+Failed to resolve the transaction:
+Problem: The operation would result in removing the following protected packages: dnf5

@@ -34,3 +34,17 @@ Captured in `docker.io/library/debian:trixie` after `apt-get update` and
 - `purge-perl-base.txt`: `apt-get -s purge perl-base` (exit 0; removes an essential package).
 - `purge-nosuch.txt`: `apt-get -s purge nosuchpkg` (exit 100, `E:` line).
 - `autoremove.txt`: `apt-get -s autoremove --purge` after `apt-mark auto cowsay` (exit 0).
+
+## dnf/
+
+Captured in `registry.fedoraproject.org/fedora:latest` (dnf5 5.4.6) after
+`dnf install sl cowsay`, with `LC_ALL=C`; `--assumeno` exits 1 after showing the table:
+
+- `remove-sl.txt`: `dnf remove --assumeno sl`.
+- `remove-perl-libs.txt`: `dnf remove --assumeno perl-libs`, first 40 lines (the table is cut
+  before its summary).
+- `remove-dnf5.txt`: `dnf remove --assumeno dnf5` (a protected package).
+- `remove-nosuch.txt`: dnf5's text for an argument that is not installed.
+- `dnf5-autoremove.txt`: hand-written in the captured dnf5 table format (the container had no
+  unused dependencies to show).
+- `dnf4-remove-sl.txt`: hand-written in dnf4's documented table format (no dnf4 image is used).

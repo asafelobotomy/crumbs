@@ -2,6 +2,7 @@
 //! checks here run as the user and change nothing.
 
 mod apt;
+mod dnf;
 mod flatpak;
 mod pacman;
 mod snap;
@@ -87,9 +88,7 @@ pub fn plan_removal(
 ) -> Result<RemovalPlan, RemovalError> {
     match app.source {
         SourceKind::Pacman => pacman::plan(env, runner, app),
-        SourceKind::Rpm => Err(RemovalError::Unsupported(
-            "removing rpm packages isn't supported yet; use --leftovers-only".into(),
-        )),
+        SourceKind::Rpm => dnf::plan(env, runner, app),
         SourceKind::Dpkg => apt::plan(env, runner, app),
         SourceKind::Flatpak => flatpak::plan(app),
         SourceKind::Snap => snap::plan(app),
@@ -112,7 +111,7 @@ pub fn still_installed(
     match source {
         SourceKind::Pacman => pacman_still_installed(env, names),
         SourceKind::Dpkg => apt::dpkg_still_installed(env, names),
-        SourceKind::Rpm => Err("checking rpm packages isn't supported yet".into()),
+        SourceKind::Rpm => dnf::rpm_still_installed(env, runner, names),
         SourceKind::Flatpak => flatpak_still_installed(env, runner, names),
         SourceKind::Snap => snap::snap_still_installed(env, runner, names),
         SourceKind::AppImage | SourceKind::Unmanaged => Ok(Vec::new()),
