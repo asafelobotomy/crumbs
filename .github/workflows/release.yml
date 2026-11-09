@@ -18,19 +18,46 @@ jobs:
       CARGO_TERM_COLOR: always
       # No FUSE in the container: appimagetool runs extracted.
       APPIMAGE_EXTRACT_AND_RUN: 1
+      # Pinned by version and checksum, so a release never builds with
+      # whatever "continuous" was that day.
+      APPIMAGETOOL_URL: https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+      APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+      APPIMAGE_RUNTIME_URL: https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+      APPIMAGE_RUNTIME_SHA256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+      APPIMAGE_RUNTIME: /usr/local/share/appimage/runtime-x86_64
     steps:
       - name: Install tools
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rustup python github-cli rpm-tools
+          pacman -Syu --noconfirm --needed base-devel git rustup python github-cli rpm-tools minisign
           rustup default 1.99.1
-          curl -fsSL -o /usr/local/bin/appimagetool \
-            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          curl -fsSL -o /usr/local/bin/appimagetool "$APPIMAGETOOL_URL"
+          echo "$APPIMAGETOOL_SHA256  /usr/local/bin/appimagetool" | sha256sum -c -
           chmod +x /usr/local/bin/appimagetool
+          mkdir -p "$(dirname "$APPIMAGE_RUNTIME")"
+          curl -fsSL -o "$APPIMAGE_RUNTIME" "$APPIMAGE_RUNTIME_URL"
+          echo "$APPIMAGE_RUNTIME_SHA256  $APPIMAGE_RUNTIME" | sha256sum -c -
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build the release
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           scripts/release.sh "${GITHUB_REF_NAME#v}"
+      # The secret is an unencrypted minisign secret key (minisign -G -W);
+      # its public half is minisign.pub in the repository. A release is not
+      # published unsigned.
+      - name: Sign SHA256SUMS
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+        run: |
+          if [ -z "$MINISIGN_KEY" ]; then
+            echo "::error::the MINISIGN_KEY secret is not set; see README, Releasing" >&2
+            exit 1
+          fi
+          umask 077
+          key=$(mktemp)
+          printf '%s\n' "$MINISIGN_KEY" > "$key"
+          minisign -S -s "$key" -m dist/SHA256SUMS -t "crumBS ${GITHUB_REF_NAME#v}"
+          rm -f "$key"
+          minisign -V -p minisign.pub -m dist/SHA256SUMS
       # Re-runnable: a draft left by a failed run is reused and its assets
       # replaced; the release is published only once every upload succeeded.
       - name: Publish the GitHub release
@@ -43,7 +70,7 @@ jobs:
               --title "crumBS ${tag#v}" --notes-file dist/RELEASE_NOTES.md
           fi
           gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
-            dist/crumbs-* dist/crumbs_* dist/LICENSE dist/SHA256SUMS
+            dist/crumbs-* dist/crumbs_* dist/LICENSE dist/SHA256SUMS dist/SHA256SUMS.minisig
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false \
             --notes-file dist/RELEASE_NOTES.md
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

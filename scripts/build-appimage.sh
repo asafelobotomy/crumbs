@@ -2,7 +2,9 @@
 # Builds dist/crumbs-<version>-x86_64.AppImage around the static binary
 # (default: dist/crumbs-<version>-x86_64-linux-musl) and prints its path.
 # Uses appimagetool from PATH, or the one named by APPIMAGETOOL; its default
-# runtime is static, so the AppImage needs no libfuse2.
+# runtime is static, so the AppImage needs no libfuse2. APPIMAGE_RUNTIME
+# names a runtime file to embed instead of the one appimagetool downloads
+# (the release workflow pins one by checksum).
 #
 #   scripts/build-appimage.sh [static-binary]
 set -eu
@@ -33,5 +35,7 @@ ln -s crumbs.svg "$APPDIR/.DirIcon"
 mkdir -p dist
 out=$PWD/dist/crumbs-$VERSION-x86_64.AppImage
 rm -f "$out"
-ARCH=x86_64 "$TOOL" --no-appstream "$APPDIR" "$out" >&2
+set -- --no-appstream
+[ -n "${APPIMAGE_RUNTIME:-}" ] && set -- "$@" --runtime-file "$APPIMAGE_RUNTIME"
+ARCH=x86_64 "$TOOL" "$@" "$APPDIR" "$out" >&2
 echo "$out"
