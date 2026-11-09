@@ -131,6 +131,11 @@ pub(crate) struct PreviewCleanParams {
     /// items), each one `scan` found. Without it, the defaults apply.
     #[serde(default)]
     pub select: Vec<String>,
+    /// Leave out what matches these patterns, as `exclude` in the config
+    /// does: each starts with `/` or `~/`; `*` matches within a path
+    /// segment, `**` across segments.
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -501,6 +506,7 @@ impl Server {
                 categories: parse_all::<Category>(&p.categories)?,
                 user: p.user,
                 system: p.system,
+                exclude: p.exclude,
                 act: dry_run_flags(),
             };
             let select = selection::<String>(p.select);

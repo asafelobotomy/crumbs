@@ -325,6 +325,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preview_clean_exclude_leaves_out_items() {
+        let t = fixture();
+        t.write("/home/user/.cache/keepme/blob", b"cache");
+        let c = Connected::new(t.env()).await;
+        let r = c
+            .call(
+                "preview_clean",
+                json!({ "categories": ["cache"], "exclude": ["~/.cache/keepme"] }),
+            )
+            .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+        let text = r.structured_content.unwrap().to_string();
+        assert!(!text.contains("keepme"), "{text}");
+        assert!(text.contains(".cache/inky"), "{text}");
+        let r = c
+            .call("preview_clean", json!({ "exclude": ["relative"] }))
+            .await;
+        assert_eq!(r.is_error, Some(true), "{r:?}");
+    }
+
+    #[tokio::test]
     async fn preview_clean_and_orphans_and_restore() {
         let t = fixture();
         let c = Connected::new(t.env()).await;

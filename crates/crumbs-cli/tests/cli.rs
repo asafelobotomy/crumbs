@@ -1631,6 +1631,47 @@ fn old_temp(t: &FixtureTree, name: &str) {
 }
 
 #[test]
+fn clean_exclude_leaves_out_matching_items() {
+    let t = scan_fixture(FLATPAK_OK);
+    // A home-relative pattern, and an absolute one under the root.
+    let (code, stdout, stderr) = run_clean(
+        &t,
+        &[
+            "cache",
+            "thumbnails",
+            "--exclude",
+            "~/.cache/foo",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!stdout.contains("~/.cache/foo"), "{stdout}");
+    assert!(stdout.contains("~/.cache/thumbnails"), "{stdout}");
+    let (code, stdout, stderr) = run_clean(
+        &t,
+        &[
+            "thumbnails",
+            "--exclude",
+            "/home/user/.cache/thumb*",
+            "--dry-run",
+        ],
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stdout.contains("nothing to clean"), "{stdout}");
+}
+
+#[test]
+fn clean_exclude_must_be_absolute() {
+    let t = scan_fixture(FLATPAK_OK);
+    let (code, stdout, stderr) = run_clean(&t, &["cache", "--exclude", "foo", "--dry-run"]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("--exclude 'foo' must start with / or ~/"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn clean_cache_trashes_and_logs() {
     let t = scan_fixture(FLATPAK_OK);
     let (code, stdout, stderr) = run_clean(&t, &["cache", "--yes"]);

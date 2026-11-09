@@ -33,6 +33,11 @@ pub struct CleanArgs {
     /// naming a system category implies it
     #[arg(long)]
     pub system: bool,
+    /// Leave out what matches this pattern, as `exclude` in the config
+    /// does (repeatable; starts with / or ~/; `*` within a path segment,
+    /// `**` across segments)
+    #[arg(long, value_name = "PATTERN")]
+    pub exclude: Vec<String>,
     #[command(flatten)]
     pub act: ActFlags,
 }
@@ -64,10 +69,21 @@ pub fn run(env: &Env, args: &CleanArgs) -> anyhow::Result<ExitCode> {
     apply(env, &cfg, &built.errors, out, &built.targets, act, &[])
 }
 
-/// `--user` with `--system`, or a named category of the other kind.
+/// `--user` with `--system`, a named category of the other kind, or an
+/// `--exclude` pattern that is not absolute.
 fn usage(args: &CleanArgs) -> Option<Refusal> {
     if args.user && args.system {
         return Some(Refusal::new(2, USER_AND_SYSTEM));
+    }
+    if let Some(bad) = args
+        .exclude
+        .iter()
+        .find(|p| !(p.starts_with('/') || p.starts_with("~/")))
+    {
+        return Some(Refusal::new(
+            2,
+            format!("--exclude '{bad}' must start with / or ~/"),
+        ));
     }
     cross_kind(&args.categories, args.user, args.system).map(|msg| Refusal::new(2, msg))
 }
@@ -79,7 +95,12 @@ pub(crate) fn build(env: &Env, args: &CleanArgs, pick: Pick<String>) -> Result<D
     if let Some(refusal) = usage(args) {
         return Err(refusal.into());
     }
-    let setup = ScanSetup::load(env)?;
+    let mut setup = ScanSetup::load(env)?;
+    setup.cfg.exclude.extend(
+        args.exclude
+            .iter()
+            .filter_map(|p| crumbs_core::config::exclude_pattern(env, p)),
+    );
     let named = !args.categories.is_empty();
     // Naming categories cleans exactly those, whatever the config says.
     // Without names, `--system` selects the system categories and no flag

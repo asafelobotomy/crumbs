@@ -67,6 +67,13 @@ struct RawConfig {
 
 /// Expands a leading `~` against the in-system home. Returns `None` for
 /// anything that is not then absolute.
+/// An `exclude` pattern given outside the config (`clean --exclude`, MCP
+/// `exclude`), read exactly as the config key is: `~/` expanded, `..`
+/// resolved. `None` unless it starts with `/` or `~/`.
+pub fn exclude_pattern(env: &Env, s: &str) -> Option<String> {
+    expand(env, s).map(|e| normalise_lexical(&e))
+}
+
 fn expand(env: &Env, s: &str) -> Option<String> {
     let home = env.unsys(&env.home);
     let out = if s == "~" {
@@ -305,6 +312,19 @@ fn segment_match(p: &[u8], s: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn exclude_pattern_expands_and_normalises() {
+        let t = crate::testing::FixtureTree::new();
+        let env = t.env();
+        assert_eq!(
+            exclude_pattern(&env, "~/.cache/../.cache/x*").as_deref(),
+            Some("/home/user/.cache/x*")
+        );
+        assert_eq!(exclude_pattern(&env, "/srv/./a").as_deref(), Some("/srv/a"));
+        assert_eq!(exclude_pattern(&env, "relative"), None);
+    }
+
     use super::*;
     use crate::testing::FixtureTree;
 
