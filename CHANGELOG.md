@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0
+
 - **uQ:** never offers uQ's, scdr's, noti-fi's or appOFholding's own files as leftovers or orphans. A package that is part of the uQ desktop (uq, uq-hyprland-pin, scdr, noti-fi, crum-bs) is removed only when asked twice: a second question at a terminal, `--desktop` otherwise (`desktop: true` over MCP). `apps show` and the JSON `part_of` field say which packages those are.
 - **appOFholding:** once it is in use, the AppImages in its library (`~/Applications`) are its own: crumbs no longer lists them, offers their old versions to `appimage-old` or uninstalls them.
 - **Releases:** `SHA256SUMS` is signed with minisign (`SHA256SUMS.minisig`, key in `minisign.pub`), and the release build pins appimagetool and the AppImage runtime by version and checksum.

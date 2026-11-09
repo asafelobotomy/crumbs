@@ -32,6 +32,11 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.3.0" date="2026-11-09">
+      <description>
+        <p>Works with the uQ desktop: guards its packages and leaves appOFholding's AppImages alone. Safer cache cleaning, signed releases.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-11-09">
       <description>
         <p>The first release.</p>
