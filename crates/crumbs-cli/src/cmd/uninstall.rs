@@ -41,6 +41,10 @@ pub struct UninstallArgs {
     /// Include low-confidence leftovers
     #[arg(long)]
     pub show_low: bool,
+    /// Allow removing a package that is part of the uQ desktop (uq, scdr,
+    /// noti-fi, crum-bs, ...) without asking a second time
+    #[arg(long)]
+    pub desktop: bool,
     #[command(flatten)]
     pub act: ActFlags,
 }
@@ -81,6 +85,11 @@ pub(crate) fn build(env: &Env, args: &UninstallArgs, pick: Pick<PathBuf>) -> Res
         let app = resolve(&cx.inv, query)?;
         if !apps.iter().any(|a| a.id == app.id) {
             apps.push(app);
+        }
+    }
+    if !args.leftovers_only {
+        for app in &apps {
+            confirm_desktop_removal(app, args)?;
         }
     }
     // How each app itself goes, in `apps` order; none with --leftovers-only.
@@ -199,6 +208,44 @@ pub(crate) fn build(env: &Env, args: &UninstallArgs, pick: Pick<PathBuf>) -> Res
     })
 }
 
+/// A package of the uQ desktop goes only when asked for twice: `--desktop`,
+/// or a yes to this question at a terminal before the usual "Proceed?". A
+/// dry run at a terminal just previews; without a terminal (scripts, the
+/// MCP server) or with `--yes`, it is refused without `--desktop`.
+fn confirm_desktop_removal(app: &App, args: &UninstallArgs) -> Result<(), Stop> {
+    let Some(desktop) = app.part_of.as_deref() else {
+        return Ok(());
+    };
+    if args.desktop {
+        return Ok(());
+    }
+    let interactive = crate::prompt::is_interactive();
+    if interactive && args.act.dry_run {
+        return Ok(());
+    }
+    if interactive && !args.act.yes {
+        let question = format!(
+            "{} is part of the {desktop} desktop; removing it can leave your session without it. \
+             Remove it anyway?",
+            sanitise(&app.display_name)
+        );
+        return match crate::prompt::confirm(&question) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(Stop::Aborted),
+            Err(e) => Err(Stop::Failed(e)),
+        };
+    }
+    Err(Refusal::new(
+        1,
+        format!(
+            "refusing: {} is part of the {desktop} desktop; re-run with --desktop to remove it, \
+             or --leftovers-only to keep it",
+            app.id
+        ),
+    )
+    .into())
+}
+
 /// The CLI command that plans the same: a picked selection is `-i`.
 fn cli_command(args: &UninstallArgs, pick: &Pick<PathBuf>) -> Vec<String> {
     let mut argv = vec!["crumbs".to_string(), "uninstall".to_string()];
@@ -207,6 +254,7 @@ fn cli_command(args: &UninstallArgs, pick: &Pick<PathBuf>) -> Vec<String> {
         (args.leftovers_only, "--leftovers-only"),
         (args.keep_data, "--keep-data"),
         (args.show_low, "--show-low"),
+        (args.desktop, "--desktop"),
         (args.act.permanent, "--permanent"),
         (args.act.force, "--force"),
         (!matches!(pick, Pick::Defaults), "-i"),

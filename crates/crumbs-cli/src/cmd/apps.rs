@@ -293,7 +293,7 @@ fn print_app(env: &Env, a: &App) -> anyhow::Result<()> {
             v.join(", ")
         }
     };
-    let rows = [
+    let mut rows = vec![
         ("Name", sanitise(&a.display_name)),
         ("ID", sanitise(&a.id)),
         ("Source", a.source.as_str().to_string()),
@@ -313,6 +313,9 @@ fn print_app(env: &Env, a: &App) -> anyhow::Result<()> {
             a.description.clone().unwrap_or_else(|| "-".into()),
         ),
     ];
+    if let Some(desktop) = &a.part_of {
+        rows.insert(5, ("Part of", format!("the {desktop} desktop")));
+    }
     let mut out = anstream::stdout().lock();
     for (k, v) in rows {
         writeln!(out, "{:<13} {v}", format!("{k}:"))?;

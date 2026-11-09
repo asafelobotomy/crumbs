@@ -411,6 +411,7 @@ mod tests {
             leftovers_only: true,
             keep_data: false,
             show_low: false,
+            desktop: false,
             act: ActFlags {
                 dry_run: true,
                 json: true,

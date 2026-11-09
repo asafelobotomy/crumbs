@@ -67,7 +67,26 @@ impl AppSource for AppImageSource {
 
 /// Directories to scan, with whether the `.AppImage` extension is required.
 /// Duplicates (e.g. a launcher destination equal to a default) appear once.
+/// appOFholding's library is left out: the AppImages there are its to list,
+/// update and remove, so crumBS neither lists them as apps nor offers their
+/// old versions to `appimage-old` nor uninstalls them by path.
 fn scan_dirs(env: &Env, cfg: &Config) -> Vec<(PathBuf, bool)> {
+    let held = appofholding_library(env);
+    let mut dirs = all_scan_dirs(env, cfg);
+    dirs.retain(|(d, _)| Some(d) != held.as_ref());
+    dirs
+}
+
+/// appOFholding's library directory, when appOFholding is in use (its
+/// database exists). It always keeps its AppImages in `~/Applications`.
+pub fn appofholding_library(env: &Env) -> Option<PathBuf> {
+    env.data_home
+        .join("appofholding/db.sqlite")
+        .is_file()
+        .then(|| env.home.join("Applications"))
+}
+
+fn all_scan_dirs(env: &Env, cfg: &Config) -> Vec<(PathBuf, bool)> {
     let mut dirs = vec![
         (env.home.join("Applications"), false),
         (env.home.join(".local/bin"), true),
@@ -461,6 +480,19 @@ mod tests {
         assert_eq!(pb.desktop_ids, ["pass-broker.desktop"]);
         assert_eq!(pb.display_name, "Pass Broker");
         assert_eq!(pb.version.as_deref(), Some("2.3"));
+    }
+
+    #[test]
+    fn appofholding_library_left_to_it() {
+        let t = FixtureTree::new();
+        t.appimage("/home/user/Applications/GutCheck-0.19.0-x86_64.AppImage");
+        t.appimage("/home/user/Downloads/Foo-1.0-x86_64.AppImage");
+        assert_eq!(list(&t).apps.len(), 2);
+        // Once appOFholding is in use, ~/Applications is its library.
+        t.write("home/user/.local/share/appofholding/db.sqlite", b"");
+        let l = list(&t);
+        let ids: Vec<&str> = l.apps.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["appimage:~/Downloads/Foo-1.0-x86_64.AppImage"]);
     }
 
     #[test]

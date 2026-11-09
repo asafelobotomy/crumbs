@@ -63,7 +63,7 @@ The exit code tells you which kind of failure it was (see below). `apps show` re
 | Code | Meaning |
 |---|---|
 | 0 | Success (including a dry run and "nothing to do"). |
-| 1 | Error, or `uninstall`/`orphans --clean`/`clean` refused because a source or scanner failed (override with `--force`) or an app is running, or `uninstall` refused an AppImage whose file fails the safety checks, or refused a package removal: pacman's simulation refused it (for example it would break a dependency), the pacman database is locked (`pacman is busy (database lock present)`), or the name is not a plain package name. |
+| 1 | Error, or `uninstall`/`orphans --clean`/`clean` refused because a source or scanner failed (override with `--force`) or an app is running, or `uninstall` refused an AppImage whose file fails the safety checks, or refused a package that is part of the uQ desktop without `--desktop`, or refused a package removal: pacman's simulation refused it (for example it would break a dependency), the pacman database is locked (`pacman is busy (database lock present)`), or the name is not a plain package name. |
 | 2 | Usage error: bad flags, a missing package tool (`pacman is not installed` when removing a pacman app), an unknown category name, `--user` together with `--system`, a named category of the other kind (`clean cache --system`, `scan --user --category journal`), ambiguous or not-found app, `--json` without `--yes` or `--dry-run`, a destructive command run non-interactively without `--yes`, an unmanaged app whose own files cannot be removed (the refusal text ends `; use --leftovers-only`, see `uninstall`), or `restore` with no selector matching any history entry (see `restore`). |
 | 3 | Partial failure: some source failed while another worked, some actions/restores failed (`restore` also when selectors are mixed: a batch with nothing restorable together with an unknown selector) (privileged ones included, when administrator rights were granted but a step failed, or the privileged run stopped part-way), or (`scan`) some category's scanner failed. |
 | 4 | Aborted by the user at a prompt. |
@@ -102,6 +102,7 @@ Commands that take an app accept an ID, a name, a desktop ID or a display name. 
 | `exec_names` | array of string |
 | `wm_classes` | array of string |
 | `has_gui` | boolean |
+| `part_of` | `"uQ"` for a package that is part of the uQ desktop, else null |
 
 **Finding** (a leftover or an orphan)
 

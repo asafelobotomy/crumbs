@@ -113,6 +113,11 @@ pub(crate) struct PreviewUninstallParams {
     /// only when named here. Without it, crumbs' defaults apply.
     #[serde(default)]
     pub select: Vec<String>,
+    /// Allow removing a package that is part of the uQ desktop (`part_of`
+    /// is set on the app). Only when the user asked for that package by
+    /// name: without it, such a removal is refused.
+    #[serde(default)]
+    pub desktop: bool,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -482,6 +487,7 @@ impl Server {
                 leftovers_only: p.leftovers_only,
                 keep_data: p.keep_data,
                 show_low: p.show_low,
+                desktop: p.desktop,
                 act: dry_run_flags(),
             };
             let select: Option<Vec<PathBuf>> = selection(p.select);
