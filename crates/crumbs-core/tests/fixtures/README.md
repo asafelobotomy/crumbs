@@ -18,3 +18,9 @@ Captured from the podman images named below (offline, `--network=none`), then tr
   `registry.fedoraproject.org/fedora:latest` (Fedora 44), trimmed to 6 files per package.
   The `firefox` block is hand-written in the same format. `gpg-pubkey` is a key, not a
   package (arch `(none)`), and is skipped.
+
+## snap/
+
+- `list`: hand-written in the column layout of `snap list --unicode=never`
+  (`Name Version Rev Tracking Publisher Notes`; verified publishers end in `**`).
+  snapd needs systemd, so it does not run in the test containers.

@@ -3,6 +3,7 @@
 
 mod flatpak;
 mod pacman;
+mod snap;
 mod unmanaged;
 
 use crate::command::CommandRunner;
@@ -92,6 +93,7 @@ pub fn plan_removal(
             "removing dpkg packages isn't supported yet; use --leftovers-only".into(),
         )),
         SourceKind::Flatpak => flatpak::plan(app),
+        SourceKind::Snap => snap::plan(app),
         SourceKind::AppImage => Ok(RemovalPlan::default()),
         SourceKind::Unmanaged => Err(RemovalError::Unsupported(MSG_UNMANAGED.into())),
     }
@@ -113,6 +115,7 @@ pub fn still_installed(
         SourceKind::Dpkg => Err("checking dpkg packages isn't supported yet".into()),
         SourceKind::Rpm => Err("checking rpm packages isn't supported yet".into()),
         SourceKind::Flatpak => flatpak_still_installed(env, runner, names),
+        SourceKind::Snap => snap::snap_still_installed(env, runner, names),
         SourceKind::AppImage | SourceKind::Unmanaged => Ok(Vec::new()),
     }
 }

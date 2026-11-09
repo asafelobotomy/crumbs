@@ -41,6 +41,7 @@ pub fn default_sources() -> Vec<Box<dyn AppSource>> {
         Box::new(crate::sources::dpkg::DpkgSource),
         Box::new(crate::sources::rpm::RpmSource),
         Box::new(FlatpakSource),
+        Box::new(crate::sources::snap::SnapSource),
         Box::new(AppImageSource),
     ]
 }
@@ -51,6 +52,7 @@ fn unavailable_reason(kind: SourceKind) -> &'static str {
         SourceKind::Dpkg => "no dpkg database",
         SourceKind::Rpm => "rpm not installed",
         SourceKind::Flatpak => "not installed",
+        SourceKind::Snap => "snap not installed",
         _ => "not available",
     }
 }
@@ -312,12 +314,13 @@ mod tests {
                 SourceKind::Dpkg,
                 SourceKind::Rpm,
                 SourceKind::Flatpak,
+                SourceKind::Snap,
                 SourceKind::AppImage,
                 SourceKind::Unmanaged
             ]
         );
         let counts: Vec<_> = inv.statuses.iter().map(|s| s.app_count).collect();
-        assert_eq!(counts, [1, 0, 0, 0, 1, 1]);
+        assert_eq!(counts, [1, 0, 0, 0, 0, 1, 1]);
         assert_eq!(
             inv.statuses[1].skipped_reason.as_deref(),
             Some("no dpkg database")
@@ -563,7 +566,7 @@ mod tests {
             &Config::default(),
         );
         let v = serde_json::to_value(&inv).unwrap();
-        assert_eq!(v["statuses"][5]["source"], "unmanaged");
+        assert_eq!(v["statuses"][6]["source"], "unmanaged");
         assert!(v["apps"].is_array());
     }
 

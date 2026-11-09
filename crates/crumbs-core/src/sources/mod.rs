@@ -3,6 +3,7 @@ pub mod dpkg;
 pub mod flatpak;
 pub mod pacman;
 pub mod rpm;
+pub mod snap;
 pub mod unmanaged;
 
 use std::collections::HashSet;

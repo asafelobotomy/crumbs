@@ -10,6 +10,7 @@ pub enum SourceKind {
     Dpkg,
     Rpm,
     Flatpak,
+    Snap,
     #[serde(rename = "appimage")]
     AppImage,
     Unmanaged,
@@ -22,6 +23,7 @@ impl SourceKind {
             SourceKind::Dpkg => "dpkg",
             SourceKind::Rpm => "rpm",
             SourceKind::Flatpak => "flatpak",
+            SourceKind::Snap => "snap",
             SourceKind::AppImage => "appimage",
             SourceKind::Unmanaged => "unmanaged",
         }
@@ -37,10 +39,11 @@ impl FromStr for SourceKind {
             "dpkg" => Ok(SourceKind::Dpkg),
             "rpm" => Ok(SourceKind::Rpm),
             "flatpak" => Ok(SourceKind::Flatpak),
+            "snap" => Ok(SourceKind::Snap),
             "appimage" => Ok(SourceKind::AppImage),
             "unmanaged" => Ok(SourceKind::Unmanaged),
             other => Err(format!(
-                "unknown source '{other}' (expected pacman, dpkg, rpm, flatpak, appimage or unmanaged)"
+                "unknown source '{other}' (expected pacman, dpkg, rpm, flatpak, snap, appimage or unmanaged)"
             )),
         }
     }
@@ -148,6 +151,7 @@ mod tests {
             SourceKind::Dpkg,
             SourceKind::Rpm,
             SourceKind::Flatpak,
+            SourceKind::Snap,
             SourceKind::AppImage,
             SourceKind::Unmanaged,
         ] {
