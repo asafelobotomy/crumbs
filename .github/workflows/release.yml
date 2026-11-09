@@ -26,19 +26,27 @@ jobs:
           curl -fsSL -o /usr/local/bin/appimagetool \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x /usr/local/bin/appimagetool
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build the release
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           scripts/release.sh "${GITHUB_REF_NAME#v}"
+      # Re-runnable: a draft left by a failed run is reused and its assets
+      # replaced; the release is published only once every upload succeeded.
       - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --title "crumBS ${GITHUB_REF_NAME#v}" --notes-file dist/RELEASE_NOTES.md \
+          tag=$GITHUB_REF_NAME
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft \
+              --title "crumBS ${tag#v}" --notes-file dist/RELEASE_NOTES.md
+          fi
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
             dist/crumbs-* dist/crumbs_* dist/LICENSE dist/SHA256SUMS
-      - uses: actions/upload-artifact@v4
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false \
+            --notes-file dist/RELEASE_NOTES.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: aur
           path: dist/aur/

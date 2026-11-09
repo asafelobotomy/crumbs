@@ -1,4 +1,4 @@
-# Maintainer: asafelobotomy
+# Maintainer: asafelobotomy <asafelobotomy@users.noreply.github.com>
 
 pkgname=crumbs-bin
 _pkgname=crumbs
@@ -12,12 +12,12 @@ provides=("$_pkgname=$pkgver")
 conflicts=("$_pkgname")
 # The release binary is already stripped, and static.
 options=('!strip' '!debug')
-source=("LICENSE::$url/releases/download/v$pkgver/LICENSE")
+source=("$_pkgname-$pkgver-LICENSE::$url/releases/download/v$pkgver/LICENSE")
 source_x86_64=("$_pkgname-$pkgver::$url/releases/download/v$pkgver/$_pkgname-$pkgver-$CARCH-linux-musl")
 sha256sums=('SKIP') # filled in by scripts/release.sh
 sha256sums_x86_64=('SKIP') # filled in by scripts/release.sh
 
 package() {
     install -Dm755 "$_pkgname-$pkgver" "$pkgdir/usr/bin/$_pkgname"
-    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 "$_pkgname-$pkgver-LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

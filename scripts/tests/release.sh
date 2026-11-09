@@ -37,7 +37,12 @@ done
 rm -rf "$CLONE"
 
 check release_builds_everything_with_sums
-scripts/release.sh "$VERSION" --allow-dirty >/dev/null 2>"$HOME/.cache/crumbs-test/release.log" ||
+# Run through a path with spaces: every path the script builds must stay
+# one word.
+SPACED="$HOME/.cache/crumbs-test/release with spaces"
+rm -f "$SPACED"
+ln -s "$PWD" "$SPACED"
+"$SPACED/scripts/release.sh" "$VERSION" --allow-dirty >/dev/null 2>"$HOME/.cache/crumbs-test/release.log" ||
     fail "release.sh failed: $(tail -3 "$HOME/.cache/crumbs-test/release.log" | tr '\n' ' ')"
 for f in "crumbs-$VERSION-x86_64-linux-musl" "crumbs-$VERSION-x86_64.AppImage" \
     "crumbs_${VERSION}_amd64.deb" "crumbs-$VERSION-1.x86_64.rpm" "crumbs-$VERSION.tar.gz" LICENSE SHA256SUMS RELEASE_NOTES.md \
@@ -63,6 +68,12 @@ grep -q "source = https://github.com/asafelobotomy/crumbs/releases/download/v$VE
     fail "crumbs does not download the release's source tarball"
 tar -tzf "dist/crumbs-$VERSION.tar.gz" | grep -qx "crumbs-$VERSION/Cargo.lock" || fail "the source tarball lacks crumbs-$VERSION/Cargo.lock"
 
+rm -f "$SPACED"
+
+check release_checks_licences
+grep -q 'scripts/check-licenses.sh' scripts/release.sh || fail "release.sh does not run scripts/check-licenses.sh"
+grep -q 'scripts/check-licenses.sh' .github/workflows/ci.yml || fail "ci.yml does not run scripts/check-licenses.sh"
+
 check release_workflow_is_valid_yaml
 wf=.github/workflows/release.yml
 python3 -I - "$wf" <<'PY' || fail "release.yml is not valid"
@@ -78,5 +89,13 @@ assert doc["permissions"]["contents"] == "write"
 PY
 grep -q 'scripts/release.sh "${GITHUB_REF_NAME#v}"' "$wf" || fail "release.yml does not run scripts/release.sh"
 grep -q 'gh release create' "$wf" || fail "release.yml does not run gh release create"
+# Re-runnable: a release left over from a failed run is reused, its assets
+# replaced, and it is published only once every upload has succeeded.
+grep -q 'gh release upload .*--clobber' "$wf" || fail "release.yml does not upload with --clobber"
+grep -q -- '--draft' "$wf" || fail "release.yml does not create a draft first"
+for f in .github/workflows/*.yml; do
+    bad=$(grep -E '^\s*(- )?uses: ' "$f" | grep -Ev '@[0-9a-f]{40}( |$)' || true)
+    [ -z "$bad" ] || fail "$f: actions not pinned by commit: $bad"
+done
 
 pass

@@ -54,8 +54,15 @@ st=0; err=$("$odd" apps show "a b" 2>&1 >/dev/null) || st=$?
 echo "$err" | grep -q "'a b'" || fail "the argument was split: $err"
 
 check appimage_mcp_stdout_is_protocol_only
-out=$(APPIMAGE_EXTRACT_AND_RUN=1 python3 -I scripts/tests/mcp_stdout.py "$odd" mcp 2>&1) || fail "$out"
+out=$(APPIMAGE_EXTRACT_AND_RUN=1 python3 -I scripts/tests/mcp_stdout.py "$odd" mcp 2>&1) || fail "extracted: $out"
 echo "$out"
+# The usual desktop path: the runtime mounts the image with FUSE.
+if [ -e /dev/fuse ] && { command -v fusermount3 || command -v fusermount; } >/dev/null; then
+    out=$(env -u APPIMAGE_EXTRACT_AND_RUN python3 -I scripts/tests/mcp_stdout.py "$odd" mcp 2>&1) || fail "FUSE-mounted: $out"
+    echo "$out"
+else
+    echo "no FUSE here: the FUSE-mounted run is skipped"
+fi
 
 rm -rf "$WORK"
 pass

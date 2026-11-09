@@ -12,7 +12,12 @@ M6 left these out on purpose, or noticed them on the way.
 ## Known limits
 
 5. **appimagetool is unpinned.** (cargo-deb is pinned in `scripts/build-packages.sh`.) The release workflow downloads appimagetool's `continuous` build, which also fetches the AppImage runtime at build time. Pin both by version and checksum.
-6. **The `.deb` has an empty `Depends:` field.** cargo-deb 3.8 always writes it. dpkg accepts it and drops it on install; lintian may warn.
+6. **lintian warnings on the `.deb`.** It has no errors (the packaging test runs `lintian --fail-on error`), but it warns about five things:
+   - `empty-field Depends`: cargo-deb 3.8 always writes the field, and dpkg drops it on install;
+   - `no-manual-page`: crumbs has no man page yet;
+   - `wrong-name-for-changelog-of-native-package`: the version has no Debian revision, so lintian expects `changelog.gz`;
+   - `shared-library-lacks-prerequisites` and `uses-dpkg-database-directly`: false positives for a static-pie binary that reads `/var/lib/dpkg/status` on purpose.
 7. **The `.rpm` is built with `rpmbuild`,** from `packaging/rpm/crumbs.spec`, not cargo-generate-rpm: cargo-generate-rpm 0.21.1 cannot own directories, so `rpm -e` left `/usr/share/doc/crumbs` and `/usr/share/licenses/crumbs` behind.
 8. **rpm self-removal is not tested.** In Debian, the packaging test removes the `.deb` with `crumbs uninstall dpkg:crumbs`. In Fedora it uses `rpm -e`, because dnf's simulation needs repository metadata and the test container has no network.
 9. **The source AUR package tests in the debug profile.** `check()` runs `cargo test`, not `cargo test --release`, because the CLI tests rely on debug-only fixture roots.
+10. **The maintainer address** in the `.deb`, the AUR files and `packaging/deb/copyright` is `asafelobotomy@users.noreply.github.com`, a placeholder that receives no mail. Replace it with a real contact address before publishing.

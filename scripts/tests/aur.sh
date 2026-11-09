@@ -14,6 +14,12 @@ for pkg in crumbs crumbs-bin; do
     want=$(cd "$AUR/$pkg" && makepkg --printsrcinfo) || fail "$pkg: makepkg --printsrcinfo failed"
     [ "$want" = "$(cat "$AUR/$pkg/.SRCINFO")" ] || fail "$pkg: .SRCINFO is stale (run makepkg --printsrcinfo > .SRCINFO)"
     grep -q "# filled in by scripts/release.sh" "$AUR/$pkg/PKGBUILD" || fail "$pkg: checksums not marked"
+    # Every downloaded file is named after the version, so a shared SRCDEST
+    # never mixes versions.
+    unversioned=$(grep -E '^\s+source(_x86_64)? = ' "$AUR/$pkg/.SRCINFO" | grep -v "$VERSION" || true)
+    [ -z "$unversioned" ] || fail "$pkg: source names without the version: $unversioned"
+    unversioned=$(grep -E '^\s+source(_x86_64)? = [^:]+::' "$AUR/$pkg/.SRCINFO" | sed 's/::.*//' | grep -v "$VERSION" || true)
+    [ -z "$unversioned" ] || fail "$pkg: local source names without the version: $unversioned"
 done
 
 check aur_namcap_clean
@@ -33,7 +39,7 @@ cp "$AUR/crumbs/PKGBUILD" "$WORK/crumbs/"
 git archive --format=tar.gz --prefix="crumbs-$VERSION/" -o "$WORK/crumbs/crumbs-$VERSION.tar.gz" HEAD
 cp "$AUR/crumbs-bin/PKGBUILD" "$WORK/crumbs-bin/"
 cp "$STATIC" "$WORK/crumbs-bin/crumbs-$VERSION"
-cp LICENSE "$WORK/crumbs-bin/LICENSE"
+cp LICENSE "$WORK/crumbs-bin/crumbs-$VERSION-LICENSE"
 
 check aur_source_package_builds
 run_build() { # <pkg dir> <package name>
