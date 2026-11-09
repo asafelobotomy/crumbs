@@ -1,0 +1,59 @@
+Package: coreutils
+Essential: yes
+Status: install ok installed
+Priority: required
+Section: utils
+Installed-Size: 18457
+Maintainer: Michael Stone <mstone@debian.org>
+Architecture: amd64
+Multi-Arch: foreign
+Version: 9.7-3
+Pre-Depends: libacl1 (>= 2.2.23), libattr1 (>= 1:2.4.48), libc6 (>= 2.38), libcap2 (>= 1:2.10), libgmp10 (>= 2:6.3.0+dfsg), libselinux1 (>= 3.1~), libssl3t64 (>= 3.0.0), libsystemd0 (>= 254)
+Description: GNU core utilities
+ This package contains the basic file, shell and text manipulation
+ utilities which are expected to exist on every operating system.
+ .
+ Specifically, this package includes:
+ arch base64 basename cat chcon chgrp chmod chown chroot cksum comm cp
+ csplit cut date dd df dir dircolors dirname du echo env expand expr
+ factor false flock fmt fold groups head hostid id install join link ln
+ logname ls md5sum mkdir mkfifo mknod mktemp mv nice nl nohup nproc numfmt
+ od paste pathchk pinky pr printenv printf ptx pwd readlink realpath rm
+ rmdir runcon sha*sum seq shred sleep sort split stat stty sum sync tac
+ tail tee test timeout touch tr true truncate tsort tty uname unexpand
+ uniq unlink users vdir wc who whoami yes
+Homepage: https://gnu.org/software/coreutils
+
+Package: libacl1
+Status: install ok installed
+Priority: optional
+Section: libs
+Installed-Size: 74
+Maintainer: Guillem Jover <guillem@debian.org>
+Architecture: amd64
+Multi-Arch: same
+Source: acl (2.3.2-2)
+Version: 2.3.2-2+b1
+Depends: libc6 (>= 2.38)
+Description: access control list - shared library
+ This package contains the shared library containing the POSIX 1003.1e
+ draft standard 17 functions for manipulating access control lists.
+Homepage: https://savannah.nongnu.org/projects/acl/
+
+
+Package: firefox-esr
+Status: install ok installed
+Priority: optional
+Section: web
+Installed-Size: 250000
+Architecture: amd64
+Version: 140.4.0esr-1
+Description: Mozilla Firefox web browser - Extended Support Release (ESR)
+
+Package: oldpkg
+Status: deinstall ok config-files
+Priority: optional
+Section: misc
+Architecture: all
+Version: 1.0-1
+Description: removed package whose config files remain

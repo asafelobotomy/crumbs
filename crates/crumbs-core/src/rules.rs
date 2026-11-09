@@ -185,7 +185,7 @@ pub fn load_rules(env: &Env) -> (Vec<Rule>, Vec<CoreError>) {
 /// Whether the rule's match keys select this app.
 pub fn rule_matches(rule: &Rule, app: &App) -> bool {
     match app.source {
-        SourceKind::Pacman | SourceKind::Unmanaged => {
+        SourceKind::Pacman | SourceKind::Dpkg | SourceKind::Unmanaged => {
             if rule.packages.contains(&app.name) {
                 return true;
             }

@@ -85,6 +85,9 @@ pub fn plan_removal(
 ) -> Result<RemovalPlan, RemovalError> {
     match app.source {
         SourceKind::Pacman => pacman::plan(env, runner, app),
+        SourceKind::Dpkg => Err(RemovalError::Unsupported(
+            "removing dpkg packages isn't supported yet; use --leftovers-only".into(),
+        )),
         SourceKind::Flatpak => flatpak::plan(app),
         SourceKind::AppImage => Ok(RemovalPlan::default()),
         SourceKind::Unmanaged => Err(RemovalError::Unsupported(MSG_UNMANAGED.into())),
@@ -104,6 +107,7 @@ pub fn still_installed(
 ) -> Result<Vec<String>, String> {
     match source {
         SourceKind::Pacman => pacman_still_installed(env, names),
+        SourceKind::Dpkg => Err("checking dpkg packages isn't supported yet".into()),
         SourceKind::Flatpak => flatpak_still_installed(env, runner, names),
         SourceKind::AppImage | SourceKind::Unmanaged => Ok(Vec::new()),
     }

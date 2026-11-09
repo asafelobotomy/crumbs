@@ -7,6 +7,7 @@ use serde::Serialize;
 #[serde(rename_all = "kebab-case")]
 pub enum SourceKind {
     Pacman,
+    Dpkg,
     Flatpak,
     #[serde(rename = "appimage")]
     AppImage,
@@ -17,6 +18,7 @@ impl SourceKind {
     pub fn as_str(self) -> &'static str {
         match self {
             SourceKind::Pacman => "pacman",
+            SourceKind::Dpkg => "dpkg",
             SourceKind::Flatpak => "flatpak",
             SourceKind::AppImage => "appimage",
             SourceKind::Unmanaged => "unmanaged",
@@ -30,11 +32,12 @@ impl FromStr for SourceKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "pacman" => Ok(SourceKind::Pacman),
+            "dpkg" => Ok(SourceKind::Dpkg),
             "flatpak" => Ok(SourceKind::Flatpak),
             "appimage" => Ok(SourceKind::AppImage),
             "unmanaged" => Ok(SourceKind::Unmanaged),
             other => Err(format!(
-                "unknown source '{other}' (expected pacman, flatpak, appimage or unmanaged)"
+                "unknown source '{other}' (expected pacman, dpkg, flatpak, appimage or unmanaged)"
             )),
         }
     }

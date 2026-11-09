@@ -1,4 +1,5 @@
 pub mod appimage;
+pub mod dpkg;
 pub mod flatpak;
 pub mod pacman;
 pub mod unmanaged;

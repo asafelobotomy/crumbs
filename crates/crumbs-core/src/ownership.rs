@@ -99,8 +99,19 @@ pub fn load_package_db(
     let _ = runner;
     match detect_package_db(env) {
         Some(PackageDb::Pacman) => load_pacman(env),
-        Some(PackageDb::Dpkg) | Some(PackageDb::Rpm) | None => Ok(None),
+        Some(PackageDb::Dpkg) => load_dpkg(env),
+        Some(PackageDb::Rpm) | None => Ok(None),
     }
+}
+
+/// Every path the dpkg database lists, as a complete index; `None` when
+/// there is no dpkg database. Any unreadable list is an error.
+pub fn load_dpkg(env: &Env) -> Result<Option<OwnedIndex>, CoreError> {
+    if !env.sys(crate::sources::dpkg::STATUS).is_file() {
+        return Ok(None);
+    }
+    let files = crate::sources::dpkg::owned_paths(env)?;
+    Ok(Some(OwnedIndex::new(files, Vec::<PathBuf>::new(), true)))
 }
 
 /// Reads every package's file list from the pacman database. `None` when the
