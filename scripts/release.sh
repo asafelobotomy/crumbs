@@ -38,7 +38,7 @@ named() { # <file> <sed expression printing the version it names>
     found=$(sed -n "$2" "$1" | head -1)
     [ "$found" = "$VERSION" ] || die "$1 names version ${found:-none}, not $VERSION"
 }
-for pkg in crumbs crumbs-bin; do
+for pkg in crum-bs crum-bs-bin; do
     named "packaging/aur/$pkg/PKGBUILD" 's/^pkgver=//p'
     named "packaging/aur/$pkg/.SRCINFO" 's/^\tpkgver = //p'
 done
@@ -109,8 +109,8 @@ open(dst + "/PKGBUILD", "w").write(pkgbuild)
 open(dst + "/.SRCINFO", "w").write(srcinfo)
 PY
 }
-fill crumbs "sha256sums=$tarball_sum"
-fill crumbs-bin "sha256sums=$license_sum" "sha256sums_x86_64=$bin_sum"
+fill crum-bs "sha256sums=$tarball_sum"
+fill crum-bs-bin "sha256sums=$license_sum" "sha256sums_x86_64=$bin_sum"
 
 echo "dist/ now holds:" >&2
 (cd dist && sha256sum -c SHA256SUMS >&2)

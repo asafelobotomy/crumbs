@@ -11,10 +11,10 @@ Every release on [GitHub](https://github.com/asafelobotomy/crumbs/releases) has 
 - **AppImage** (any distro): download `crumbs-<version>-x86_64.AppImage`, then `chmod +x` it and run it. It needs no `libfuse2`; where FUSE is not available at all (some containers), run it with `--appimage-extract-and-run` or `APPIMAGE_EXTRACT_AND_RUN=1`. Kept in `~/Applications`, `~/.local/bin` or `~/Downloads`, crumbs lists its own AppImage like any other, so `crumbs uninstall` can remove it.
 - **Debian and Ubuntu:** `sudo apt install ./crumbs_<version>_amd64.deb`.
 - **Fedora:** `sudo dnf install ./crumbs-<version>-1.x86_64.rpm`.
-- **Arch and Manjaro:** once published to the AUR, `yay -S crumbs` builds from source and `yay -S crumbs-bin` installs the release binary.
+- **Arch and Manjaro:** from the AUR, `yay -S crum-bs` builds from source and `yay -S crum-bs-bin` installs the release binary. (The AUR name `crumbs` belongs to an unrelated tool, which these conflict with.)
 - **Static binary:** `crumbs-<version>-x86_64-linux-musl` has no dependencies; put it on your `PATH` as `crumbs`.
 
-The packages install `/usr/bin/crumbs`, so crumbs lists itself as an app of your package manager (`dpkg:crumbs`, `rpm:crumbs`, `pacman:crumbs` or `pacman:crumbs-bin`) and can uninstall itself.
+The packages install `/usr/bin/crumbs`, so crumbs lists itself as an app of your package manager (`dpkg:crumbs`, `rpm:crumbs`, `pacman:crum-bs` or `pacman:crum-bs-bin`) and can uninstall itself.
 
 ### From source
 
@@ -348,14 +348,14 @@ Every artifact comes from one script, which also runs in CI on a tag push:
    - the static binary;
    - the AppImage;
    - the `.deb` and `.rpm`;
-   - the source tarball `crumbs-<version>.tar.gz` (what the AUR `crumbs` package builds from);
+   - the source tarball `crumbs-<version>.tar.gz` (what the AUR `crum-bs` package builds from);
    - `LICENSE`, `SHA256SUMS` and `RELEASE_NOTES.md`;
-   - `dist/aur/{crumbs,crumbs-bin}` with real checksums.
+   - `dist/aur/{crum-bs,crum-bs-bin}` with real checksums.
 
    It needs `appimagetool` (or `APPIMAGETOOL`), `rpmbuild`, `rustup`, `python3` and `git`. It installs the pinned `cargo-deb` into `~/.cache/crumbs-tools` when it is missing. It refuses to run unless the version in `Cargo.toml`, the AUR `PKGBUILD`s and `.SRCINFO`s and the AppStream metainfo all match.
 3. Check the artifacts with `scripts/test-packaging.sh`, which needs podman. It runs each artifact in containers: the binary on four distros, the AppImage without FUSE, install and removal of the `.deb` and `.rpm`, and an AUR build.
 4. Tag and push: `git tag v<version> && git push origin v<version>`. `.github/workflows/release.yml` then runs `scripts/release.sh` and creates the GitHub release with every artifact.
-5. Publish to the AUR: download the workflow's `aur` artifact, or use your local `dist/aur/`, and push each folder to its AUR repository (`ssh://aur@aur.archlinux.org/crumbs.git`, `.../crumbs-bin.git`). Their checksums are of the files the release uploads.
+5. Publish to the AUR: download the workflow's `aur` artifact, or use your local `dist/aur/`, and push each folder to its AUR repository (`ssh://aur@aur.archlinux.org/crum-bs.git`, `.../crum-bs-bin.git`). Their checksums are of the files the release uploads.
 
 `scripts/check-licenses.sh` lists any dependency whose licence is not GPL-compatible permissive.
 

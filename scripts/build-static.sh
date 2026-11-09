@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds the release binary for x86_64-unknown-linux-musl (fully static) and
 # copies it to dist/crumbs-<version>-x86_64-linux-musl, printing that path.
-# Every package (AppImage, .deb, .rpm, crumbs-bin) wraps this one binary.
+# Every package (AppImage, .deb, .rpm, crum-bs-bin) wraps this one binary.
 set -eu
 cd "$(dirname "$0")/.."
 TARGET=x86_64-unknown-linux-musl

@@ -1,6 +1,6 @@
 # Maintainer: asafelobotomy <213836723+asafelobotomy@users.noreply.github.com>
 
-pkgname=crumbs-bin
+pkgname=crum-bs-bin
 _pkgname=crumbs
 pkgver=0.2.0
 pkgrel=1
@@ -8,8 +8,9 @@ pkgdesc="Find and remove app leftovers, caches and system bloat (static binary)"
 arch=('x86_64')
 url="https://github.com/asafelobotomy/crumbs"
 license=('GPL-3.0-or-later')
-provides=("$_pkgname=$pkgver")
-conflicts=("$_pkgname")
+# Installs /usr/bin/crumbs, as does the unrelated AUR package `crumbs`.
+provides=("crum-bs=$pkgver")
+conflicts=('crum-bs' 'crumbs')
 # The release binary is already stripped, and static.
 options=('!strip' '!debug')
 source=("$_pkgname-$pkgver-LICENSE::$url/releases/download/v$pkgver/LICENSE")

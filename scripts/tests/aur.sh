@@ -9,7 +9,7 @@ podman unshare rm -rf "$WORK"; mkdir -p "$WORK"
 ARCH_IMAGE=docker.io/library/archlinux:latest
 
 check aur_srcinfo_up_to_date
-for pkg in crumbs crumbs-bin; do
+for pkg in crum-bs crum-bs-bin; do
     grep -q "^pkgver=$VERSION\$" "$AUR/$pkg/PKGBUILD" || fail "$pkg: pkgver is not $VERSION"
     want=$(cd "$AUR/$pkg" && makepkg --printsrcinfo) || fail "$pkg: makepkg --printsrcinfo failed"
     [ "$want" = "$(cat "$AUR/$pkg/.SRCINFO")" ] || fail "$pkg: .SRCINFO is stale (run makepkg --printsrcinfo > .SRCINFO)"
@@ -24,7 +24,7 @@ done
 
 check aur_namcap_clean
 if command -v namcap >/dev/null; then
-    for pkg in crumbs crumbs-bin; do
+    for pkg in crum-bs crum-bs-bin; do
         out=$(namcap "$AUR/$pkg/PKGBUILD" 2>&1)
         echo "$out"
         echo "$out" | grep -q ' E: ' && fail "$pkg: namcap: $(echo "$out" | grep ' E: ' | head -1)"
@@ -34,12 +34,12 @@ fi
 # Both builds run in one container: install the tools, build as `builder`,
 # install with pacman -U, run, and namcap the built packages.
 need "$STATIC"
-mkdir -p "$WORK/crumbs" "$WORK/crumbs-bin"
-cp "$AUR/crumbs/PKGBUILD" "$WORK/crumbs/"
-git archive --format=tar.gz --prefix="crumbs-$VERSION/" -o "$WORK/crumbs/crumbs-$VERSION.tar.gz" HEAD
-cp "$AUR/crumbs-bin/PKGBUILD" "$WORK/crumbs-bin/"
-cp "$STATIC" "$WORK/crumbs-bin/crumbs-$VERSION"
-cp LICENSE "$WORK/crumbs-bin/crumbs-$VERSION-LICENSE"
+mkdir -p "$WORK/crum-bs" "$WORK/crum-bs-bin"
+cp "$AUR/crum-bs/PKGBUILD" "$WORK/crum-bs/"
+git archive --format=tar.gz --prefix="crumbs-$VERSION/" -o "$WORK/crum-bs/crumbs-$VERSION.tar.gz" HEAD
+cp "$AUR/crum-bs-bin/PKGBUILD" "$WORK/crum-bs-bin/"
+cp "$STATIC" "$WORK/crum-bs-bin/crumbs-$VERSION"
+cp LICENSE "$WORK/crum-bs-bin/crumbs-$VERSION-LICENSE"
 
 check aur_source_package_builds
 run_build() { # <pkg dir> <package name>
@@ -56,11 +56,11 @@ run_build() { # <pkg dir> <package name>
         crumbs --version
     ' 2>&1
 }
-out=$(run_build crumbs crumbs) || fail "$(echo "$out" | tail -5 | tr '\n' ' ')"
-[ "$(echo "$out" | tail -1)" = "crumbs $VERSION" ] || fail "crumbs printed: $out"
+out=$(run_build crum-bs crum-bs) || fail "$(echo "$out" | tail -5 | tr '\n' ' ')"
+[ "$(echo "$out" | tail -1)" = "crumbs $VERSION" ] || fail "crum-bs printed: $out"
 
 check aur_bin_package_builds
-out=$(run_build crumbs-bin crumbs-bin) || fail "$(echo "$out" | tail -5 | tr '\n' ' ')"
-[ "$(echo "$out" | tail -1)" = "crumbs $VERSION" ] || fail "crumbs-bin printed: $out"
+out=$(run_build crum-bs-bin crum-bs-bin) || fail "$(echo "$out" | tail -5 | tr '\n' ' ')"
+[ "$(echo "$out" | tail -1)" = "crumbs $VERSION" ] || fail "crum-bs-bin printed: $out"
 
 pass

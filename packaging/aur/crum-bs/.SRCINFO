@@ -1,4 +1,4 @@
-pkgbase = crumbs
+pkgbase = crum-bs
 	pkgdesc = Find and remove app leftovers, caches and system bloat
 	pkgver = 0.2.0
 	pkgrel = 1
@@ -8,8 +8,9 @@ pkgbase = crumbs
 	makedepends = cargo
 	depends = gcc-libs
 	depends = glibc
+	conflicts = crumbs
 	options = !lto
 	source = https://github.com/asafelobotomy/crumbs/releases/download/v0.2.0/crumbs-0.2.0.tar.gz
 	sha256sums = SKIP
 
-pkgname = crumbs
+pkgname = crum-bs

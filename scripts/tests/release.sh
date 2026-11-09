@@ -24,7 +24,7 @@ st=0; err=$("$CLONE/scripts/release.sh" 2>&1) || st=$?
 [ "$st" -eq 2 ] || fail "no version: exit $st"
 
 check release_refuses_stale_packaging_versions
-for f in packaging/aur/crumbs/PKGBUILD packaging/aur/crumbs-bin/.SRCINFO \
+for f in packaging/aur/crum-bs/PKGBUILD packaging/aur/crum-bs-bin/.SRCINFO \
     packaging/appimage/io.github.asafelobotomy.crumbs.metainfo.xml; do
     git -C "$CLONE" checkout -q -- .
     sed -i "s/$VERSION/0.0.9/" "$CLONE/$f"
@@ -46,26 +46,26 @@ ln -s "$PWD" "$SPACED"
     fail "release.sh failed: $(tail -3 "$HOME/.cache/crumbs-test/release.log" | tr '\n' ' ')"
 for f in "crumbs-$VERSION-x86_64-linux-musl" "crumbs-$VERSION-x86_64.AppImage" \
     "crumbs_${VERSION}_amd64.deb" "crumbs-$VERSION-1.x86_64.rpm" "crumbs-$VERSION.tar.gz" LICENSE SHA256SUMS RELEASE_NOTES.md \
-    aur/crumbs/PKGBUILD aur/crumbs/.SRCINFO aur/crumbs-bin/PKGBUILD aur/crumbs-bin/.SRCINFO; do
+    aur/crum-bs/PKGBUILD aur/crum-bs/.SRCINFO aur/crum-bs-bin/PKGBUILD aur/crum-bs-bin/.SRCINFO; do
     [ -f "dist/$f" ] || fail "missing dist/$f"
 done
 (cd dist && sha256sum --quiet -c SHA256SUMS) || fail "sha256sum -c failed"
 [ "$(wc -l < dist/SHA256SUMS)" -eq 6 ] || fail "SHA256SUMS should list 6 files: $(cat dist/SHA256SUMS)"
 grep -q "^## $VERSION\$" dist/RELEASE_NOTES.md && fail "RELEASE_NOTES.md repeats the heading"
 [ -s dist/RELEASE_NOTES.md ] || fail "RELEASE_NOTES.md is empty"
-for pkg in crumbs crumbs-bin; do
+for pkg in crum-bs crum-bs-bin; do
     grep -q SKIP "dist/aur/$pkg/PKGBUILD" "dist/aur/$pkg/.SRCINFO" && fail "dist/aur/$pkg still has SKIP"
     want=$(cd "dist/aur/$pkg" && makepkg --printsrcinfo) || fail "$pkg: makepkg --printsrcinfo failed"
     [ "$want" = "$(cat "dist/aur/$pkg/.SRCINFO")" ] || fail "dist/aur/$pkg/.SRCINFO does not match its PKGBUILD"
 done
 bin_sum=$(sha256sum "dist/crumbs-$VERSION-x86_64-linux-musl" | cut -d' ' -f1)
-grep -q "$bin_sum" dist/aur/crumbs-bin/PKGBUILD || fail "crumbs-bin lacks the binary's sum"
+grep -q "$bin_sum" dist/aur/crum-bs-bin/PKGBUILD || fail "crum-bs-bin lacks the binary's sum"
 # The source package downloads the tarball the release uploads, so the sum
 # is of the very bytes users fetch (GitHub's own tag tarballs differ).
 tar_sum=$(sha256sum "dist/crumbs-$VERSION.tar.gz" | cut -d' ' -f1)
-grep -q "sha256sums=('$tar_sum')" dist/aur/crumbs/PKGBUILD || fail "crumbs lacks the source tarball's sum"
-grep -q "source = https://github.com/asafelobotomy/crumbs/releases/download/v$VERSION/crumbs-$VERSION.tar.gz" dist/aur/crumbs/.SRCINFO ||
-    fail "crumbs does not download the release's source tarball"
+grep -q "sha256sums=('$tar_sum')" dist/aur/crum-bs/PKGBUILD || fail "crum-bs lacks the source tarball's sum"
+grep -q "source = https://github.com/asafelobotomy/crumbs/releases/download/v$VERSION/crumbs-$VERSION.tar.gz" dist/aur/crum-bs/.SRCINFO ||
+    fail "crum-bs does not download the release's source tarball"
 tar -tzf "dist/crumbs-$VERSION.tar.gz" | grep -qx "crumbs-$VERSION/Cargo.lock" || fail "the source tarball lacks crumbs-$VERSION/Cargo.lock"
 
 rm -f "$SPACED"
