@@ -2588,3 +2588,243 @@ fn system_tree_step_refuses_dangling_symlink_lock() {
     assert!(!lock.exists(), "dangling");
     assert!(env.sys("/opt/inky/sub/b").exists());
 }
+
+/// A privileged runner that removes `remove` (real paths) as the batch
+/// would, then hands back canned markers.
+struct RemovingRunner {
+    remove: Vec<PathBuf>,
+    out: Vec<u8>,
+}
+
+impl PrivilegedRunner for RemovingRunner {
+    fn run(&self, _: &Escalation, _: &[u8]) -> Result<Vec<u8>, crate::error::CoreError> {
+        for p in &self.remove {
+            let _ = std::fs::remove_file(p);
+        }
+        Ok(self.out.clone())
+    }
+}
+
+/// A command runner that removes `remove` and succeeds.
+struct RemovingCommand(Vec<PathBuf>);
+
+impl CommandRunner for RemovingCommand {
+    fn run(
+        &self,
+        _: &Path,
+        _: &[&str],
+    ) -> Result<crate::command::CmdOutput, crate::error::CoreError> {
+        for p in &self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+        Ok(crate::command::CmdOutput {
+            status: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+        })
+    }
+}
+
+#[test]
+fn measured_dirs_of_known_cleanup_commands() {
+    let t = FixtureTree::new();
+    let env = t.env();
+    let dirs = |program: &str, args: &[&str]| {
+        measured_dirs(
+            &env,
+            &Action::PrivilegedCommand {
+                program: program.into(),
+                args: args.iter().map(|a| (*a).to_string()).collect(),
+            },
+        )
+    };
+    let p = |s: &str| vec![PathBuf::from(s)];
+    assert_eq!(dirs("paccache", &["-rk2"]), p("/var/cache/pacman/pkg"));
+    assert_eq!(
+        dirs("pacman", &["-Sc", "--noconfirm"]),
+        p("/var/cache/pacman/pkg")
+    );
+    assert_eq!(
+        dirs("journalctl", &["--vacuum-size=500M"]),
+        p("/var/log/journal")
+    );
+    assert_eq!(dirs("apt-get", &["clean"]), p("/var/cache/apt/archives"));
+    assert_eq!(
+        dirs("dnf", &["clean", "packages"]),
+        vec![
+            PathBuf::from("/var/cache/dnf"),
+            PathBuf::from("/var/cache/libdnf5")
+        ]
+    );
+    assert_eq!(
+        dirs(
+            "systemd-tmpfiles",
+            &["--clean", "--prefix=/tmp", "--prefix=/var/tmp"]
+        ),
+        vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]
+    );
+    assert_eq!(
+        dirs(
+            "flatpak",
+            &[
+                "uninstall",
+                "--system",
+                "--unused",
+                "-y",
+                "--noninteractive"
+            ]
+        ),
+        p("/var/lib/flatpak")
+    );
+    let user = measured_dirs(
+        &env,
+        &Action::UserCommand {
+            program: "flatpak".into(),
+            args: ["uninstall", "--user", "--unused", "--noninteractive", "-y"]
+                .map(String::from)
+                .to_vec(),
+        },
+    );
+    assert_eq!(user, p("/home/user/.local/share/flatpak"));
+    // Anything else is not measured: an app's uninstall, an unknown tool.
+    assert!(dirs("flatpak", &["uninstall", "--system", "-y", "org.app"]).is_empty());
+    assert!(dirs("snap", &["remove", "--purge", "x"]).is_empty());
+}
+
+#[test]
+fn privileged_cleanup_reports_measured_space() {
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "paccache", &log, "", 0);
+    let old = t.write("var/cache/pacman/pkg/a-1.pkg.tar.zst", &[1u8; 20_000]);
+    t.write("var/cache/pacman/pkg/a-2.pkg.tar.zst", &[1u8; 20_000]);
+    let env = t.env();
+    let gone =
+        crate::size::disk_usage(&env, Path::new("/var/cache/pacman/pkg/a-1.pkg.tar.zst")).bytes;
+    let mut pa = priv_cmd("paccache", &["-rk1"]);
+    pa.size = 999_999; // the scan's estimate
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan_of(vec![pa]),
+        &FakeRunner::new(),
+        &RemovingRunner {
+            remove: vec![old],
+            out: b"@@crumbs 0 0\n".to_vec(),
+        },
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    assert_eq!(report.results[0].freed, Some(gone));
+    assert_eq!(report.freed, gone);
+}
+
+#[test]
+fn user_cleanup_reports_measured_space() {
+    let t = FixtureTree::new();
+    logging_program(&t, "flatpak", &t.dir.path().join("l.log"), "", 0);
+    let rt = t.write(
+        "home/user/.local/share/flatpak/runtime/x/files/lib.so",
+        &[1u8; 12_000],
+    );
+    t.write(
+        "home/user/.local/share/flatpak/app/y/files/bin",
+        &[1u8; 4_000],
+    );
+    let env = t.env();
+    let gone = crate::size::disk_usage(
+        &env,
+        Path::new("/home/user/.local/share/flatpak/runtime/x/files/lib.so"),
+    )
+    .bytes;
+    let plan = command_plan(
+        "flatpak",
+        &["uninstall", "--user", "--unused", "--noninteractive", "-y"],
+    );
+    let report = execute_with(&env, &Config::default(), &plan, &RemovingCommand(vec![rt]));
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    assert_eq!(report.results[0].freed, Some(gone));
+    assert_eq!(report.freed, gone);
+}
+
+#[test]
+fn unmeasurable_cleanup_keeps_the_estimate() {
+    // The folder does not exist: nothing to measure, so the scan's
+    // estimate stands and the result carries no measurement.
+    let t = FixtureTree::new();
+    let log = t.dir.path().join("calls.log");
+    logging_program(&t, "journalctl", &log, "", 0);
+    let env = t.env();
+    let mut pa = priv_cmd("journalctl", &["--vacuum-size=500M"]);
+    pa.size = 4096;
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan_of(vec![pa]),
+        &FakeRunner::new(),
+        &CannedRunner(b"@@crumbs 0 0\n".to_vec()),
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    assert_eq!(report.results[0].freed, None);
+    assert_eq!(report.freed, 4096);
+}
+
+#[test]
+fn measurement_tolerates_unreadable_parts_that_stay() {
+    // pacman 7 leaves root-only download-* folders in the cache: they are
+    // unreadable before and after, so what was read is still compared.
+    use std::os::unix::fs::PermissionsExt;
+    let t = FixtureTree::new();
+    logging_program(&t, "paccache", &t.dir.path().join("l.log"), "", 0);
+    let old = t.write("var/cache/pacman/pkg/a-1.pkg.tar.zst", &[1u8; 20_000]);
+    t.write("var/cache/pacman/pkg/a-2.pkg.tar.zst", &[1u8; 20_000]);
+    let locked = t.mkdir("var/cache/pacman/pkg/download-Xy12");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let env = t.env();
+    let gone =
+        crate::size::disk_usage(&env, Path::new("/var/cache/pacman/pkg/a-1.pkg.tar.zst")).bytes;
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan_of(vec![priv_cmd("paccache", &["-rk1"])]),
+        &FakeRunner::new(),
+        &RemovingRunner {
+            remove: vec![old],
+            out: b"@@crumbs 0 0\n".to_vec(),
+        },
+        Some(&esc()),
+        &no_post_check,
+    );
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    assert_eq!(report.results[0].freed, Some(gone));
+}
+
+#[test]
+fn measurement_counts_a_folder_missing_both_times_as_empty() {
+    // dnf: only one of /var/cache/dnf and /var/cache/libdnf5 exists.
+    let t = FixtureTree::new();
+    logging_program(&t, "dnf", &t.dir.path().join("l.log"), "", 0);
+    let old = t.write("var/cache/libdnf5/repo/packages/a.rpm", &[1u8; 12_000]);
+    let env = t.env();
+    let gone =
+        crate::size::disk_usage(&env, Path::new("/var/cache/libdnf5/repo/packages/a.rpm")).bytes;
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan_of(vec![priv_cmd("dnf", &["clean", "packages"])]),
+        &FakeRunner::new(),
+        &RemovingRunner {
+            remove: vec![old],
+            out: b"@@crumbs 0 0\n".to_vec(),
+        },
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    assert_eq!(report.results[0].freed, Some(gone));
+}

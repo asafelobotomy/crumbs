@@ -111,6 +111,105 @@ fn cache_symlink_counts_link_only() {
 }
 
 #[test]
+fn cache_git_checkout_not_preselected() {
+    // Someone's work kept under ~/.cache: a git working tree (a `.git`
+    // directory with an index) is never a cache, at any of the first
+    // three levels. A bare `.git` without an index is a cache's own
+    // clone and does not count.
+    let t = FixtureTree::new();
+    t.write("home/user/.cache/work/repo/.git/index", b"DIRC");
+    t.write("home/user/.cache/work/repo/src/main.rs", b"x");
+    t.write("home/user/.cache/top/.git/index", b"DIRC");
+    t.write("home/user/.cache/deep/a/b/.git/index", b"DIRC");
+    t.write("home/user/.cache/tool/db/x/.git/HEAD", b"ref");
+    t.write("home/user/.cache/plain/f", b"x");
+    let cfg = Config::default();
+    let items = run(&t, &cfg, &inv(vec![]), Category::Cache);
+    let item = |l: &str| items.iter().find(|i| i.label == l).unwrap();
+    for (label, inner) in [("work", "repo"), ("top", "."), ("deep", "a/b")] {
+        let i = item(label);
+        assert!(!i.preselected, "{label}");
+        assert!(!i.rebuildable, "{label}");
+        assert_eq!(
+            i.note.as_deref(),
+            Some(format!("contains a git checkout ({inner})").as_str()),
+            "{label}"
+        );
+    }
+    for label in ["tool", "plain"] {
+        let i = item(label);
+        assert!(
+            i.preselected && i.rebuildable && i.note.is_none(),
+            "{label}"
+        );
+    }
+    check_common(&t, &cfg, &items);
+}
+
+#[test]
+fn cache_known_git_caches_stay_preselected() {
+    // AUR helpers and pre-commit keep git checkouts as their cache, and a
+    // folder tagged with CACHEDIR.TAG says it is a cache: all rebuildable.
+    let t = FixtureTree::new();
+    t.write("home/user/.cache/yay/foo/.git/index", b"DIRC");
+    t.write("home/user/.cache/paru/clone/foo/.git/index", b"DIRC");
+    t.write("home/user/.cache/pre-commit/repoab12/.git/index", b"DIRC");
+    t.write("home/user/.cache/antidote/someone/.git/index", b"DIRC");
+    t.write("home/user/.cache/tagged/repo/.git/index", b"DIRC");
+    t.write(
+        "home/user/.cache/tagged/CACHEDIR.TAG",
+        b"Signature: 8a477f597d28d172789f06886806bc55\n# a cache\n",
+    );
+    t.write("home/user/.cache/badtag/repo/.git/index", b"DIRC");
+    t.write("home/user/.cache/badtag/CACHEDIR.TAG", b"not a tag\n");
+    let cfg = Config::default();
+    let items = run(&t, &cfg, &inv(vec![]), Category::Cache);
+    let item = |l: &str| items.iter().find(|i| i.label == l).unwrap();
+    for label in ["yay", "paru", "pre-commit", "antidote", "tagged"] {
+        let i = item(label);
+        assert!(
+            i.preselected && i.rebuildable && i.note.is_none(),
+            "{label}: {i:?}"
+        );
+    }
+    assert!(!item("badtag").preselected);
+}
+
+#[test]
+fn cache_symlink_item_is_not_searched_for_git() {
+    // A symlinked item: only the link would go, so what it points at is
+    // not searched (it could be the whole home).
+    let t = FixtureTree::new();
+    t.write("home/user/work/repo/.git/index", b"DIRC");
+    t.symlink("home/user/.cache/linky", "../work");
+    let cfg = Config::default();
+    let items = run(&t, &cfg, &inv(vec![]), Category::Cache);
+    let i = items.iter().find(|i| i.label == "linky").unwrap();
+    assert!(i.preselected && i.note.is_none(), "{i:?}");
+}
+
+#[test]
+fn cache_dir_in_use_not_preselected() {
+    // A running process works inside it (its current directory), as a
+    // build does: never preselected, and the note names the process.
+    let t = FixtureTree::new();
+    t.write("home/user/.cache/build/target/x", b"x");
+    t.write("home/user/.cache/idle/x", b"x");
+    t.symlink("proc/4242/cwd", "/home/user/.cache/build/target");
+    t.write("proc/4242/comm", b"cargo\n");
+    t.symlink("proc/77/cwd", "/home/user");
+    t.write("proc/77/comm", b"zsh\n");
+    let cfg = Config::default();
+    let items = run(&t, &cfg, &inv(vec![]), Category::Cache);
+    let build = items.iter().find(|i| i.label == "build").unwrap();
+    assert!(!build.preselected);
+    assert!(build.rebuildable);
+    assert_eq!(build.note.as_deref(), Some("in use by cargo (pid 4242)"));
+    let idle = items.iter().find(|i| i.label == "idle").unwrap();
+    assert!(idle.preselected && idle.note.is_none());
+}
+
+#[test]
 fn cache_running_app_not_preselected() {
     let t = FixtureTree::new();
     t.write("home/user/.cache/hauler/f", b"x");

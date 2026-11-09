@@ -325,6 +325,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preview_clean_exclude_leaves_out_items() {
+        let t = fixture();
+        t.write("/home/user/.cache/keepme/blob", b"cache");
+        let c = Connected::new(t.env()).await;
+        let r = c
+            .call(
+                "preview_clean",
+                json!({ "categories": ["cache"], "exclude": ["~/.cache/keepme"] }),
+            )
+            .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+        let data = r.structured_content.unwrap();
+        // The terminal fallback plans the same: it carries the exclusion.
+        assert_eq!(
+            data["cli_command"],
+            "crumbs clean cache --exclude '~/.cache/keepme'"
+        );
+        // Everywhere else (plan, preview text), the item is left out.
+        let mut rest = data.clone();
+        rest["cli_command"] = serde_json::Value::Null;
+        let text = rest.to_string();
+        assert!(!text.contains("keepme"), "{text}");
+        assert!(text.contains(".cache/inky"), "{text}");
+        // An item path needs the checklist: `-i` stays last.
+        let r = c
+            .call(
+                "preview_clean",
+                json!({
+                    "categories": ["cache"],
+                    "select": ["/home/user/.cache/inky"],
+                    "exclude": ["~/.cache/keepme"]
+                }),
+            )
+            .await;
+        assert_ne!(r.is_error, Some(true), "{r:?}");
+        assert_eq!(
+            r.structured_content.unwrap()["cli_command"],
+            "crumbs clean cache --exclude '~/.cache/keepme' -i"
+        );
+        let r = c
+            .call("preview_clean", json!({ "exclude": ["relative"] }))
+            .await;
+        assert_eq!(r.is_error, Some(true), "{r:?}");
+    }
+
+    #[tokio::test]
     async fn preview_clean_and_orphans_and_restore() {
         let t = fixture();
         let c = Connected::new(t.env()).await;

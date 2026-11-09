@@ -330,6 +330,26 @@ pub const NOTE_SYSTEM_DELETE: &str =
     "system files are deleted permanently with administrator rights and cannot be restored";
 pub const NOTE_TRASH_FREES_LATER: &str =
     "space is freed when the trash is emptied (or use --permanent)";
+/// The note for a plan that trashes: on a disk over 90% full, that the
+/// trash frees nothing now (the trash is on the home filesystem);
+/// otherwise [`NOTE_TRASH_FREES_LATER`].
+fn trash_note(space: Option<(u64, u64)>) -> String {
+    match space {
+        Some((avail, total)) if total > 0 && avail.saturating_mul(10) < total => {
+            let used = total - avail;
+            // Rounded up; reserved blocks count as used, so this can read a
+            // point above df's figure.
+            let pct = (u128::from(used) * 100).div_ceil(u128::from(total));
+            format!(
+                "the disk is {pct}% full ({} free): moving to the trash frees nothing until \
+                 the trash is emptied; use --permanent to free the space now",
+                crate::size::fmt_size(avail)
+            )
+        }
+        _ => NOTE_TRASH_FREES_LATER.into(),
+    }
+}
+
 pub const NOTE_PERMANENT_TEMP: &str = "permanently delete (temporary files)";
 pub const NOTE_PERMANENT_TRASH: &str = "permanently delete (emptying the trash)";
 
@@ -340,7 +360,7 @@ pub const NOTE_PERMANENT_TRASH: &str = "permanently delete (emptying the trash)"
 /// paths (a trashed entry's `.trashinfo`) are deleted right after their item
 /// and depend on it.
 pub fn build_clean_plan(
-    _env: &Env,
+    env: &Env,
     items: &[BloatItem],
     opts: &PlanOptions,
 ) -> Result<Plan, CoreError> {
@@ -419,7 +439,8 @@ pub fn build_clean_plan(
         .iter()
         .any(|a| matches!(a.action, Action::Trash { .. }))
     {
-        notes.push(NOTE_TRASH_FREES_LATER.into());
+        // The trash is on the home filesystem.
+        notes.push(trash_note(env.fs_space(&env.unsys(&env.home))));
     }
     if actions.iter().any(|a| a.scope == Scope::UserTemp) {
         notes.push(NOTE_PERMANENT_TEMP.into());
@@ -893,6 +914,48 @@ mod tests {
         let json = serde_json::to_value(&plan.actions[3].action).unwrap();
         assert_eq!(json["type"], "user-command");
         assert_eq!(json["program"], "flatpak");
+    }
+
+    #[test]
+    fn trash_on_a_nearly_full_disk_says_so() {
+        use crate::bloat::ItemAction;
+        let t = FixtureTree::new();
+        t.write("home/user/.cache/foo/a", b"aaaa");
+        let mut env = t.env();
+        let items = [bitem(
+            &env,
+            "/home/user/.cache/foo",
+            ItemAction::Trash,
+            Scope::Home,
+        )];
+        // 97% used, 9.4 GiB free: the trash would free nothing now.
+        let total = 239 * 1024 * 1024 * 1024_u64;
+        let avail = 9 * 1024 * 1024 * 1024 + 400 * 1024 * 1024;
+        env.set_fs_space(Some((avail, total)));
+        let plan = build_clean_plan(&env, &items, &PlanOptions::default()).unwrap();
+        assert_eq!(
+            plan.notes,
+            [
+                "the disk is 97% full (9.4 GiB free): moving to the trash frees nothing \
+              until the trash is emptied; use --permanent to free the space now"
+            ]
+        );
+        // 50% used: the usual note.
+        env.set_fs_space(Some((total / 2, total)));
+        let plan = build_clean_plan(&env, &items, &PlanOptions::default()).unwrap();
+        assert_eq!(plan.notes, [NOTE_TRASH_FREES_LATER]);
+        // Deleting permanently on a full disk: no trash, no warning.
+        env.set_fs_space(Some((avail, total)));
+        let opts = PlanOptions {
+            permanent: true,
+            ..PlanOptions::default()
+        };
+        let plan = build_clean_plan(&env, &items, &opts).unwrap();
+        assert!(
+            plan.notes.iter().all(|n| !n.contains("full")),
+            "{:?}",
+            plan.notes
+        );
     }
 
     #[test]
