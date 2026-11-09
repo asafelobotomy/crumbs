@@ -605,6 +605,10 @@ fn check_temp(t: &FixtureTree, items: &[BloatItem]) {
 
 #[test]
 fn temp_rules() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     use rustix::fs::{CWD, FileType, Mode, mknodat};
     let t = FixtureTree::new();
     let tmp = t.mkdir("tmp");
@@ -683,6 +687,10 @@ fn temp_rules() {
 
 #[test]
 fn temp_dir_over_cap_skipped() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     let t = FixtureTree::new();
     let big = t.mkdir("tmp/big");
     for i in 0..10_001 {
@@ -704,6 +712,10 @@ fn temp_dir_over_cap_skipped() {
 
 #[test]
 fn temp_owner_rule() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     use std::os::unix::fs::MetadataExt;
     let t = FixtureTree::new();
     let f = t.write("tmp/f", b"x");
@@ -855,6 +867,10 @@ fn registry_follows_category_order() {
 
 #[test]
 fn temp_extra_prefixes_kept() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     let t = FixtureTree::new();
     let tmp = t.mkdir("tmp");
     let mut old = vec![];
@@ -891,6 +907,10 @@ fn temp_extra_prefixes_kept() {
 
 #[test]
 fn temp_open_files_kept() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     let t = FixtureTree::new();
     let tmp = t.mkdir("tmp");
     let lock = t.write("tmp/app.lock", b"x");
@@ -956,6 +976,10 @@ fn temp_refused_as_root() {
 /// still passes the execute-time recheck afterwards.
 #[test]
 fn temp_scan_pipeline_then_still_stale() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     let t = FixtureTree::new();
     let mut old = vec![
         t.write("tmp/build-1/a/b/c.o", &[1u8; 3000]),
@@ -1007,6 +1031,10 @@ fn temp_scan_pipeline_then_still_stale() {
 /// landed: such entries are not old.
 #[test]
 fn old_mtime_fresh_ctime_not_listed() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     let t = FixtureTree::new();
     let tmp = t.mkdir("tmp");
     let f = t.write("tmp/extracted.txt", b"x");
@@ -1092,6 +1120,10 @@ fn cache_skips_sockets_fifos_and_devices() {
 /// a fake root, see `Env::system_owner_uid`) and carry the sticky bit.
 #[test]
 fn temp_refuses_unsafe_tmp() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     use std::os::unix::fs::PermissionsExt;
     let t = FixtureTree::new();
     let f = t.write("tmp/old", b"x");
@@ -1141,4 +1173,29 @@ fn real_system_tmp_must_be_root_owned() {
     let t = FixtureTree::new();
     let env = t.env();
     assert_eq!(env.system_owner_uid, env.uid);
+}
+
+#[test]
+fn temp_is_unavailable_not_an_error_as_root() {
+    let t = FixtureTree::new();
+    t.mkdir("tmp");
+    let mut env = t.env();
+    env.uid = 0;
+    let runner = FakeRunner::new();
+    let inv = Inventory {
+        apps: vec![],
+        statuses: vec![],
+        errors: vec![],
+        owned: Default::default(),
+    };
+    let cx = ScanContext {
+        env: &env,
+        cfg: &Config::default(),
+        inv: &inv,
+        runner: &runner,
+        now: test_now(),
+    };
+    let rep = scan_all(&cx, &[Category::Temp]).categories.remove(0);
+    assert_eq!(rep.unavailable.as_deref(), Some("not available as root"));
+    assert!(rep.error.is_none() && rep.items.is_empty(), "{rep:?}");
 }

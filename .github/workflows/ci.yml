@@ -41,3 +41,29 @@ jobs:
             case "$rc" in 0|3) ;; *) echo "unexpected exit code $rc"; exit 1 ;; esac
             echo "$out" | jq -e '.schema_version == 1'
           done
+
+  # Builds, tests, smoke-tests and runs a real `crumbs uninstall sl` inside
+  # each distro's container (scripts/distro-check.sh; run locally with podman).
+  distro:
+    name: distro (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - docker.io/library/archlinux:latest
+          - docker.io/library/debian:trixie
+          - docker.io/library/ubuntu:latest
+          - registry.fedoraproject.org/fedora:latest
+    container:
+      image: ${{ matrix.image }}
+    env:
+      CARGO_TARGET_DIR: /target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src
+      - name: Build, test, smoke and end-to-end uninstall
+        run: |
+          ln -s "$GITHUB_WORKSPACE/src" /src
+          sh /src/scripts/distro-check.sh --inside

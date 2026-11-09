@@ -280,6 +280,12 @@ impl Scanner for TempScanner {
         Category::Temp
     }
 
+    /// Root could remove other users' files; temp cleanup is per user, so
+    /// it is not an error when crumbs runs as root, just not offered.
+    fn unavailable(&self, cx: &ScanContext) -> Option<String> {
+        (cx.env.uid == 0).then(|| "not available as root".to_string())
+    }
+
     fn scan(&self, cx: &ScanContext) -> Result<Vec<BloatItem>, CoreError> {
         if cx.env.uid == 0 {
             return Err(CoreError::Unavailable(ROOT_REFUSAL));

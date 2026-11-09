@@ -438,6 +438,10 @@ fn running_processes_without_proc_is_empty() {
 /// `UserTemp` and refused under the default `Home`.
 #[test]
 fn execute_passes_scope_to_verify() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     let t = FixtureTree::new();
     let a = t.write("tmp/a", b"a");
     age_days(&a, 30);
@@ -670,6 +674,10 @@ fn age_days(p: &Path, days: u64) {
 /// before execution is refused and left intact.
 #[test]
 fn execute_rechecks_temp_staleness() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     let t = FixtureTree::new();
     let f = t.write("tmp/work/old", b"x");
     let dir = env_dir(&t, "tmp/work");
@@ -829,6 +837,10 @@ fn user_command_timeout_is_a_failure() {
 
 #[test]
 fn temp_delete_verified_in_user_temp_scope() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     use crate::bloat::{BloatItem, Category, ItemAction};
     let t = FixtureTree::new();
     let a = t.write("tmp/a", b"a");

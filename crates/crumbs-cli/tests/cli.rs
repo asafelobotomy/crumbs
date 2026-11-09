@@ -1360,6 +1360,10 @@ fn tree_state(t: &FixtureTree) -> std::collections::BTreeMap<String, Vec<u8>> {
 
 #[test]
 fn scan_table_snapshot() {
+    if running_as_root() {
+        eprintln!("skipped: the snapshot shows temp as available");
+        return;
+    }
     let t = scan_fixture(FLATPAK_OK);
     let out = crumbs(&t).args(["scan", "--details"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0));
@@ -1586,6 +1590,10 @@ fn clean_cache_trashes_and_logs() {
 
 #[test]
 fn clean_temp_deletes_permanently_with_wording() {
+    if running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     let t = scan_fixture(FLATPAK_OK);
     old_temp(&t, "old-build.log");
     let (code, stdout, _) = run_clean(&t, &["temp", "--dry-run"]);
@@ -1693,6 +1701,10 @@ fn clean_flatpak_runs_command() {
 
 #[test]
 fn clean_dry_run_changes_nothing() {
+    if running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     let t = scan_fixture(FLATPAK_RECORD);
     old_temp(&t, "old-build.log");
     let before = tree_state(&t);
@@ -1888,6 +1900,10 @@ fn clean_preview_sanitises_paths() {
 
 #[test]
 fn restore_mixed_clean_batch_skips_deletes() {
+    if running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     let t = scan_fixture(FLATPAK_OK);
     old_temp(&t, "old-build.log");
     let (code, stdout, stderr) = run_clean(&t, &["cache", "temp", "--yes"]);
@@ -2367,8 +2383,19 @@ fn uninstall_flatpak_system_uses_batch() {
     assert!(!real(&t, "/home/user/.var/app/com.dosbox_x.DOSBox-X").exists());
 }
 
+/// Whether the tests run as root (as in the distro containers): escalation
+/// detection then reports running as root instead of run0/pkexec/sudo.
+fn running_as_root() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self").is_ok_and(|m| m.uid() == 0)
+}
+
 #[test]
 fn doctor_shows_privileged_availability() {
+    if running_as_root() {
+        eprintln!("skipped: escalation detection reports running as root");
+        return;
+    }
     let t = fixture(FLATPAK_OK);
     crumbs(&t)
         .arg("doctor")
@@ -2486,6 +2513,10 @@ fn preview_shows_root_command_lines() {
 
 #[test]
 fn doctor_sudo_without_terminal_is_unavailable() {
+    if running_as_root() {
+        eprintln!("skipped: escalation detection reports running as root");
+        return;
+    }
     let t = fixture(FLATPAK_OK);
     t.write_exec("/usr/bin/sudo", b"#!/bin/sh\nexit 99\n");
     crumbs(&t)
@@ -2612,7 +2643,10 @@ fn scan_system_unavailable_shows_reason() {
     // JSON keeps its own field and has no human text.
     let v = stdout_json(crumbs(&t).args(["scan", "--system", "--json"]));
     let first = &v["data"]["categories"][0];
-    assert_eq!(first["unavailable"], "pacman, apt-get or dnf not installed", "{v}");
+    assert_eq!(
+        first["unavailable"], "pacman, apt-get or dnf not installed",
+        "{v}"
+    );
 }
 
 #[test]

@@ -960,6 +960,10 @@ mod tests {
 
     #[test]
     fn user_temp_scope_rules() {
+        if crate::testing::running_as_root() {
+            eprintln!("skipped: temp cleanup is not offered as root");
+            return;
+        }
         let (t, env, cfg) = setup();
         t.write("tmp/x", b"x");
         t.write("tmp/d/y", b"y");

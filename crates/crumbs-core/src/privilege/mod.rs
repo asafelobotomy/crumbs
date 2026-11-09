@@ -172,7 +172,12 @@ mod tests {
             t.write_exec(&format!("/usr/bin/{p}"), b"");
         }
         let runner = version("systemd 255 (255.4-1)\n+PAM\n");
-        let e = find_escalation(&t.env(), &runner, Interaction::Terminal).unwrap();
+        let e = find_escalation(
+            &crate::testing::non_root(t.env()),
+            &runner,
+            Interaction::Terminal,
+        )
+        .unwrap();
         assert_eq!(e.kind, EscalationKind::Pkexec);
         assert_eq!(e.program, PathBuf::from("/usr/bin/pkexec"));
         assert!(!e.requires_tty);
@@ -185,7 +190,12 @@ mod tests {
             t.write_exec(&format!("/usr/bin/{p}"), b"");
         }
         let runner = version("systemd 261 (261.3-1-manjaro)\n");
-        let e = find_escalation(&t.env(), &runner, Interaction::Terminal).unwrap();
+        let e = find_escalation(
+            &crate::testing::non_root(t.env()),
+            &runner,
+            Interaction::Terminal,
+        )
+        .unwrap();
         assert_eq!(e.kind, EscalationKind::Run0);
         assert_eq!(e.program, PathBuf::from("/usr/bin/run0"));
         assert!(!e.requires_tty);
@@ -198,10 +208,20 @@ mod tests {
         for p in ["run0", "pkexec", "systemctl"] {
             t.write_exec(&format!("/usr/bin/{p}"), b"");
         }
-        let e = find_escalation(&t.env(), &version("garbage\n"), Interaction::Terminal).unwrap();
+        let e = find_escalation(
+            &crate::testing::non_root(t.env()),
+            &version("garbage\n"),
+            Interaction::Terminal,
+        )
+        .unwrap();
         assert_eq!(e.kind, EscalationKind::Pkexec);
         // systemctl failing to run (no fake registered) also falls through.
-        let e = find_escalation(&t.env(), &FakeRunner::new(), Interaction::Terminal).unwrap();
+        let e = find_escalation(
+            &crate::testing::non_root(t.env()),
+            &FakeRunner::new(),
+            Interaction::Terminal,
+        )
+        .unwrap();
         assert_eq!(e.kind, EscalationKind::Pkexec);
     }
 
@@ -209,7 +229,12 @@ mod tests {
     fn sudo_fallback_requires_tty() {
         let t = FixtureTree::new();
         t.write_exec("/usr/bin/sudo", b"");
-        let e = find_escalation(&t.env(), &FakeRunner::new(), Interaction::Terminal).unwrap();
+        let e = find_escalation(
+            &crate::testing::non_root(t.env()),
+            &FakeRunner::new(),
+            Interaction::Terminal,
+        )
+        .unwrap();
         assert_eq!(e.kind, EscalationKind::Sudo);
         assert_eq!(e.program, PathBuf::from("/usr/bin/sudo"));
         assert!(e.requires_tty);
@@ -221,8 +246,16 @@ mod tests {
         t.write_exec("/usr/bin/sudo", b"");
         let found = allow_detection_in_test(|| {
             (
-                detect_escalation_for(&t.env(), &FakeRunner::new(), Interaction::NoTerminal),
-                detect_escalation_for(&t.env(), &FakeRunner::new(), Interaction::Terminal),
+                detect_escalation_for(
+                    &crate::testing::non_root(t.env()),
+                    &FakeRunner::new(),
+                    Interaction::NoTerminal,
+                ),
+                detect_escalation_for(
+                    &crate::testing::non_root(t.env()),
+                    &FakeRunner::new(),
+                    Interaction::Terminal,
+                ),
             )
         });
         assert_eq!(found.0, None);
@@ -234,14 +267,23 @@ mod tests {
         let t = FixtureTree::new();
         t.write_exec("/usr/bin/pkexec", b"");
         t.write_exec("/usr/bin/sudo", b"");
-        let e = find_escalation(&t.env(), &FakeRunner::new(), Interaction::NoTerminal).unwrap();
+        let e = find_escalation(
+            &crate::testing::non_root(t.env()),
+            &FakeRunner::new(),
+            Interaction::NoTerminal,
+        )
+        .unwrap();
         assert_eq!(e.kind, EscalationKind::Pkexec);
     }
 
     #[test]
     fn none_when_nothing_present() {
         let t = FixtureTree::new();
-        let e = find_escalation(&t.env(), &FakeRunner::new(), Interaction::Terminal);
+        let e = find_escalation(
+            &crate::testing::non_root(t.env()),
+            &FakeRunner::new(),
+            Interaction::Terminal,
+        );
         assert_eq!(e, None);
     }
 
@@ -254,10 +296,18 @@ mod tests {
     fn detection_finds_nothing_in_tests_without_override() {
         let t = FixtureTree::new();
         t.write_exec("/usr/bin/sudo", b"");
-        assert_eq!(detect_escalation(&t.env(), &FakeRunner::new()), None);
-        let found = allow_detection_in_test(|| detect_escalation(&t.env(), &FakeRunner::new()));
+        assert_eq!(
+            detect_escalation(&crate::testing::non_root(t.env()), &FakeRunner::new()),
+            None
+        );
+        let found = allow_detection_in_test(|| {
+            detect_escalation(&crate::testing::non_root(t.env()), &FakeRunner::new())
+        });
         assert_eq!(found.unwrap().kind, EscalationKind::Sudo);
         // The override ends with the closure.
-        assert_eq!(detect_escalation(&t.env(), &FakeRunner::new()), None);
+        assert_eq!(
+            detect_escalation(&crate::testing::non_root(t.env()), &FakeRunner::new()),
+            None
+        );
     }
 }
