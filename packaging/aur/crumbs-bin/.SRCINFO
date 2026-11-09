@@ -1,0 +1,17 @@
+pkgbase = crumbs-bin
+	pkgdesc = Find and remove app leftovers, caches and system bloat (static binary)
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/asafelobotomy/crumbs
+	arch = x86_64
+	license = GPL-3.0-or-later
+	provides = crumbs=0.1.0
+	conflicts = crumbs
+	options = !strip
+	options = !debug
+	source = LICENSE::https://github.com/asafelobotomy/crumbs/releases/download/v0.1.0/LICENSE
+	sha256sums = SKIP
+	source_x86_64 = crumbs-0.1.0::https://github.com/asafelobotomy/crumbs/releases/download/v0.1.0/crumbs-0.1.0-x86_64-linux-musl
+	sha256sums_x86_64 = SKIP
+
+pkgname = crumbs-bin
