@@ -308,6 +308,52 @@ fn with_orphans(t: &FixtureTree) {
     }
 }
 
+/// What the fixture's filesystem allocates to an empty directory: nothing
+/// on btrfs or tmpfs, a 4 KiB block on ext4 (as on CI runners). Sizes
+/// count it, since deleting the directory frees it.
+fn dir_block(t: &FixtureTree) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let probe = t.dir.path().join(".dir-block-probe");
+    std::fs::create_dir(&probe).unwrap();
+    let bytes = std::fs::metadata(&probe).unwrap().blocks() * 512;
+    std::fs::remove_dir(&probe).unwrap();
+    bytes
+}
+
+/// A size as crumbs prints it, for the small sizes these tests use.
+fn size_text(bytes: u64) -> String {
+    if bytes == 0 {
+        "0 B".to_string()
+    } else {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    }
+}
+
+/// Rewrites what this filesystem reports to what one without directory
+/// blocks reports, so a snapshot holds on both. Each row is (text marking
+/// the line, bytes on a filesystem without directory blocks, directories
+/// counted in it); the size keeps its column width.
+fn without_dir_blocks(t: &FixtureTree, text: String, rows: &[(&str, u64, u64)]) -> String {
+    let block = dir_block(t);
+    if block == 0 {
+        return text;
+    }
+    let mut out = String::new();
+    for line in text.split_inclusive('\n') {
+        let mut line = line.to_string();
+        if let Some((_, bytes, dirs)) = rows.iter().find(|(m, _, _)| line.contains(m)) {
+            let actual = size_text(bytes + dirs * block);
+            // Never longer than `actual`: pad it to keep the columns.
+            let wanted = format!("{:<w$}", size_text(*bytes), w = actual.len());
+            line = line.replacen(&actual, &wanted, 1);
+            let end = if line.ends_with('\n') { "\n" } else { "" };
+            line = format!("{}{end}", line.trim_end());
+        }
+        out.push_str(&line);
+    }
+    out
+}
+
 fn snapshot_text(t: &FixtureTree, args: &[&str]) -> String {
     let out = crumbs(t).args(args).output().unwrap();
     assert_eq!(out.status.code(), Some(0));
@@ -319,7 +365,17 @@ fn snapshot_text(t: &FixtureTree, args: &[&str]) -> String {
 fn apps_show_lists_leftovers() {
     let t = fixture(FLATPAK_OK);
     with_leftovers(&t);
-    insta::assert_snapshot!(snapshot_text(&t, &["apps", "show", "Tool"]));
+    let text = snapshot_text(&t, &["apps", "show", "Tool"]);
+    let text = without_dir_blocks(
+        &t,
+        text,
+        &[
+            ("~/.cache/Tool", 12 * 1024, 1),
+            ("~/.config/Tool", 8 * 1024, 1),
+            ("2 leftovers", 20 * 1024, 2),
+        ],
+    );
+    insta::assert_snapshot!(text);
 }
 
 #[test]
@@ -339,7 +395,17 @@ fn apps_show_json_leftovers() {
 fn orphans_lists_medium() {
     let t = fixture(FLATPAK_OK);
     with_orphans(&t);
-    insta::assert_snapshot!(snapshot_text(&t, &["orphans"]));
+    let text = snapshot_text(&t, &["orphans"]);
+    let text = without_dir_blocks(
+        &t,
+        text,
+        &[
+            ("~/.thunderbird", 4 * 1024, 1),
+            ("~/.var/app/org.gone.App", 0, 1),
+            ("2 orphans", 4 * 1024, 2),
+        ],
+    );
+    insta::assert_snapshot!(text);
 }
 
 #[test]
@@ -1564,7 +1630,10 @@ fn clean_cache_trashes_and_logs() {
     assert!(real(&t, "/home/user/.cache/thumbnails/a.png").exists());
     assert!(real(&t, "/home/user/.local/share/Trash/files/old.txt").exists());
     assert!(
-        stdout.contains("will move 1 item (4.0 KiB) to the trash"),
+        stdout.contains(&format!(
+            "will move 1 item ({}) to the trash",
+            size_text(4 * 1024 + dir_block(&t))
+        )),
         "{stdout}"
     );
     assert!(
