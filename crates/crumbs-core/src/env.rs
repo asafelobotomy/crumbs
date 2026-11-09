@@ -176,8 +176,6 @@ impl Env {
         })
     }
 
-    /// Test hook: sets [`Env::clock_shift`].
-    #[cfg(any(test, feature = "test-support", debug_assertions))]
     /// When crumbs runs as root with a home directory that root does not
     /// own (`sudo -E`, `su -m`): that home, in-system. Acting there as root
     /// would leave root-owned history, trash entries and edits in another
@@ -189,6 +187,8 @@ impl Env {
         (home_owner(&self.home) != Some(0)).then(|| self.unsys(&self.home))
     }
 
+    /// Test hook: sets [`Env::clock_shift`].
+    #[cfg(any(test, feature = "test-support", debug_assertions))]
     pub fn set_clock_shift(&mut self, shift: Duration) {
         self.clock_shift = shift;
     }
