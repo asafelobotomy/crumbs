@@ -5,6 +5,11 @@
 - **uQ:** never offers uQ's, scdr's, noti-fi's or appOFholding's own files as leftovers or orphans. A package that is part of the uQ desktop (uq, uq-hyprland-pin, scdr, noti-fi, crum-bs) is removed only when asked twice: a second question at a terminal, `--desktop` otherwise (`desktop: true` over MCP). `apps show` and the JSON `part_of` field say which packages those are.
 - **appOFholding:** once it is in use, the AppImages in its library (`~/Applications`) are its own: crumbs no longer lists them, offers their old versions to `appimage-old` or uninstalls them.
 - **Releases:** `SHA256SUMS` is signed with minisign (`SHA256SUMS.minisig`, key in `minisign.pub`), and the release build pins appimagetool and the AppImage runtime by version and checksum.
+- **Cache safety:** a folder in `~/.cache` that holds a git working tree, or that a running process works in, is no longer preselected (`contains a git checkout (...)`, `in use by cargo (pid ...)`); a git checkout is not counted as rebuildable.
+- **`clean --exclude <pattern>`:** leaves out what a pattern matches for one run, as the config's `exclude` does; `preview_clean` takes `exclude` over MCP.
+- **Full disks:** over 90% full, a clean that would move things to the trash says it frees nothing until the trash is emptied and points at `--permanent`.
+- **Measured cleanup:** what `paccache`, `pacman -Sc`, `apt-get clean`, `dnf clean`, `journalctl --vacuum-*`, `systemd-tmpfiles --clean` and `flatpak uninstall --unused` free is measured and reported (`freed` on the result in JSON).
+- **`flatpak-unused`:** lists the runtimes Flatpak would remove, by name, and nothing when there are none, instead of an item of unknown size every time.
 
 ## 0.2.0
 

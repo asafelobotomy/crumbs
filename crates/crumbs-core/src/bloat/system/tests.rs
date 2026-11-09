@@ -553,3 +553,42 @@ fn dnf_orphans_exact_remove_list() {
     );
     assert!(scan(&t, &runner, Category::OrphanPkgs).items.is_empty());
 }
+
+#[test]
+fn flatpak_unused_system_follows_flatpak() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/flatpak", b"#!/bin/sh\n");
+    let probe = ["uninstall", "--system", "--unused"];
+    let list = || out(0, "org.gnome.Platform/x86_64/45\n", "");
+    let version = || out(0, "Flatpak 1.18.4\n", "");
+    let none = FakeRunner::new()
+        .on("flatpak", &FLATPAK_LIST, list())
+        .on("flatpak", &["--version"], version())
+        .on(
+            "flatpak",
+            &probe,
+            out(0, "Nothing unused to uninstall\n", ""),
+        );
+    assert!(
+        scan(&t, &none, Category::FlatpakUnusedSystem)
+            .items
+            .is_empty()
+    );
+    let some = FakeRunner::new()
+        .on("flatpak", &FLATPAK_LIST, list())
+        .on("flatpak", &["--version"], version())
+        .on(
+            "flatpak",
+            &probe,
+            out(
+                1,
+                " 1.     org.gnome.Platform   45   r\n",
+                "error: Aborted by user\n",
+            ),
+        );
+    let items = scan(&t, &some, Category::FlatpakUnusedSystem).items;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].label, "1 unused Flatpak runtime (system)");
+    assert_eq!(items[0].note.as_deref(), Some("org.gnome.Platform//45"));
+    assert!(!items[0].preselected);
+}

@@ -44,6 +44,11 @@ pub struct ActionResult {
     /// before the batch or one that ran and failed. Not part of the JSON.
     #[serde(skip)]
     pub rights_missing: bool,
+    /// For a cleanup command that succeeded: the space its folders shrank
+    /// by, measured before and after it ran (see [`measured_dirs`]). `None`
+    /// when not measured; the plan's estimate stands then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freed: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -244,12 +249,35 @@ fn run_plans(
 ) -> Vec<ExecReport> {
     let batches = batch_ids(env, plans.len());
     let checks = Rechecks::new(runner);
+    // The batch's cleanup commands, measured before it runs.
+    let before: Vec<Vec<Option<Snapshot>>> = plans
+        .iter()
+        .map(|p| {
+            p.actions
+                .iter()
+                .map(|pa| match pa.action {
+                    Action::PrivilegedCommand { .. } => {
+                        measure(env, &measured_dirs(env, &pa.action))
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
     let Privileged {
-        attempts,
+        mut attempts,
         failed,
         stopped,
         unmarked_stderr,
     } = run_privileged(env, cfg, &checks, plans, priv_runner, esc, post_check);
+    for (k, plan_attempts) in attempts.iter_mut().enumerate() {
+        for (i, attempt) in plan_attempts.iter_mut() {
+            if attempt.outcome.is_ok() && before[k][*i].is_some() {
+                let dirs = measured_dirs(env, &plans[k].actions[*i].action);
+                attempt.freed = shrank(before[k][*i].as_ref(), measure(env, &dirs).as_ref());
+            }
+        }
+    }
     let mut results: Vec<Vec<Option<ActionResult>>> =
         plans.iter().map(|p| vec![None; p.actions.len()]).collect();
     let mut freed = vec![0u64; plans.len()];
@@ -257,7 +285,8 @@ fn run_plans(
     for (k, plan_attempts) in attempts.into_iter().enumerate() {
         for (i, attempt) in plan_attempts {
             if attempt.outcome.is_ok() {
-                freed[k] = freed[k].saturating_add(plans[k].actions[i].size);
+                let size = attempt.freed.unwrap_or(plans[k].actions[i].size);
+                freed[k] = freed[k].saturating_add(size);
             }
             results[k][i] = Some(record(env, plans[k], &batches[k], i, attempt));
         }
@@ -281,18 +310,26 @@ fn run_plans(
                 Some(reason) => Err(reason),
                 // A command has no path to verify; its program is resolved in
                 // the trusted directories right now instead.
-                None if matches!(pa.action, Action::UserCommand { .. }) => run_command(
-                    env,
-                    &pa.action,
-                    runner,
-                    &mut attempt.path,
-                    &mut attempt.argv,
-                ),
+                None if matches!(pa.action, Action::UserCommand { .. }) => {
+                    let dirs = measured_dirs(env, &pa.action);
+                    let before = measure(env, &dirs);
+                    let ran = run_command(
+                        env,
+                        &pa.action,
+                        runner,
+                        &mut attempt.path,
+                        &mut attempt.argv,
+                    );
+                    if ran.is_ok() && before.is_some() {
+                        attempt.freed = shrank(before.as_ref(), measure(env, &dirs).as_ref());
+                    }
+                    ran
+                }
                 None => verify_path(env, cfg, &checks, pa, &attempt.path)
                     .and_then(|()| act(env, &pa.action, &pa.fingerprint, &batches[k])),
             };
             if attempt.outcome.is_ok() {
-                freed[k] = freed[k].saturating_add(pa.size);
+                freed[k] = freed[k].saturating_add(attempt.freed.unwrap_or(pa.size));
             }
             results[i] = Some(record(env, plan, &batches[k], i, attempt));
         }
@@ -321,6 +358,8 @@ struct Attempt {
     outcome: Result<Done, String>,
     /// See [`ActionResult::rights_missing`].
     rights_missing: bool,
+    /// See [`ActionResult::freed`].
+    freed: Option<u64>,
 }
 
 impl Attempt {
@@ -331,8 +370,99 @@ impl Attempt {
             packages: None,
             outcome: Ok(Done::default()),
             rights_missing: false,
+            freed: None,
         }
     }
+}
+
+/// The in-system folders a known cleanup command shrinks, so the executor
+/// can measure what it freed: the package caches (`paccache`, `pacman
+/// -Sc`, `apt-get clean`, `dnf clean`), the journal (`journalctl
+/// --vacuum-*`), `systemd-tmpfiles --clean --prefix=...` and `flatpak
+/// uninstall --unused`. Empty for any other command.
+pub fn measured_dirs(env: &Env, action: &Action) -> Vec<PathBuf> {
+    let (Action::UserCommand { program, args } | Action::PrivilegedCommand { program, args }) =
+        action
+    else {
+        return Vec::new();
+    };
+    let base = Path::new(program)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default();
+    let has = |a: &str| args.iter().any(|x| x == a);
+    let dirs: Vec<PathBuf> = match base {
+        "paccache" => vec!["/var/cache/pacman/pkg".into()],
+        "pacman" if has("-Sc") || has("-Scc") => vec!["/var/cache/pacman/pkg".into()],
+        "journalctl" if args.iter().any(|a| a.starts_with("--vacuum-")) => {
+            vec!["/var/log/journal".into()]
+        }
+        "apt-get" if has("clean") || has("autoclean") => vec!["/var/cache/apt/archives".into()],
+        "dnf" if has("clean") => vec!["/var/cache/dnf".into(), "/var/cache/libdnf5".into()],
+        "systemd-tmpfiles" if has("--clean") => args
+            .iter()
+            .filter_map(|a| a.strip_prefix("--prefix="))
+            .map(PathBuf::from)
+            .collect(),
+        "flatpak" if has("uninstall") && has("--unused") => {
+            if has("--user") {
+                vec![env.unsys(&env.data_home).join("flatpak")]
+            } else {
+                vec!["/var/lib/flatpak".into()]
+            }
+        }
+        _ => Vec::new(),
+    };
+    dirs.into_iter().filter(|d| d.is_absolute()).collect()
+}
+
+/// One measurement of a command's folders: for each, whether it exists,
+/// the bytes read and how many parts could not be read.
+type Snapshot = Vec<(bool, u64, u64)>;
+
+/// Measures `dirs`; `None` when there are none.
+fn measure(env: &Env, dirs: &[PathBuf]) -> Option<Snapshot> {
+    if dirs.is_empty() {
+        return None;
+    }
+    let exists: Vec<bool> = dirs
+        .iter()
+        .map(|d| fs::symlink_metadata(env.sys_path(d)).is_ok())
+        .collect();
+    Some(
+        size::disk_usage_many(env, dirs)
+            .into_iter()
+            .zip(exists)
+            .map(|(u, there)| {
+                if there {
+                    (true, u.bytes, u.errors)
+                } else {
+                    (false, 0, 0)
+                }
+            })
+            .collect(),
+    )
+}
+
+/// What a command freed: the drop between two measurements, counted only
+/// when they are comparable. Each folder must exist both times or neither
+/// (a missing one is empty), and its unreadable parts (root-only download
+/// folders, other users' private /tmp folders) must be as many after as
+/// before: what could not be read is left out of both, so the result is at
+/// most what was freed. `None` when not comparable or nothing existed.
+fn shrank(before: Option<&Snapshot>, after: Option<&Snapshot>) -> Option<u64> {
+    let (before, after) = (before?, after?);
+    if before.len() != after.len() || !before.iter().any(|(there, ..)| *there) {
+        return None;
+    }
+    let mut total = 0u64;
+    for ((b_there, b_bytes, b_err), (a_there, a_bytes, a_err)) in before.iter().zip(after) {
+        if b_there != a_there || b_err != a_err {
+            return None;
+        }
+        total = total.saturating_add(b_bytes.saturating_sub(*a_bytes));
+    }
+    Some(total)
 }
 
 /// Whether the action goes into the privileged batch.
@@ -866,7 +996,7 @@ fn record(env: &Env, plan: &Plan, batch: &str, i: usize, attempt: Attempt) -> Ac
         path: attempt.path,
         trashed: done.trashed,
         backup: done.backup,
-        size: pa.size,
+        size: attempt.freed.unwrap_or(pa.size),
         ok,
         error: error.clone(),
         app_id: plan.app_id.clone(),
@@ -902,6 +1032,7 @@ fn record(env: &Env, plan: &Plan, batch: &str, i: usize, attempt: Attempt) -> Ac
         error,
         history_id: id,
         rights_missing: attempt.rights_missing,
+        freed: if ok { attempt.freed } else { None },
     }
 }
 

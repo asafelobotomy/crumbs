@@ -275,12 +275,21 @@ fn can_undo(a: &Action) -> bool {
 /// when anything can be restored. With none of these it says `freed 0 B`. Each report goes with the plan it ran. Returns whether
 /// every action succeeded.
 pub fn report(env: &Env, runs: &[(&Plan, &ExecReport)]) -> anyhow::Result<bool> {
-    let mut out = anstream::stdout().lock();
+    report_to(&mut anstream::stdout().lock(), env, runs)
+}
+
+/// [`report`] to any writer.
+pub(crate) fn report_to(
+    out: &mut dyn Write,
+    env: &Env,
+    runs: &[(&Plan, &ExecReport)],
+) -> anyhow::Result<bool> {
     let mut all_ok = true;
     let mut undo: Vec<&str> = Vec::new();
     let (mut moved, mut freed) = (0u64, 0u64);
     let (mut any_moved, mut any_freed) = (false, false);
-    // A command frees space it decides itself; its size is unknown.
+    // A command frees space it decides itself; unless it was measured,
+    // its size is unknown.
     let mut ran: Option<&str> = None;
     for (plan, r) in runs {
         let mut restorable = false;
@@ -301,12 +310,23 @@ pub fn report(env: &Env, runs: &[(&Plan, &ExecReport)]) -> anyhow::Result<bool> 
                     Action::EditFile { .. } => "edited",
                     Action::UserCommand { ref program, .. }
                     | Action::PrivilegedCommand { ref program, .. } => {
-                        ran.get_or_insert(program);
+                        match res.freed {
+                            Some(bytes) => {
+                                any_freed = true;
+                                freed = freed.saturating_add(bytes);
+                            }
+                            None => {
+                                ran.get_or_insert(program);
+                            }
+                        }
                         "ran"
                     }
                     Action::PackageRemove { .. } => "removed",
                 };
-                writeln!(out, "✓ {done} {shown}")?;
+                match res.freed {
+                    Some(bytes) => writeln!(out, "✓ {done} {shown} (freed {})", fmt_size(bytes))?,
+                    None => writeln!(out, "✓ {done} {shown}")?,
+                }
                 restorable |= can_undo(&res.action);
             } else {
                 all_ok = false;
@@ -380,6 +400,88 @@ mod tests {
         assert!(v.get("size_known").is_none(), "{v}");
         a.size_known = true;
         assert_eq!(row_size(&a), fmt_size(0));
+    }
+
+    /// The output of [`report_to`] for one plan of command actions, each
+    /// with the measured space its result carries.
+    fn report_text(cmds: &[(&str, &[&str], Option<u64>)]) -> String {
+        use crumbs_core::executor::{ActionResult, ExecReport};
+        use crumbs_core::safety::Fingerprint;
+        let actions: Vec<PlannedAction> = cmds
+            .iter()
+            .map(|(program, args, _)| PlannedAction {
+                action: Action::PrivilegedCommand {
+                    program: (*program).into(),
+                    args: args.iter().map(|a| (*a).to_string()).collect(),
+                },
+                size: 0,
+                fingerprint: Fingerprint::default(),
+                scope: Scope::System,
+                depends_on: None,
+                depends_on_plan: None,
+                size_known: true,
+                reason: String::new(),
+            })
+            .collect();
+        let results = actions
+            .iter()
+            .zip(cmds)
+            .map(|(pa, (_, _, freed))| ActionResult {
+                action: pa.action.clone(),
+                ok: true,
+                error: None,
+                history_id: "1-0".into(),
+                rights_missing: false,
+                freed: *freed,
+            })
+            .collect();
+        let plan = Plan {
+            app_id: None,
+            kind: Some("clean".into()),
+            total_size: 0,
+            actions,
+            notes: Vec::new(),
+        };
+        let report = ExecReport {
+            batch: "1".into(),
+            results,
+            freed: 0,
+            escalation_failed: false,
+            batch_stopped: false,
+            escalation_output: Vec::new(),
+        };
+        let t = crumbs_core::testing::FixtureTree::new();
+        let mut out = Vec::new();
+        report_to(&mut out, &t.env(), &[(&plan, &report)]).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn measured_command_counts_as_freed() {
+        let text = report_text(&[("paccache", &["-rk2"], Some(5 * 1024 * 1024))]);
+        assert!(
+            text.contains("✓ ran paccache -rk2 (freed 5.0 MiB)"),
+            "{text}"
+        );
+        assert!(text.trim_end().ends_with("freed 5.0 MiB"), "{text}");
+        assert!(!text.contains("plus space"), "{text}");
+    }
+
+    #[test]
+    fn unmeasured_command_still_says_so() {
+        let text = report_text(&[
+            ("paccache", &["-rk2"], Some(1024 * 1024)),
+            ("journalctl", &["--vacuum-size=500M"], None),
+        ]);
+        assert!(
+            text.contains("✓ ran journalctl --vacuum-size=500M\n"),
+            "{text}"
+        );
+        assert!(
+            text.trim_end()
+                .ends_with("freed 1.0 MiB · plus space freed by journalctl"),
+            "{text}"
+        );
     }
 
     #[test]
