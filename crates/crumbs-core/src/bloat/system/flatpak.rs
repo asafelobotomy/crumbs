@@ -1,6 +1,7 @@
 //! `flatpak-unused-system`: one item that has Flatpak remove the runtimes in
 //! the system installation that no installed app uses. Opt-in.
 
+use super::super::flatpak::{refs_note, unused_label, unused_refs};
 use super::super::{BloatItem, Category, ScanContext, Scanner};
 use super::{command_failed, not_installed, privileged_item};
 use crate::command::resolve_trusted;
@@ -33,11 +34,20 @@ impl Scanner for FlatpakUnusedSystemScanner {
         if !out.stdout.lines().any(|l| !l.trim().is_empty()) {
             return Ok(Vec::new());
         }
+        // Listing needs no rights: flatpak shows its plan before it asks.
+        let (label, note) = match unused_refs(cx, &flatpak, "--system") {
+            Some(refs) if refs.is_empty() => return Ok(Vec::new()),
+            Some(refs) => (unused_label(refs.len(), "system"), refs_note(&refs)),
+            None => (
+                "unused Flatpak runtimes (system)".into(),
+                "decided by flatpak".into(),
+            ),
+        };
         let mut item = privileged_item(
             Category::FlatpakUnusedSystem,
-            "unused Flatpak runtimes (system)".into(),
+            label,
             None,
-            Some("decided by flatpak".into()),
+            Some(note),
             "flatpak",
             [
                 "uninstall",
