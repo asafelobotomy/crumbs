@@ -104,7 +104,10 @@ fn json_parts(batches: &[Batch], note: Option<String>) -> (serde_json::Value, Ve
 }
 
 /// `history --json` data and errors.
-#[allow(dead_code, reason = "used by the mcp module in a later task")]
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(dead_code, reason = "only the mcp server calls it")
+)]
 pub(crate) fn data(
     env: &Env,
     limit: usize,

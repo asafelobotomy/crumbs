@@ -187,12 +187,14 @@ pub(crate) fn select_findings(
     Ok(wanted)
 }
 
-#[allow(dead_code, reason = "used by the mcp module in a later task")]
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(dead_code, reason = "only the mcp server calls it")
+)]
 fn value<T: Serialize>(v: &T) -> Result<serde_json::Value, Refusal> {
     serde_json::to_value(v).map_err(|e| Refusal::new(1, e.to_string()))
 }
 
-#[allow(dead_code, reason = "used by the mcp module in a later task")]
 fn failed(e: anyhow::Error) -> Refusal {
     Stop::Failed(e).into_refusal()
 }
@@ -260,7 +262,10 @@ pub fn restore(env: &Env, selectors: &[String]) -> Result<Built, Refusal> {
 }
 
 /// `scan --json` data and errors.
-#[allow(dead_code, reason = "used by the mcp module in a later task")]
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(dead_code, reason = "only the mcp server calls it")
+)]
 pub fn scan_data(
     env: &Env,
     args: &ScanArgs,
@@ -270,7 +275,10 @@ pub fn scan_data(
 }
 
 /// `apps list --json` data and errors.
-#[allow(dead_code, reason = "used by the mcp module in a later task")]
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(dead_code, reason = "only the mcp server calls it")
+)]
 pub fn apps_list_data(
     env: &Env,
     sources: &[SourceKind],
@@ -283,7 +291,10 @@ pub fn apps_list_data(
 
 /// `apps show --json` data and errors for a found app; no app or several
 /// are refused, as the CLI's exit 2.
-#[allow(dead_code, reason = "used by the mcp module in a later task")]
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(dead_code, reason = "only the mcp server calls it")
+)]
 pub fn app_show_data(
     env: &Env,
     query: &str,
@@ -313,7 +324,10 @@ pub fn app_show_data(
 }
 
 /// `orphans --json` data and errors (the listing, not `--clean`).
-#[allow(dead_code, reason = "used by the mcp module in a later task")]
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(dead_code, reason = "only the mcp server calls it")
+)]
 pub fn orphans_data(
     env: &Env,
     args: &OrphansArgs,
@@ -326,7 +340,10 @@ pub fn orphans_data(
 }
 
 /// `history --json` data and errors: the newest `limit` batches.
-#[allow(dead_code, reason = "used by the mcp module in a later task")]
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(dead_code, reason = "only the mcp server calls it")
+)]
 pub fn history_data(
     env: &Env,
     limit: usize,
@@ -335,7 +352,10 @@ pub fn history_data(
 }
 
 /// `doctor --json` data and errors.
-#[allow(dead_code, reason = "used by the mcp module in a later task")]
+#[cfg_attr(
+    not(feature = "mcp"),
+    allow(dead_code, reason = "only the mcp server calls it")
+)]
 pub fn doctor_data(env: &Env) -> Result<(serde_json::Value, Vec<ErrorEntry>), Refusal> {
     let (report, notes) = doctor::gather(env).map_err(failed)?;
     let errors = doctor::json_errors(&report, notes);

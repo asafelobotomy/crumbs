@@ -120,12 +120,18 @@ pub fn print_notes(notes: &[ErrorEntry]) -> std::io::Result<()> {
 pub fn notes_text(notes: &[ErrorEntry]) -> String {
     let mut text = String::new();
     for n in notes {
-        let message = sanitise(&n.message);
-        if n.source == "config" {
-            text.push_str(&format!("warning: {message}\n"));
-        } else {
-            text.push_str(&format!("warning: {}: {message}\n", n.source));
-        }
+        text.push_str(&format!("warning: {}\n", note_line(n)));
     }
     text
+}
+
+/// A note as a warning shows it, without `warning: `: `<source>:
+/// <message>`, or for `config` the message alone. Sanitised.
+pub fn note_line(n: &ErrorEntry) -> String {
+    let message = sanitise(&n.message);
+    if n.source == "config" {
+        message
+    } else {
+        format!("{}: {message}", sanitise(&n.source))
+    }
 }
