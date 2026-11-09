@@ -337,7 +337,8 @@ fn trash_note(space: Option<(u64, u64)>) -> String {
     match space {
         Some((avail, total)) if total > 0 && avail.saturating_mul(10) < total => {
             let used = total - avail;
-            // Rounded up, as df does.
+            // Rounded up; reserved blocks count as used, so this can read a
+            // point above df's figure.
             let pct = (u128::from(used) * 100).div_ceil(u128::from(total));
             format!(
                 "the disk is {pct}% full ({} free): moving to the trash frees nothing until \
@@ -438,7 +439,8 @@ pub fn build_clean_plan(
         .iter()
         .any(|a| matches!(a.action, Action::Trash { .. }))
     {
-        notes.push(trash_note(env.fs_space(&env.home)));
+        // The trash is on the home filesystem.
+        notes.push(trash_note(env.fs_space(&env.unsys(&env.home))));
     }
     if actions.iter().any(|a| a.scope == Scope::UserTemp) {
         notes.push(NOTE_PERMANENT_TEMP.into());

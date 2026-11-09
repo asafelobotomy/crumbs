@@ -116,7 +116,12 @@ impl Scanner for CacheScanner {
                 item.note = Some(format!("{} is running", app.display_name));
             }
             let real = cx.env.cache_home.join(&name);
-            if let Some(inner) = git_checkout(&real) {
+            let git = if known_git_cache(&lossy) || tagged_cache(&real) {
+                None
+            } else {
+                git_checkout(&real)
+            };
+            if let Some(inner) = git {
                 // Someone's work, not a cache: never rebuilt by any tool.
                 item.preselected = false;
                 item.rebuildable = false;
@@ -129,6 +134,21 @@ impl Scanner for CacheScanner {
         }
         Ok(out)
     }
+}
+
+/// Caches made of git checkouts by design: AUR helpers' build clones,
+/// pre-commit's hook repositories, antidote's plugins. Rebuilt on demand.
+const KNOWN_GIT_CACHES: [&str; 5] = ["yay", "paru", "pikaur", "pre-commit", "antidote"];
+
+fn known_git_cache(name: &str) -> bool {
+    KNOWN_GIT_CACHES.contains(&name)
+}
+
+/// Whether the real directory `dir` is tagged as a cache: a `CACHEDIR.TAG`
+/// at its root with the standard signature (bford.info/cachedir).
+fn tagged_cache(dir: &Path) -> bool {
+    const SIGNATURE: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55";
+    fs::read(dir.join("CACHEDIR.TAG")).is_ok_and(|b| b.starts_with(SIGNATURE))
 }
 
 /// Levels below a cache item searched for a git working tree: the item
@@ -144,6 +164,10 @@ const GIT_DIR_LIMIT: usize = 20_000;
 /// a `.git` file (a linked worktree); a tool's own clone or bare
 /// repository has neither. Symlinks are not followed.
 fn git_checkout(dir: &Path) -> Option<PathBuf> {
+    // A symlinked item: only the link would go.
+    if fs::symlink_metadata(dir).map_or(true, |m| !m.is_dir()) {
+        return None;
+    }
     let is_tree = |d: &Path| {
         let git = d.join(".git");
         match fs::symlink_metadata(&git) {

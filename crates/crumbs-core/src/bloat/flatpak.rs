@@ -89,6 +89,10 @@ pub(super) fn unused_refs(
         .runner
         .run(flatpak, &["uninstall", installation, "--unused"])
         .ok()?;
+    if out.timed_out {
+        // Output cut short could undercount.
+        return None;
+    }
     parse_unused(&out.stdout)
 }
 
@@ -290,6 +294,26 @@ mod tests {
         let items = scan(&t, &runner).unwrap();
         assert_eq!(items[0].label, "unused Flatpak runtimes (user)");
         assert!(!runner.calls().iter().any(|c| c.contains("uninstall")));
+    }
+
+    #[test]
+    fn flatpak_unused_probe_cut_off_by_timeout_is_not_trusted() {
+        // A table cut short would undercount: flatpak decides, as before.
+        let t = FixtureTree::new();
+        t.write_exec("usr/bin/flatpak", b"#!/bin/sh\n");
+        let mut cut = out(1, " 1.     org.gnome.Platform   45   r\n", "");
+        cut.timed_out = true;
+        let runner = FakeRunner::new()
+            .on(
+                "flatpak",
+                &LIST,
+                out(0, "org.gnome.Platform/x86_64/45\n", ""),
+            )
+            .on("flatpak", &["--version"], out(0, "Flatpak 1.18.4\n", ""))
+            .on("flatpak", &PROBE, cut);
+        let items = scan(&t, &runner).unwrap();
+        assert_eq!(items[0].label, "unused Flatpak runtimes (user)");
+        assert_eq!(items[0].note.as_deref(), Some("decided by flatpak"));
     }
 
     #[test]

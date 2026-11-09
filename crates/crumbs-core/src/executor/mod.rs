@@ -250,7 +250,7 @@ fn run_plans(
     let batches = batch_ids(env, plans.len());
     let checks = Rechecks::new(runner);
     // The batch's cleanup commands, measured before it runs.
-    let before: Vec<Vec<Option<u64>>> = plans
+    let before: Vec<Vec<Option<Snapshot>>> = plans
         .iter()
         .map(|p| {
             p.actions
@@ -274,7 +274,7 @@ fn run_plans(
         for (i, attempt) in plan_attempts.iter_mut() {
             if attempt.outcome.is_ok() && before[k][*i].is_some() {
                 let dirs = measured_dirs(env, &plans[k].actions[*i].action);
-                attempt.freed = shrank(before[k][*i], measure(env, &dirs));
+                attempt.freed = shrank(before[k][*i].as_ref(), measure(env, &dirs).as_ref());
             }
         }
     }
@@ -321,7 +321,7 @@ fn run_plans(
                         &mut attempt.argv,
                     );
                     if ran.is_ok() && before.is_some() {
-                        attempt.freed = shrank(before, measure(env, &dirs));
+                        attempt.freed = shrank(before.as_ref(), measure(env, &dirs).as_ref());
                     }
                     ran
                 }
@@ -416,25 +416,53 @@ pub fn measured_dirs(env: &Env, action: &Action) -> Vec<PathBuf> {
     dirs.into_iter().filter(|d| d.is_absolute()).collect()
 }
 
-/// The size of `dirs` together, or `None` when any of them could not be
-/// read completely (missing, or a part unreadable).
-fn measure(env: &Env, dirs: &[PathBuf]) -> Option<u64> {
+/// One measurement of a command's folders: for each, whether it exists,
+/// the bytes read and how many parts could not be read.
+type Snapshot = Vec<(bool, u64, u64)>;
+
+/// Measures `dirs`; `None` when there are none.
+fn measure(env: &Env, dirs: &[PathBuf]) -> Option<Snapshot> {
     if dirs.is_empty() {
         return None;
     }
-    let mut total = 0u64;
-    for usage in size::disk_usage_many(env, dirs) {
-        if usage.errors > 0 {
-            return None;
-        }
-        total = total.saturating_add(usage.bytes);
-    }
-    Some(total)
+    let exists: Vec<bool> = dirs
+        .iter()
+        .map(|d| fs::symlink_metadata(env.sys_path(d)).is_ok())
+        .collect();
+    Some(
+        size::disk_usage_many(env, dirs)
+            .into_iter()
+            .zip(exists)
+            .map(|(u, there)| {
+                if there {
+                    (true, u.bytes, u.errors)
+                } else {
+                    (false, 0, 0)
+                }
+            })
+            .collect(),
+    )
 }
 
-/// What a command freed: the drop between two measurements.
-fn shrank(before: Option<u64>, after: Option<u64>) -> Option<u64> {
-    Some(before?.saturating_sub(after?))
+/// What a command freed: the drop between two measurements, counted only
+/// when they are comparable. Each folder must exist both times or neither
+/// (a missing one is empty), and its unreadable parts (root-only download
+/// folders, other users' private /tmp folders) must be as many after as
+/// before: what could not be read is left out of both, so the result is at
+/// most what was freed. `None` when not comparable or nothing existed.
+fn shrank(before: Option<&Snapshot>, after: Option<&Snapshot>) -> Option<u64> {
+    let (before, after) = (before?, after?);
+    if before.len() != after.len() || !before.iter().any(|(there, ..)| *there) {
+        return None;
+    }
+    let mut total = 0u64;
+    for ((b_there, b_bytes, b_err), (a_there, a_bytes, a_err)) in before.iter().zip(after) {
+        if b_there != a_there || b_err != a_err {
+            return None;
+        }
+        total = total.saturating_add(b_bytes.saturating_sub(*a_bytes));
+    }
+    Some(total)
 }
 
 /// Whether the action goes into the privileged batch.

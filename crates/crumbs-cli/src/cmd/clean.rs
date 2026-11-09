@@ -247,6 +247,11 @@ fn cli_command(args: &CleanArgs, which: &[Category], pick: Pick<String>) -> Vec<
             argv.extend(args.categories.iter().map(|c| c.as_str().to_string()));
         }
     }
+    // Before the flags: `-i`, when set, stays last.
+    for pattern in &args.exclude {
+        argv.push("--exclude".into());
+        argv.push(pattern.clone());
+    }
     let flags = [
         (args.user, "--user"),
         (args.system, "--system"),

@@ -2772,3 +2772,59 @@ fn unmeasurable_cleanup_keeps_the_estimate() {
     assert_eq!(report.results[0].freed, None);
     assert_eq!(report.freed, 4096);
 }
+
+#[test]
+fn measurement_tolerates_unreadable_parts_that_stay() {
+    // pacman 7 leaves root-only download-* folders in the cache: they are
+    // unreadable before and after, so what was read is still compared.
+    use std::os::unix::fs::PermissionsExt;
+    let t = FixtureTree::new();
+    logging_program(&t, "paccache", &t.dir.path().join("l.log"), "", 0);
+    let old = t.write("var/cache/pacman/pkg/a-1.pkg.tar.zst", &[1u8; 20_000]);
+    t.write("var/cache/pacman/pkg/a-2.pkg.tar.zst", &[1u8; 20_000]);
+    let locked = t.mkdir("var/cache/pacman/pkg/download-Xy12");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let env = t.env();
+    let gone =
+        crate::size::disk_usage(&env, Path::new("/var/cache/pacman/pkg/a-1.pkg.tar.zst")).bytes;
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan_of(vec![priv_cmd("paccache", &["-rk1"])]),
+        &FakeRunner::new(),
+        &RemovingRunner {
+            remove: vec![old],
+            out: b"@@crumbs 0 0\n".to_vec(),
+        },
+        Some(&esc()),
+        &no_post_check,
+    );
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    assert_eq!(report.results[0].freed, Some(gone));
+}
+
+#[test]
+fn measurement_counts_a_folder_missing_both_times_as_empty() {
+    // dnf: only one of /var/cache/dnf and /var/cache/libdnf5 exists.
+    let t = FixtureTree::new();
+    logging_program(&t, "dnf", &t.dir.path().join("l.log"), "", 0);
+    let old = t.write("var/cache/libdnf5/repo/packages/a.rpm", &[1u8; 12_000]);
+    let env = t.env();
+    let gone =
+        crate::size::disk_usage(&env, Path::new("/var/cache/libdnf5/repo/packages/a.rpm")).bytes;
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan_of(vec![priv_cmd("dnf", &["clean", "packages"])]),
+        &FakeRunner::new(),
+        &RemovingRunner {
+            remove: vec![old],
+            out: b"@@crumbs 0 0\n".to_vec(),
+        },
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    assert_eq!(report.results[0].freed, Some(gone));
+}
