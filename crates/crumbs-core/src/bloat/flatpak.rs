@@ -71,14 +71,20 @@ impl Scanner for FlatpakUnusedScanner {
 
 /// What `flatpak uninstall <installation> --unused` would remove, as
 /// `id//branch`. Run without `-y`, flatpak prints its list and then, with
-/// stdout not a terminal, answers its own prompt "n" and removes nothing.
-/// `None` when the answer is not one this understands (an error, a change
-/// in flatpak's output): then flatpak decides at clean time, as before.
+/// stdout not a terminal, answers its own prompt "n" and removes nothing
+/// (`flatpak_yes_no_prompt`, flatpak 1.x). Only asked of a flatpak that
+/// reports a 1.x version, where that is checked; `None` otherwise, and
+/// when the answer is not one this understands: then flatpak decides at
+/// clean time, as before.
 pub(super) fn unused_refs(
     cx: &ScanContext,
     flatpak: &Path,
     installation: &str,
 ) -> Option<Vec<String>> {
+    let version = cx.runner.run(flatpak, &["--version"]).ok()?;
+    if version.status != 0 || !version.stdout.trim().starts_with("Flatpak 1.") {
+        return None;
+    }
     let out = cx
         .runner
         .run(flatpak, &["uninstall", installation, "--unused"])
@@ -203,12 +209,12 @@ mod tests {
         );
         assert_eq!(i.scope, Scope::Home);
         assert!(i.fingerprint.is_none() && i.extra_paths.is_empty() && i.app_id.is_none());
-        // The probe had no answer it understood: flatpak decides, as before.
+        // No 1.x version to rely on: never probed, flatpak decides as before.
         assert_eq!(
             runner.calls(),
             [
                 "flatpak list --user --runtime --columns=ref",
-                "flatpak uninstall --user --unused"
+                "flatpak --version"
             ]
         );
     }
@@ -261,12 +267,29 @@ mod tests {
                 &LIST,
                 out(0, "org.freedesktop.Platform/x86_64/23.08\n", ""),
             )
+            .on("flatpak", &["--version"], out(0, "Flatpak 1.18.4\n", ""))
             .on(
                 "flatpak",
                 &PROBE,
                 out(0, "Nothing unused to uninstall\n", ""),
             );
         assert!(scan(&t, &runner).unwrap().is_empty());
+        // A flatpak of another major version is never probed.
+        let runner = FakeRunner::new()
+            .on(
+                "flatpak",
+                &LIST,
+                out(0, "org.freedesktop.Platform/x86_64/23.08\n", ""),
+            )
+            .on("flatpak", &["--version"], out(0, "Flatpak 2.0.0\n", ""))
+            .on(
+                "flatpak",
+                &PROBE,
+                out(0, "Nothing unused to uninstall\n", ""),
+            );
+        let items = scan(&t, &runner).unwrap();
+        assert_eq!(items[0].label, "unused Flatpak runtimes (user)");
+        assert!(!runner.calls().iter().any(|c| c.contains("uninstall")));
     }
 
     #[test]
@@ -279,6 +302,7 @@ mod tests {
                 &LIST,
                 out(0, "org.gnome.Platform/x86_64/45\n", ""),
             )
+            .on("flatpak", &["--version"], out(0, "Flatpak 1.18.4\n", ""))
             // Declining exits non-zero; the list is what counts.
             .on("flatpak", &PROBE, out(1, TABLE, "error: Aborted by user\n"));
         let items = scan(&t, &runner).unwrap();

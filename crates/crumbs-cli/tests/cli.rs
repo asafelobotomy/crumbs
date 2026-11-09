@@ -1688,6 +1688,22 @@ fn clean_preview_warns_when_the_disk_is_nearly_full() {
     );
 }
 
+/// A flatpak 1.x whose `uninstall --unused` without `-y` lists one unused
+/// runtime and declines, as flatpak does when stdout is not a terminal.
+/// Every `uninstall` it gets is recorded in `<root>/flatpak-args`.
+const FLATPAK_PROBED: &str = "#!/bin/sh\nroot=\"$(dirname \"$0\")/../..\"\ncase \"$*\" in\n--version) echo 'Flatpak 1.18.4' ;;\nuninstall*) echo \"$@\" >> \"$root/flatpak-args\"; case \"$*\" in *-y*) ;; *) printf ' 1.     org.gnome.Platform   45   r\\nProceed with these changes to the user installation? [Y/n]: n\\n'; exit 1 ;; esac ;;\n*runtime*) echo org.gnome.Platform/x86_64/45 ;;\n*) printf 'app.xemu.xemu\\txemu\\t0.8.136\\tuser\\t34.4 MB\\n' ;;\nesac\n";
+
+#[test]
+fn flatpak_unused_dry_run_only_asks_flatpak() {
+    let t = scan_fixture(FLATPAK_PROBED);
+    let (code, stdout, stderr) = run_clean(&t, &["flatpak-unused", "--dry-run"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stdout.contains("org.gnome.Platform//45"), "{stdout}");
+    // The scan asked in the declining form only; nothing was removed.
+    let args = std::fs::read_to_string(real(&t, "/flatpak-args")).unwrap();
+    assert_eq!(args, "uninstall --user --unused\n");
+}
+
 #[test]
 fn clean_cache_trashes_and_logs() {
     let t = scan_fixture(FLATPAK_OK);
@@ -2694,7 +2710,7 @@ fn system_fixture(journal_hook: &str) -> FixtureTree {
     );
     t.write_exec(
         "/usr/bin/flatpak",
-        b"#!/bin/sh\nroot=\"$(dirname \"$0\")/../..\"\nif [ \"$1\" = list ]; then case \"$*\" in *--runtime*) echo org.x.Platform/x86_64/23.08;; esac; exit 0; fi\necho \"$@\" >> \"$root/flatpak-args\"\n",
+        b"#!/bin/sh\nroot=\"$(dirname \"$0\")/../..\"\nif [ \"$1\" = list ]; then case \"$*\" in *--runtime*) echo org.x.Platform/x86_64/23.08;; esac; exit 0; fi\n[ \"$1\" = --version ] && exit 0\necho \"$@\" >> \"$root/flatpak-args\"\n",
     );
     // `rm` logs, then removes the root-joined path the batch passes.
     t.write_exec(
