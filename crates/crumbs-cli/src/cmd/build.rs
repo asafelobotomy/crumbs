@@ -5,9 +5,6 @@
 //! The public functions are what the `mcp` module calls; the CLI calls the
 //! commands' own builders, which can also show a checklist (`-i`).
 
-// The `mcp` module (M4c) is their caller outside the tests.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 use crumbs_core::config::Config;
@@ -35,8 +32,10 @@ pub struct Built {
     /// Extra `note:` lines of the human preview.
     pub after_preview: Vec<String>,
     /// Every finding the request could pick from with `select`.
+    #[allow(dead_code, reason = "used by the mcp module in a later task")]
     pub selectable: Vec<Finding>,
     /// The argv of the equivalent CLI command.
+    #[allow(dead_code, reason = "used by the mcp module in a later task")]
     pub cli_command: Vec<String>,
 }
 
@@ -65,6 +64,7 @@ impl Refusal {
 }
 
 /// Why a command's builder stopped, as the CLI reports it.
+#[derive(Debug)]
 pub(crate) enum Stop {
     /// `causes` are the failures behind it (failed sources): the CLI shows
     /// them as warnings first.
@@ -187,16 +187,19 @@ pub(crate) fn select_findings(
     Ok(wanted)
 }
 
+#[allow(dead_code, reason = "used by the mcp module in a later task")]
 fn value<T: Serialize>(v: &T) -> Result<serde_json::Value, Refusal> {
     serde_json::to_value(v).map_err(|e| Refusal::new(1, e.to_string()))
 }
 
+#[allow(dead_code, reason = "used by the mcp module in a later task")]
 fn failed(e: anyhow::Error) -> Refusal {
     Stop::Failed(e).into_refusal()
 }
 
 /// `uninstall`: the apps in `args.apps` and their leftovers. With
 /// `select`, exactly the findings at those paths (system leftovers too).
+#[allow(dead_code, reason = "used by the mcp module in a later task")]
 pub fn uninstall(
     env: &Env,
     args: &UninstallArgs,
@@ -210,6 +213,7 @@ pub fn uninstall(
 
 /// `clean`: the chosen categories' items. With `select`, exactly the
 /// named items: a category id stands for its items that are not held back.
+#[allow(dead_code, reason = "used by the mcp module in a later task")]
 pub fn clean(env: &Env, args: &CleanArgs, select: Option<&[String]>) -> Result<Built, Refusal> {
     let pick = select.map_or(Pick::Defaults, Pick::Named);
     clean::build(env, args, pick)
@@ -218,6 +222,7 @@ pub fn clean(env: &Env, args: &CleanArgs, select: Option<&[String]>) -> Result<B
 }
 
 /// `orphans --clean` of the orphans at `select`.
+#[allow(dead_code, reason = "used by the mcp module in a later task")]
 pub fn orphans(env: &Env, args: &OrphansArgs, select: &[PathBuf]) -> Result<Built, Refusal> {
     orphans::build_clean(env, args, Pick::Named(select))
         .map(|d| d.built)
@@ -227,6 +232,7 @@ pub fn orphans(env: &Env, args: &OrphansArgs, select: &[PathBuf]) -> Result<Buil
 /// `restore`: checks the selectors with a dry run. The core restores
 /// without a plan, so `targets` is empty; refused when no selector names a
 /// history entry.
+#[allow(dead_code, reason = "used by the mcp module in a later task")]
 pub fn restore(env: &Env, selectors: &[String]) -> Result<Built, Refusal> {
     let (outcomes, notes) = restore_cmd::outcomes(env, selectors, true).map_err(failed)?;
     if restore_cmd::none_selected(&outcomes) {
@@ -254,6 +260,7 @@ pub fn restore(env: &Env, selectors: &[String]) -> Result<Built, Refusal> {
 }
 
 /// `scan --json` data and errors.
+#[allow(dead_code, reason = "used by the mcp module in a later task")]
 pub fn scan_data(
     env: &Env,
     args: &ScanArgs,
@@ -263,6 +270,7 @@ pub fn scan_data(
 }
 
 /// `apps list --json` data and errors.
+#[allow(dead_code, reason = "used by the mcp module in a later task")]
 pub fn apps_list_data(
     env: &Env,
     sources: &[SourceKind],
@@ -275,6 +283,7 @@ pub fn apps_list_data(
 
 /// `apps show --json` data and errors for a found app; no app or several
 /// are refused, as the CLI's exit 2.
+#[allow(dead_code, reason = "used by the mcp module in a later task")]
 pub fn app_show_data(
     env: &Env,
     query: &str,
@@ -304,6 +313,7 @@ pub fn app_show_data(
 }
 
 /// `orphans --json` data and errors (the listing, not `--clean`).
+#[allow(dead_code, reason = "used by the mcp module in a later task")]
 pub fn orphans_data(
     env: &Env,
     args: &OrphansArgs,
@@ -316,6 +326,7 @@ pub fn orphans_data(
 }
 
 /// `history --json` data and errors: the newest `limit` batches.
+#[allow(dead_code, reason = "used by the mcp module in a later task")]
 pub fn history_data(
     env: &Env,
     limit: usize,
@@ -324,6 +335,7 @@ pub fn history_data(
 }
 
 /// `doctor --json` data and errors.
+#[allow(dead_code, reason = "used by the mcp module in a later task")]
 pub fn doctor_data(env: &Env) -> Result<(serde_json::Value, Vec<ErrorEntry>), Refusal> {
     let (report, notes) = doctor::gather(env).map_err(failed)?;
     let errors = doctor::json_errors(&report, notes);
@@ -373,43 +385,45 @@ mod tests {
         }
     }
 
-    /// The `crumbs` binary that `cargo test` builds next to `deps/` for the
-    /// integration tests (`CARGO_BIN_EXE_*` is not set for unit tests).
-    fn crumbs_bin() -> PathBuf {
-        let exe = std::env::current_exe().unwrap();
-        let bin = exe.parent().and_then(Path::parent).unwrap().join("crumbs");
-        assert!(
-            bin.exists(),
-            "{} not built; run cargo test -p crumbs-cli",
-            bin.display()
-        );
-        bin
+    /// What `uninstall inky --leftovers-only` plans in [`inky`]: also
+    /// pinned for the CLI in `tests/cli.rs`
+    /// (`uninstall_dry_run_json_plan_matches_builder`).
+    const INKY_LEFTOVERS: [(&str, &str); 2] = [
+        ("trash", "/home/user/.cache/inky"),
+        ("trash", "/home/user/.config/inky"),
+    ];
+
+    fn actions(plan: &serde_json::Value) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = plan["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                let kind = a["action"]["type"].as_str().unwrap().to_string();
+                let path = a["action"]["path"].as_str().unwrap().to_string();
+                (kind, path)
+            })
+            .collect();
+        v.sort();
+        v
     }
 
     #[test]
     fn build_uninstall_matches_cli_plan() {
         let t = inky();
-        let built = uninstall(&t.env(), &leftovers_only("inky"), None).unwrap();
-        assert!(!built.targets[0].plan.actions.is_empty());
-        let out = std::process::Command::new(crumbs_bin())
-            .args([
-                "uninstall",
-                "inky",
-                "--leftovers-only",
-                "--dry-run",
-                "--json",
-            ])
-            .env("CRUMBS_ROOT", t.dir.path())
-            .env_remove("CRUMBS_TEST_PRIV_RUNNER")
-            .env_remove("CRUMBS_ALLOW_REAL_ESCALATION")
-            .output()
-            .unwrap();
-        assert_eq!(out.status.code(), Some(0));
-        let cli: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert_eq!(
-            serde_json::to_value(&built.targets[0].plan).unwrap(),
-            cli["data"]["plans"][0]
-        );
+        let env = t.env();
+        let args = leftovers_only("inky");
+        let built = uninstall(&env, &args, None).unwrap();
+        // The CLI's own builder and the data `--dry-run --json` prints.
+        let cli = uninstall::build(&env, &args, Pick::Defaults).unwrap();
+        let data = crate::cmd::act::dry_run_data(&cli.built.targets);
+        let plan = serde_json::to_value(&built.targets[0].plan).unwrap();
+        assert_eq!(plan, data["plans"][0]);
+        let want: Vec<(String, String)> = INKY_LEFTOVERS
+            .iter()
+            .map(|(k, p)| (k.to_string(), p.to_string()))
+            .collect();
+        assert_eq!(actions(&plan), want, "{plan:#}");
         assert_eq!(
             built.cli_command,
             ["crumbs", "uninstall", "inky", "--leftovers-only"]
@@ -460,34 +474,83 @@ mod tests {
     }
 
     #[test]
-    fn execute_confirmed_refuses_a_running_app_unless_forced() {
-        use crate::cmd::act::{Privilege, execute_confirmed};
+    fn execute_confirmed_refuses_an_app_that_was_not_allowed() {
+        use crate::cmd::act::{AllowedRunning, Privilege, execute_confirmed};
         let t = inky();
+        t.pacman_pkg(
+            "blot",
+            "1.0-1",
+            Some(1000),
+            &[
+                "usr/bin/blot",
+                "usr/share/applications/",
+                "usr/share/applications/blot.desktop",
+            ],
+        );
+        t.write_exec("/usr/bin/blot", b"");
+        t.desktop(
+            "/usr/share/applications/blot.desktop",
+            "[Desktop Entry]\nType=Application\nName=Blot\nExec=/usr/bin/blot\n",
+        );
+        t.write("home/user/.cache/blot/blob", b"cache");
+        // The user confirmed Inky, which was running.
         t.symlink("/proc/79/exe", "/usr/bin/inky");
         let env = t.env();
-        let built = uninstall(&env, &leftovers_only("inky"), None).unwrap();
+        let mut args = leftovers_only("inky");
+        args.apps.push("blot".into());
+        let built = uninstall(&env, &args, None).unwrap();
+        let inky_id = built.targets[0].app.as_ref().unwrap().id.clone();
         let cfg = Config::default();
-        let cache = env.sys("/home/user/.cache/inky");
-
-        let run = |force| {
+        let caches = [
+            env.sys("/home/user/.cache/inky"),
+            env.sys("/home/user/.cache/blot"),
+        ];
+        let run = |allowed| {
             execute_confirmed(
                 &env,
                 &cfg,
                 &built.targets,
                 Privilege::for_run(&env, false),
-                force,
+                allowed,
             )
         };
-        let refused = run(false);
+        let only_inky = || AllowedRunning::Only(vec![inky_id.clone()]);
+
+        // Blot starts after the confirmation.
+        t.symlink("/proc/80/exe", "/usr/bin/blot");
+        let refused = run(only_inky());
         assert_eq!(refused.exit_code, 1);
         assert!(refused.reports.is_empty());
-        assert_eq!(refused.running, ["Inky is running (pid 79)"]);
-        assert!(cache.exists(), "nothing ran");
+        assert_eq!(refused.running, ["Blot is running (pid 80)"]);
+        let none = run(AllowedRunning::None);
+        assert_eq!(none.exit_code, 1);
+        assert_eq!(
+            none.running,
+            ["Inky is running (pid 79)", "Blot is running (pid 80)"]
+        );
+        assert!(caches.iter().all(|c| c.exists()), "nothing ran");
 
-        let forced = run(true);
-        assert_eq!(forced.exit_code, 0, "{:?}", forced.reports);
-        assert_eq!(forced.running, ["Inky is running (pid 79)"]);
-        assert_eq!(forced.reports.len(), 1);
-        assert!(!cache.exists());
+        // Blot is gone again: only the allowed Inky runs.
+        std::fs::remove_file(t.dir.path().join("proc/80/exe")).unwrap();
+        let ran = run(only_inky());
+        assert_eq!(ran.exit_code, 0, "{:?}", ran.reports);
+        assert_eq!(ran.running, ["Inky is running (pid 79)"]);
+        assert_eq!(ran.reports.len(), 2);
+        assert!(caches.iter().all(|c| !c.exists()));
+    }
+
+    #[test]
+    fn execute_confirmed_runs_with_any_running_app_allowed() {
+        use crate::cmd::act::{AllowedRunning, Privilege, execute_confirmed};
+        let t = inky();
+        t.symlink("/proc/79/exe", "/usr/bin/inky");
+        let env = t.env();
+        let built = uninstall(&env, &leftovers_only("inky"), None).unwrap();
+        let cfg = Config::default();
+        let privilege = Privilege::for_run(&env, false);
+        let ran = execute_confirmed(&env, &cfg, &built.targets, privilege, AllowedRunning::Any);
+        assert_eq!(ran.exit_code, 0, "{:?}", ran.reports);
+        assert_eq!(ran.running, ["Inky is running (pid 79)"]);
+        assert!(!env.sys("/home/user/.cache/inky").exists());
     }
 }

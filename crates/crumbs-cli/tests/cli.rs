@@ -3310,3 +3310,62 @@ fn apps_show_lists_system_leftovers() {
     let v = stdout_json(crumbs(&t).args(["apps", "show", "inky", "--json", "--show-low"]));
     assert!(v.to_string().contains("/etc/Inky-2"), "{v}");
 }
+
+/// The CLI half of `build_uninstall_matches_cli_plan` (cmd/build.rs): the
+/// same fixture and the same expected actions, so the builder the `mcp`
+/// server calls and `uninstall --dry-run --json` plan alike.
+#[test]
+fn uninstall_dry_run_json_plan_matches_builder() {
+    let t = FixtureTree::new();
+    t.os_release("manjaro", "arch", "Manjaro Linux");
+    t.pacman_pkg(
+        "inky",
+        "1.0-1",
+        Some(1000),
+        &[
+            "usr/bin/inky",
+            "usr/share/applications/",
+            "usr/share/applications/inky.desktop",
+        ],
+    );
+    t.write_exec("/usr/bin/inky", b"");
+    t.desktop(
+        "/usr/share/applications/inky.desktop",
+        "[Desktop Entry]\nType=Application\nName=Inky\nExec=/usr/bin/inky\n",
+    );
+    t.write("home/user/.cache/inky/blob", b"cache");
+    t.write("home/user/.config/inky/inky.conf", b"x");
+    let out = crumbs(&t)
+        .args([
+            "uninstall",
+            "inky",
+            "--leftovers-only",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["report"], serde_json::Value::Null);
+    let plans = v["data"]["plans"].as_array().unwrap();
+    assert_eq!(plans.len(), 1);
+    let mut actions: Vec<(String, String)> = plans[0]["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            (
+                a["action"]["type"].as_str().unwrap().to_string(),
+                a["action"]["path"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    actions.sort();
+    let want = [
+        ("trash", "/home/user/.cache/inky"),
+        ("trash", "/home/user/.config/inky"),
+    ]
+    .map(|(k, p)| (k.to_string(), p.to_string()));
+    assert_eq!(actions, want, "{:#}", plans[0]);
+}

@@ -381,7 +381,7 @@ fn after_text(after_preview: &[String]) -> String {
 /// The human preview without colour: every plan, the `after_preview`
 /// notes, then the warnings in `errors`, as the CLI shows them (it prints
 /// the warnings on stderr).
-#[allow(dead_code, reason = "the mcp module (M4c) calls it")]
+#[allow(dead_code, reason = "used by the mcp module in a later task")]
 pub fn preview_text(
     env: &Env,
     targets: &[Target],
@@ -432,6 +432,12 @@ fn running_apps<'t>(env: &Env, targets: &'t [Target]) -> Vec<(&'t App, String)> 
         .collect()
 }
 
+/// The `--dry-run --json` data: every plan, and no report.
+pub fn dry_run_data(targets: &[Target]) -> serde_json::Value {
+    let plans: Vec<&Plan> = targets.iter().map(|t| &t.plan).collect();
+    json!({ "plans": plans, "report": null })
+}
+
 /// Steps 4 to 7: preview, running-app check, confirmation, execution and
 /// report. `errors` (failed sources, then notes) are warnings in the
 /// preview and the envelope's `errors` under `--json`. JSON `report` has
@@ -455,8 +461,7 @@ pub fn apply(
     }
     if act.dry_run {
         if act.json {
-            let data = json!({ "plans": plans, "report": null });
-            print_json_entries(out.command, &data, errors)?;
+            print_json_entries(out.command, &dry_run_data(targets), errors)?;
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -480,8 +485,8 @@ pub fn apply(
     }
 
     let interactive = prompt::is_interactive();
-    // The user said to continue although an app is running.
-    let mut confirmed = false;
+    // The apps the user said to go on with although they are running.
+    let mut confirmed: Vec<String> = Vec::new();
     for (app, msg) in running_apps(env, targets) {
         writeln!(anstream::stderr().lock(), "{msg}")?;
         if act.force {
@@ -496,7 +501,7 @@ pub fn apply(
         ))? {
             return out.aborted();
         }
-        confirmed = true;
+        confirmed.push(app.id.clone());
     }
     if !act.yes {
         if !interactive {
@@ -507,11 +512,18 @@ pub fn apply(
         }
     }
 
-    let outcome = execute_confirmed(env, cfg, targets, privilege, act.force || confirmed);
+    let allowed = if act.force {
+        AllowedRunning::Any
+    } else if confirmed.is_empty() {
+        AllowedRunning::None
+    } else {
+        AllowedRunning::Only(confirmed)
+    };
+    let outcome = execute_confirmed(env, cfg, targets, privilege, allowed);
     if let Some(msg) = outcome.running.first()
         && outcome.reports.is_empty()
     {
-        // The app started after the check above: nothing ran.
+        // An app started after the check above: nothing ran.
         writeln!(anstream::stderr().lock(), "{msg}")?;
         return out.fail(1, &running_refusal(msg));
     }
@@ -573,13 +585,35 @@ pub struct ExecOutcome {
     pub exit_code: u8,
     /// With exit 5: the commands to run by hand for what needed the rights.
     pub manual_commands: Vec<String>,
-    /// `<name> is running (pid …)` for each target app found running.
+    /// `<name> is running (pid …)`: with exit 1 for each running app that
+    /// was not allowed, otherwise for each target app found running.
     pub running: Vec<String>,
+}
+
+/// Which target apps may be running while [`execute_confirmed`] runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AllowedRunning {
+    /// None: any running target app refuses the run.
+    None,
+    /// The apps with these ids (the ones the user confirmed).
+    Only(Vec<String>),
+    /// Any (`--force`).
+    Any,
+}
+
+impl AllowedRunning {
+    fn allows(&self, app: &App) -> bool {
+        match self {
+            AllowedRunning::None => false,
+            AllowedRunning::Only(ids) => ids.contains(&app.id),
+            AllowedRunning::Any => true,
+        }
+    }
 }
 
 /// Runs `targets` once the user has confirmed them; never prompts. Nothing
 /// runs when a privileged action has no way to get the rights, or when a
-/// target app is running and not `force`. Otherwise the debug
+/// target app is running that `allowed` does not allow. Otherwise the debug
 /// before-execute hook, then every plan with [`execute_many`] (Ctrl-C held
 /// while a privileged batch runs), which re-checks every action and
 /// writes the history.
@@ -588,7 +622,7 @@ pub fn execute_confirmed(
     cfg: &Config,
     targets: &[Target],
     privilege: Privilege,
-    force: bool,
+    allowed: AllowedRunning,
 ) -> ExecOutcome {
     let plans: Vec<&Plan> = targets.iter().map(|t| &t.plan).collect();
     let refused = |exit_code: u8, manual_commands: Vec<String>, running: Vec<String>| ExecOutcome {
@@ -602,13 +636,16 @@ pub fn execute_confirmed(
         let manual = manual_commands(env, plans.iter().flat_map(|p| &p.actions));
         return refused(EXIT_NO_RIGHTS, manual, Vec::new());
     }
-    let running: Vec<String> = running_apps(env, targets)
-        .into_iter()
-        .map(|(_, msg)| msg)
+    let found = running_apps(env, targets);
+    let disallowed: Vec<String> = found
+        .iter()
+        .filter(|(app, _)| !allowed.allows(app))
+        .map(|(_, msg)| msg.clone())
         .collect();
-    if !running.is_empty() && !force {
-        return refused(1, Vec::new(), running);
+    if !disallowed.is_empty() {
+        return refused(1, Vec::new(), disallowed);
     }
+    let running: Vec<String> = found.into_iter().map(|(_, msg)| msg).collect();
 
     before_execute_hook(env);
     let reports = run_plans(env, cfg, &plans, &privilege);
