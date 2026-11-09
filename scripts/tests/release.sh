@@ -1,0 +1,63 @@
+# scripts/release.sh: its refusals, a full build with checksums, and the
+# tag workflow. The refusals run in a local clone, never the real tree.
+. "$(dirname "$0")/lib.sh"
+CLONE=$HOME/.cache/crumbs-test/release-clone
+rm -rf "$CLONE"
+git clone -q --local "$PWD" "$CLONE"
+# Test the working copy of release.sh, committed in the clone so its tree is clean.
+cp scripts/release.sh "$CLONE/scripts/release.sh"
+git -C "$CLONE" add scripts/release.sh
+git -C "$CLONE" -c user.name=test -c user.email=test@invalid commit -qm "test: release.sh" || true
+
+check release_refuses_dirty_tree
+touch "$CLONE/untracked-file"
+st=0; err=$("$CLONE/scripts/release.sh" "$VERSION" 2>&1) || st=$?
+[ "$st" -eq 2 ] || fail "exit $st: $err"
+echo "$err" | grep -q 'refusing: the working tree has uncommitted changes' || fail "$err"
+rm "$CLONE/untracked-file"
+
+check release_refuses_version_mismatch
+st=0; err=$("$CLONE/scripts/release.sh" 9.9.9 2>&1) || st=$?
+[ "$st" -eq 2 ] || fail "exit $st: $err"
+echo "$err" | grep -qF "version 9.9.9 does not match Cargo.toml ($VERSION)" || fail "$err"
+st=0; err=$("$CLONE/scripts/release.sh" 2>&1) || st=$?
+[ "$st" -eq 2 ] || fail "no version: exit $st"
+rm -rf "$CLONE"
+
+check release_builds_everything_with_sums
+scripts/release.sh "$VERSION" --allow-dirty >/dev/null 2>"$HOME/.cache/crumbs-test/release.log" ||
+    fail "release.sh failed: $(tail -3 "$HOME/.cache/crumbs-test/release.log" | tr '\n' ' ')"
+for f in "crumbs-$VERSION-x86_64-linux-musl" "crumbs-$VERSION-x86_64.AppImage" \
+    "crumbs_${VERSION}_amd64.deb" "crumbs-$VERSION-1.x86_64.rpm" LICENSE SHA256SUMS RELEASE_NOTES.md \
+    aur/crumbs/PKGBUILD aur/crumbs/.SRCINFO aur/crumbs-bin/PKGBUILD aur/crumbs-bin/.SRCINFO; do
+    [ -f "dist/$f" ] || fail "missing dist/$f"
+done
+(cd dist && sha256sum --quiet -c SHA256SUMS) || fail "sha256sum -c failed"
+[ "$(wc -l < dist/SHA256SUMS)" -eq 5 ] || fail "SHA256SUMS should list 5 files: $(cat dist/SHA256SUMS)"
+grep -q "^## $VERSION\$" dist/RELEASE_NOTES.md && fail "RELEASE_NOTES.md repeats the heading"
+[ -s dist/RELEASE_NOTES.md ] || fail "RELEASE_NOTES.md is empty"
+for pkg in crumbs crumbs-bin; do
+    grep -q SKIP "dist/aur/$pkg/PKGBUILD" "dist/aur/$pkg/.SRCINFO" && fail "dist/aur/$pkg still has SKIP"
+    want=$(cd "dist/aur/$pkg" && makepkg --printsrcinfo) || fail "$pkg: makepkg --printsrcinfo failed"
+    [ "$want" = "$(cat "dist/aur/$pkg/.SRCINFO")" ] || fail "dist/aur/$pkg/.SRCINFO does not match its PKGBUILD"
+done
+bin_sum=$(sha256sum "dist/crumbs-$VERSION-x86_64-linux-musl" | cut -d' ' -f1)
+grep -q "$bin_sum" dist/aur/crumbs-bin/PKGBUILD || fail "crumbs-bin lacks the binary's sum"
+
+check release_workflow_is_valid_yaml
+wf=.github/workflows/release.yml
+python3 -I - "$wf" <<'PY' || fail "release.yml is not valid"
+import sys
+try:
+    import yaml
+except ImportError:
+    sys.exit(0)  # PyYAML missing: the grep checks below still run
+doc = yaml.safe_load(open(sys.argv[1]))
+on = doc.get("on", doc.get(True))
+assert on["push"]["tags"] == ["v*"], on
+assert doc["permissions"]["contents"] == "write"
+PY
+grep -q 'scripts/release.sh "${GITHUB_REF_NAME#v}"' "$wf" || fail "release.yml does not run scripts/release.sh"
+grep -q 'gh release create' "$wf" || fail "release.yml does not run gh release create"
+
+pass
