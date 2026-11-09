@@ -1,10 +1,13 @@
+# shellcheck shell=sh
 # Shared helpers for scripts/tests/*.sh. Sourced, not run.
 set -eu
 cd "$(dirname "$0")/../.."
 VERSION=$(cargo metadata --format-version 1 --no-deps --locked |
     python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "crumbs-cli"))')
 DIST=$PWD/dist
+# shellcheck disable=SC2034 # used by the test files that source this
 STATIC=$DIST/crumbs-$VERSION-x86_64-linux-musl
+# shellcheck disable=SC2034
 IMAGES="docker.io/library/archlinux:latest docker.io/library/debian:trixie docker.io/library/ubuntu:latest registry.fedoraproject.org/fedora:latest"
 
 CURRENT=setup

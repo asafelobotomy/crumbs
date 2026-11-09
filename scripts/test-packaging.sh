@@ -4,8 +4,9 @@
 # first failure; this prints `PASS <name>` or `FAIL <name>: <reason>` and
 # exits non-zero if any failed. Build the artifacts first (scripts/build-*.sh).
 set -u
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 if [ $# -eq 0 ]; then
+    # shellcheck disable=SC2046 # test names have no spaces
     set -- $(for f in scripts/tests/*.sh; do b=$(basename "$f" .sh); [ "$b" = lib ] || echo "$b"; done)
 fi
 LOGDIR=${CRUMBS_PACKAGING_LOGS:-$HOME/.cache/crumbs-packaging-tests}

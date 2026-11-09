@@ -1,0 +1,2 @@
+# cargo-deny: dependency advisories (CI runs `cargo deny check advisories`).
+[advisories]

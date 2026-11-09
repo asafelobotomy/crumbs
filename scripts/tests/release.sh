@@ -1,3 +1,4 @@
+# shellcheck shell=sh
 # scripts/release.sh: its refusals, a full build with checksums, and the
 # tag workflow. The refusals run in a local clone, never the real tree.
 . "$(dirname "$0")/lib.sh"
