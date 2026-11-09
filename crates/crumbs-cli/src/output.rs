@@ -37,20 +37,7 @@ pub fn source_exit_code(statuses: &[SourceStatus], errors: &[SourceError]) -> u8
     }
 }
 
-/// Formats a byte count in IEC units with one decimal place.
-pub fn fmt_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["KiB", "MiB", "GiB", "TiB", "PiB"];
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let mut value = bytes as f64 / 1024.0;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    format!("{value:.1} {}", UNITS[unit])
-}
+pub use crumbs_core::size::fmt_size;
 
 #[derive(Serialize)]
 struct Envelope<'a, T: Serialize> {

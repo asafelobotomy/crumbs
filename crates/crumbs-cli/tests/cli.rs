@@ -1672,6 +1672,23 @@ fn clean_exclude_must_be_absolute() {
 }
 
 #[test]
+fn clean_preview_warns_when_the_disk_is_nearly_full() {
+    let t = scan_fixture(FLATPAK_OK);
+    let out = crumbs(&t)
+        .env("CRUMBS_TEST_CLOCK_SHIFT_DAYS", CLOCK_SHIFT_DAYS.to_string())
+        .env("CRUMBS_TEST_FS_SPACE", "1048576/104857600")
+        .args(["clean", "cache", "--dry-run"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("note: the disk is 99% full (1.0 MiB free): moving to the trash"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn clean_cache_trashes_and_logs() {
     let t = scan_fixture(FLATPAK_OK);
     let (code, stdout, stderr) = run_clean(&t, &["cache", "--yes"]);

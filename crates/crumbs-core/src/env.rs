@@ -70,9 +70,21 @@ pub struct Env {
     /// [`Env::user_mount_ns`]): `Some(None)` reads as unreadable. Always
     /// `None` outside tests, where the real `/proc/self/ns/mnt` is read.
     pub(crate) mount_ns: Option<Option<OsString>>,
+    /// `None` for the real system (`statvfs` answers); a fake root answers
+    /// with this instead: `CRUMBS_TEST_FS_SPACE` (`<available>/<total>`
+    /// bytes), or nothing.
+    pub(crate) fs_space: Option<Option<(u64, u64)>>,
 }
 
 /// Days from `CRUMBS_TEST_CLOCK_SHIFT_DAYS`; only ever read for a fake root.
+/// `(available, total)` bytes from `CRUMBS_TEST_FS_SPACE`; only ever read
+/// for a fake root.
+fn test_fs_space() -> Option<(u64, u64)> {
+    let v = std::env::var("CRUMBS_TEST_FS_SPACE").ok()?;
+    let (avail, total) = v.split_once('/')?;
+    Some((avail.parse().ok()?, total.parse().ok()?))
+}
+
 fn test_clock_shift() -> Duration {
     std::env::var("CRUMBS_TEST_CLOCK_SHIFT_DAYS")
         .ok()
@@ -148,6 +160,7 @@ impl Env {
             clock_shift: Duration::ZERO,
             system_owner_uid: 0,
             mount_ns: None,
+            fs_space: None,
         })
     }
 
@@ -173,6 +186,7 @@ impl Env {
             distro,
             clock_shift: test_clock_shift(),
             mount_ns: None,
+            fs_space: Some(test_fs_space()),
         })
     }
 
@@ -191,6 +205,30 @@ impl Env {
     #[cfg(any(test, feature = "test-support", debug_assertions))]
     pub fn set_clock_shift(&mut self, shift: Duration) {
         self.clock_shift = shift;
+    }
+
+    /// Test hook: what [`Env::fs_space`] answers.
+    #[cfg(any(test, feature = "test-support", debug_assertions))]
+    pub fn set_fs_space(&mut self, space: Option<(u64, u64)>) {
+        self.fs_space = Some(space);
+    }
+
+    /// `(available, total)` bytes of the filesystem holding `in_system`, as
+    /// an unprivileged user may use it; `None` when unknown.
+    pub fn fs_space(&self, in_system: &Path) -> Option<(u64, u64)> {
+        if let Some(fixed) = self.fs_space {
+            return fixed;
+        }
+        let st = rustix::fs::statvfs(self.sys_path(in_system)).ok()?;
+        let unit = if st.f_frsize > 0 {
+            st.f_frsize
+        } else {
+            st.f_bsize
+        };
+        Some((
+            st.f_bavail.saturating_mul(unit),
+            st.f_blocks.saturating_mul(unit),
+        ))
     }
 
     /// Test hook: sets [`Env::system_owner_uid`].
