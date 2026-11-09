@@ -38,7 +38,10 @@ pub struct Inventory {
 pub fn default_sources() -> Vec<Box<dyn AppSource>> {
     vec![
         Box::new(PacmanSource),
+        Box::new(crate::sources::dpkg::DpkgSource),
+        Box::new(crate::sources::rpm::RpmSource),
         Box::new(FlatpakSource),
+        Box::new(crate::sources::snap::SnapSource),
         Box::new(AppImageSource),
     ]
 }
@@ -46,7 +49,10 @@ pub fn default_sources() -> Vec<Box<dyn AppSource>> {
 fn unavailable_reason(kind: SourceKind) -> &'static str {
     match kind {
         SourceKind::Pacman => "no pacman database",
+        SourceKind::Dpkg => "no dpkg database",
+        SourceKind::Rpm => "rpm not installed",
         SourceKind::Flatpak => "not installed",
+        SourceKind::Snap => "snap not installed",
         _ => "not available",
     }
 }
@@ -305,18 +311,29 @@ mod tests {
             kinds,
             [
                 SourceKind::Pacman,
+                SourceKind::Dpkg,
+                SourceKind::Rpm,
                 SourceKind::Flatpak,
+                SourceKind::Snap,
                 SourceKind::AppImage,
                 SourceKind::Unmanaged
             ]
         );
         let counts: Vec<_> = inv.statuses.iter().map(|s| s.app_count).collect();
-        assert_eq!(counts, [1, 0, 1, 1]);
+        assert_eq!(counts, [1, 0, 0, 0, 0, 1, 1]);
         assert_eq!(
             inv.statuses[1].skipped_reason.as_deref(),
+            Some("no dpkg database")
+        );
+        assert_eq!(
+            inv.statuses[2].skipped_reason.as_deref(),
+            Some("rpm not installed")
+        );
+        assert_eq!(
+            inv.statuses[3].skipped_reason.as_deref(),
             Some("not installed")
         );
-        assert!(!inv.statuses[1].available);
+        assert!(!inv.statuses[3].available);
         let ids: Vec<_> = inv.apps.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(
             ids,
@@ -428,7 +445,7 @@ mod tests {
         assert_eq!(inv.errors[0].source, SourceKind::Flatpak);
         assert!(inv.apps.iter().any(|a| a.source == SourceKind::Pacman));
         assert!(inv.apps.iter().any(|a| a.source == SourceKind::AppImage));
-        assert!(inv.statuses[1].available);
+        assert!(inv.statuses[3].available);
     }
 
     #[test]
@@ -540,6 +557,31 @@ mod tests {
     }
 
     #[test]
+    fn empty_dpkg_and_rpm_on_arch_are_unavailable_not_failed() {
+        // An Arch host with dpkg and rpm-tools installed from pacman: an
+        // empty dpkg status, no info dir, an rpm binary and no rpm database.
+        let t = FixtureTree::new();
+        t.mkdir("/var/lib/pacman/local");
+        t.write("/var/lib/dpkg/status", b"");
+        t.write_exec("/usr/bin/rpm", b"#!/bin/sh\nexit 1\n");
+        let inv = discover(
+            &t.env(),
+            &FakeRunner::new(),
+            &ListOptions::default(),
+            &Config::default(),
+        );
+        assert!(inv.errors.is_empty(), "{:?}", inv.errors);
+        let st = |k| inv.statuses.iter().find(|s| s.source == k).unwrap();
+        assert!(!st(SourceKind::Dpkg).available);
+        assert!(!st(SourceKind::Rpm).available);
+        assert!(inv.owned.is_complete());
+        assert_eq!(
+            crate::ownership::detect_package_db(&t.env()),
+            Some(crate::ownership::PackageDb::Pacman)
+        );
+    }
+
+    #[test]
     fn inventory_serializes() {
         let t = FixtureTree::new();
         let inv = discover(
@@ -549,7 +591,7 @@ mod tests {
             &Config::default(),
         );
         let v = serde_json::to_value(&inv).unwrap();
-        assert_eq!(v["statuses"][3]["source"], "unmanaged");
+        assert_eq!(v["statuses"][6]["source"], "unmanaged");
         assert!(v["apps"].is_array());
     }
 

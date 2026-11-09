@@ -368,8 +368,8 @@ fn unavailable_category_note() {
     let t = FixtureTree::new();
     let runner = FakeRunner::new();
     let cases = [
-        (Category::PkgCache, "pacman not installed"),
-        (Category::OrphanPkgs, "pacman not installed"),
+        (Category::PkgCache, "pacman, apt-get or dnf not installed"),
+        (Category::OrphanPkgs, "pacman, apt-get or dnf not installed"),
         (Category::Journal, "journalctl not installed"),
         (Category::SystemTemp, "systemd-tmpfiles not installed"),
         (Category::FlatpakUnusedSystem, "flatpak not installed"),
@@ -443,4 +443,113 @@ fn journal_max_fails_closed_and_boundaries() {
         rep.items[0].action,
         priv_action("journalctl", &["--vacuum-size=1T"])
     );
+}
+
+const APT_AUTOREMOVE: &str = include_str!("../../../tests/fixtures/apt/autoremove.txt");
+const DNF5_AUTOREMOVE: &str = include_str!("../../../tests/fixtures/dnf/dnf5-autoremove.txt");
+
+#[test]
+fn apt_pkg_cache_size_from_archives() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/apt-get", b"#!/bin/sh\n");
+    t.write("var/cache/apt/archives/a.deb", &[0u8; 1000]);
+    t.write("var/cache/apt/archives/b.deb", &[0u8; 2000]);
+    t.write("var/cache/apt/archives/partial/c.deb", &[0u8; 4000]);
+    t.write("var/cache/apt/archives/lock", b"");
+    let runner = FakeRunner::new();
+    let rep = scan(&t, &runner, Category::PkgCache);
+    assert!(rep.error.is_none() && rep.unavailable.is_none(), "{rep:?}");
+    assert_eq!(rep.items.len(), 1);
+    assert_eq!(rep.items[0].size, Some(3000));
+    assert_eq!(rep.items[0].action, priv_action("apt-get", &["clean"]));
+    assert!(rep.items[0].preselected);
+
+    // Nothing cached: no item.
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/apt-get", b"#!/bin/sh\n");
+    assert!(scan(&t, &runner, Category::PkgCache).items.is_empty());
+}
+
+#[test]
+fn dnf5_pkg_cache_size() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/dnf", b"#!/bin/sh\n");
+    t.write("var/cache/libdnf5/fedora-1a2b/packages/a.rpm", &[0u8; 500]);
+    t.write("var/cache/libdnf5/updates-3c4d/packages/b.rpm", &[0u8; 700]);
+    t.write(
+        "var/cache/libdnf5/fedora-1a2b/repodata/primary.xml.zst",
+        &[0u8; 9000],
+    );
+    let rep = scan(&t, &FakeRunner::new(), Category::PkgCache);
+    assert_eq!(rep.items.len(), 1, "{rep:?}");
+    assert_eq!(rep.items[0].size, Some(1200));
+    assert_eq!(
+        rep.items[0].action,
+        priv_action("dnf", &["clean", "packages"])
+    );
+}
+
+#[test]
+fn apt_orphans_exact_purge_list() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/apt-get", b"#!/bin/sh\n");
+    t.write(
+        "var/lib/dpkg/status",
+        b"Package: cowsay\nStatus: install ok installed\nInstalled-Size: 100\n\nPackage: netbase\nStatus: install ok installed\nInstalled-Size: 50\n\n",
+    );
+    let runner = FakeRunner::new().on(
+        "apt-get",
+        &["-s", "autoremove", "--purge"],
+        out(0, APT_AUTOREMOVE, ""),
+    );
+    let rep = scan(&t, &runner, Category::OrphanPkgs);
+    assert_eq!(rep.items.len(), 1, "{rep:?}");
+    let i = &rep.items[0];
+    let ItemAction::Privileged { program, args } = &i.action else {
+        panic!("{i:?}");
+    };
+    assert_eq!(program, "dpkg");
+    assert_eq!(args[0], "--purge");
+    assert_eq!(args.len(), 1 + 8);
+    assert!(args.contains(&"netbase".to_string()));
+    assert!(!args.iter().any(|a| a.contains("autoremove")));
+    assert_eq!(i.size, Some(150 * 1024));
+    assert!(!i.preselected);
+
+    // Nothing to remove: no item.
+    let runner = FakeRunner::new().on(
+        "apt-get",
+        &["-s", "autoremove", "--purge"],
+        out(
+            0,
+            "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n",
+            "",
+        ),
+    );
+    assert!(scan(&t, &runner, Category::OrphanPkgs).items.is_empty());
+}
+
+#[test]
+fn dnf_orphans_exact_remove_list() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/dnf", b"#!/bin/sh\n");
+    let runner = FakeRunner::new().on(
+        "dnf",
+        &["autoremove", "--assumeno"],
+        out(1, DNF5_AUTOREMOVE, ""),
+    );
+    let rep = scan(&t, &runner, Category::OrphanPkgs);
+    assert_eq!(rep.items.len(), 1, "{rep:?}");
+    assert_eq!(
+        rep.items[0].action,
+        priv_action("rpm", &["-e", "cowsay", "perl-Text-CharWidth"])
+    );
+    assert!(!rep.items[0].preselected);
+
+    let runner = FakeRunner::new().on(
+        "dnf",
+        &["autoremove", "--assumeno"],
+        out(0, "Nothing to do.\n", ""),
+    );
+    assert!(scan(&t, &runner, Category::OrphanPkgs).items.is_empty());
 }

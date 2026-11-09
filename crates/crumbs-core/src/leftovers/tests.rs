@@ -1148,6 +1148,10 @@ mod system {
 
     #[test]
     fn unreadable_system_leftover_listed_with_unknown_size() {
+        if crate::testing::running_as_root() {
+            eprintln!("skipped: root can read a 0o000 directory");
+            return;
+        }
         struct Restore(PathBuf);
         impl Drop for Restore {
             fn drop(&mut self) {

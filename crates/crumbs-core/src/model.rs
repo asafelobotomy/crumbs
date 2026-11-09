@@ -1,13 +1,16 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SourceKind {
     Pacman,
+    Dpkg,
+    Rpm,
     Flatpak,
+    Snap,
     #[serde(rename = "appimage")]
     AppImage,
     Unmanaged,
@@ -17,7 +20,10 @@ impl SourceKind {
     pub fn as_str(self) -> &'static str {
         match self {
             SourceKind::Pacman => "pacman",
+            SourceKind::Dpkg => "dpkg",
+            SourceKind::Rpm => "rpm",
             SourceKind::Flatpak => "flatpak",
+            SourceKind::Snap => "snap",
             SourceKind::AppImage => "appimage",
             SourceKind::Unmanaged => "unmanaged",
         }
@@ -30,11 +36,14 @@ impl FromStr for SourceKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "pacman" => Ok(SourceKind::Pacman),
+            "dpkg" => Ok(SourceKind::Dpkg),
+            "rpm" => Ok(SourceKind::Rpm),
             "flatpak" => Ok(SourceKind::Flatpak),
+            "snap" => Ok(SourceKind::Snap),
             "appimage" => Ok(SourceKind::AppImage),
             "unmanaged" => Ok(SourceKind::Unmanaged),
             other => Err(format!(
-                "unknown source '{other}' (expected pacman, flatpak, appimage or unmanaged)"
+                "unknown source '{other}' (expected pacman, dpkg, rpm, flatpak, snap, appimage or unmanaged)"
             )),
         }
     }
@@ -139,13 +148,16 @@ mod tests {
     fn source_kind_round_trips_from_str() {
         for kind in [
             SourceKind::Pacman,
+            SourceKind::Dpkg,
+            SourceKind::Rpm,
             SourceKind::Flatpak,
+            SourceKind::Snap,
             SourceKind::AppImage,
             SourceKind::Unmanaged,
         ] {
             assert_eq!(kind.as_str().parse::<SourceKind>(), Ok(kind));
         }
-        assert!("rpm".parse::<SourceKind>().is_err());
+        assert!("zypper".parse::<SourceKind>().is_err());
     }
 
     #[test]

@@ -220,3 +220,17 @@ impl PrivilegedRunner for FakePrivilegedRunner {
         })
     }
 }
+
+/// Whether the tests run as root (as in the distro containers).
+pub fn running_as_root() -> bool {
+    rustix::process::geteuid().is_root()
+}
+
+/// `env` as a normal user, for tests of behaviour that differs when crumbs
+/// runs as root (escalation detection) and does not look at file owners.
+pub fn non_root(mut env: crate::env::Env) -> crate::env::Env {
+    if env.uid == 0 {
+        env.uid = 1000;
+    }
+    env
+}

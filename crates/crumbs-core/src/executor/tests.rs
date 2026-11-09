@@ -438,6 +438,10 @@ fn running_processes_without_proc_is_empty() {
 /// `UserTemp` and refused under the default `Home`.
 #[test]
 fn execute_passes_scope_to_verify() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     let t = FixtureTree::new();
     let a = t.write("tmp/a", b"a");
     age_days(&a, 30);
@@ -670,6 +674,10 @@ fn age_days(p: &Path, days: u64) {
 /// before execution is refused and left intact.
 #[test]
 fn execute_rechecks_temp_staleness() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     let t = FixtureTree::new();
     let f = t.write("tmp/work/old", b"x");
     let dir = env_dir(&t, "tmp/work");
@@ -829,6 +837,10 @@ fn user_command_timeout_is_a_failure() {
 
 #[test]
 fn temp_delete_verified_in_user_temp_scope() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
     use crate::bloat::{BloatItem, Category, ItemAction};
     let t = FixtureTree::new();
     let a = t.write("tmp/a", b"a");
@@ -2255,6 +2267,29 @@ fn system_tree_delete_refused_while_pacman_locked() {
     );
     assert!(calls.is_empty());
     assert!(env.sys("/opt/inky/a").exists());
+}
+
+#[test]
+fn system_tree_delete_refused_while_a_package_manager_runs() {
+    for name in ["dpkg", "apt-get", "dnf5", "rpm", "unattended-upgr"] {
+        let (t, env) = system_tree_fixture();
+        t.write("proc/4242/comm", format!("{name}\n").as_bytes());
+        let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+        let (report, calls) = run_tree(&env, &plan);
+        assert_eq!(
+            report.results[0].error.as_deref(),
+            Some(TREE_PM_RUNNING),
+            "{name}"
+        );
+        assert!(calls.is_empty());
+        assert!(env.sys("/opt/inky/a").exists());
+    }
+    // An unrelated process does not block.
+    let (t, env) = system_tree_fixture();
+    t.write("proc/4242/comm", b"bash\n");
+    let plan = plan_of(vec![tree_delete(&env, "/opt/inky")]);
+    let (report, _) = run_tree(&env, &plan);
+    assert_ne!(report.results[0].error.as_deref(), Some(TREE_PM_RUNNING));
 }
 
 #[test]

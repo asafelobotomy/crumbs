@@ -15,12 +15,17 @@ impl Scanner for PkgCacheScanner {
     }
 
     fn unavailable(&self, cx: &ScanContext) -> Option<String> {
-        resolve_trusted(cx.env, "pacman")
+        super::package_manager(cx.env)
             .is_none()
-            .then(|| not_installed("pacman"))
+            .then(|| not_installed(super::NO_PACKAGE_MANAGER))
     }
 
     fn scan(&self, cx: &ScanContext) -> Result<Vec<BloatItem>, CoreError> {
+        match super::package_manager(cx.env) {
+            Some(super::PackageManager::AptGet) => return Ok(apt(cx)),
+            Some(super::PackageManager::Dnf) => return Ok(dnf(cx)),
+            _ => {}
+        }
         let Some(paccache) = resolve_trusted(cx.env, "paccache") else {
             let mut item = privileged_item(
                 Category::PkgCache,
@@ -67,4 +72,59 @@ impl Scanner for PkgCacheScanner {
         item.rebuildable = true;
         Ok(vec![item])
     }
+}
+
+/// Debian/Ubuntu: the downloaded `.deb` files `apt-get clean` removes.
+fn apt(cx: &ScanContext) -> Vec<BloatItem> {
+    let size = files_size(&cx.env.sys("/var/cache/apt/archives"), false, "deb");
+    cache_item(size, "apt-get", vec!["clean".into()])
+}
+
+/// Fedora: the `.rpm` files `dnf clean packages` removes (dnf5 keeps them
+/// under `/var/cache/libdnf5`, dnf4 under `/var/cache/dnf`).
+fn dnf(cx: &ScanContext) -> Vec<BloatItem> {
+    let dnf5 = cx.env.sys("/var/cache/libdnf5");
+    let dir = if dnf5.is_dir() {
+        dnf5
+    } else {
+        cx.env.sys("/var/cache/dnf")
+    };
+    let size = files_size(&dir, true, "rpm");
+    cache_item(size, "dnf", vec!["clean".into(), "packages".into()])
+}
+
+fn cache_item(size: u64, program: &str, args: Vec<String>) -> Vec<BloatItem> {
+    if size == 0 {
+        return Vec::new();
+    }
+    let mut item = privileged_item(
+        Category::PkgCache,
+        "package cache".into(),
+        Some(size),
+        None,
+        program,
+        args,
+    );
+    item.rebuildable = true;
+    vec![item]
+}
+
+/// Total length of the regular files with extension `ext` in `dir`
+/// (recursively when `deep`); unreadable entries are skipped, so the size
+/// is an estimate.
+fn files_size(dir: &std::path::Path, deep: bool, ext: &str) -> u64 {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0;
+    for entry in rd.flatten() {
+        let Ok(m) = entry.metadata() else { continue };
+        let path = entry.path();
+        if m.is_dir() && deep {
+            total += files_size(&path, deep, ext);
+        } else if m.is_file() && path.extension().is_some_and(|e| e == ext) {
+            total += m.len();
+        }
+    }
+    total
 }

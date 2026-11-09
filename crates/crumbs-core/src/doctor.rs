@@ -68,7 +68,11 @@ mod tests {
         t.mkdir("/home/user/.local/share/Trash");
         t.write_exec("/usr/bin/sudo", b"");
         let r = crate::privilege::allow_detection_in_test(|| {
-            doctor(&t.env(), &FakeRunner::new(), &Config::default())
+            doctor(
+                &crate::testing::non_root(t.env()),
+                &FakeRunner::new(),
+                &Config::default(),
+            )
         });
         assert_eq!(r.crumbs_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(r.distro.id, "manjaro");

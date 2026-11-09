@@ -83,7 +83,7 @@ mod tests {
             r.content[0].as_text().unwrap().text,
             "unknown category 'bogus'"
         );
-        let r = c.call("apps_list", json!({ "source": ["snap"] })).await;
+        let r = c.call("apps_list", json!({ "source": ["zypper"] })).await;
         assert_eq!(r.is_error, Some(true), "{r:?}");
         let r = c.call("app_show", json!({ "app": "nope" })).await;
         assert_eq!(r.is_error, Some(true), "{r:?}");

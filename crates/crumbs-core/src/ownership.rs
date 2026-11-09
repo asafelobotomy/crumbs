@@ -69,6 +69,89 @@ impl OwnedIndex {
     }
 }
 
+/// The package database ownership is read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageDb {
+    Pacman,
+    Dpkg,
+    Rpm,
+}
+
+/// A dpkg database with content: a non-empty status file and an info
+/// directory. An empty one (dpkg installed as a tool on another distro) is
+/// not a package database.
+pub fn dpkg_present(env: &Env) -> bool {
+    let status = env.sys(crate::sources::dpkg::STATUS);
+    fs::metadata(&status).is_ok_and(|m| m.is_file() && m.len() > 0)
+        && env.sys(crate::sources::dpkg::INFO_DIR).is_dir()
+}
+
+/// An rpm database: the `rpm` tool and a non-empty rpmdb directory
+/// (`/usr/lib/sysimage/rpm` on current Fedora, `/var/lib/rpm` before).
+pub fn rpm_present(env: &Env) -> bool {
+    let has_entries = |p: &str| fs::read_dir(env.sys(p)).is_ok_and(|mut rd| rd.next().is_some());
+    crate::command::resolve_trusted(env, "rpm").is_some()
+        && (has_entries("/usr/lib/sysimage/rpm") || has_entries("/var/lib/rpm"))
+}
+
+/// The first package database present, in the order pacman, dpkg, rpm.
+pub fn detect_package_db(env: &Env) -> Option<PackageDb> {
+    if env.sys(DB_DIR).is_dir() {
+        Some(PackageDb::Pacman)
+    } else if dpkg_present(env) {
+        Some(PackageDb::Dpkg)
+    } else if rpm_present(env) {
+        Some(PackageDb::Rpm)
+    } else {
+        None
+    }
+}
+
+/// The owned index from every package database present (pacman, dpkg and
+/// rpm together, as the inventory combines them); `None` when there is
+/// none. Any present database that cannot be read completely is an error:
+/// see [`load_pacman`].
+pub fn load_package_db(
+    env: &Env,
+    runner: &dyn crate::command::CommandRunner,
+) -> Result<Option<OwnedIndex>, CoreError> {
+    let parts = [load_pacman(env)?, load_dpkg(env)?, load_rpm(env, runner)?];
+    let mut found = false;
+    let mut all = Vec::new();
+    let mut dirs = Vec::new();
+    for idx in parts.into_iter().flatten() {
+        found = true;
+        all.extend(idx.all);
+        dirs.extend(idx.dirs);
+    }
+    Ok(found.then(|| OwnedIndex::new(all, dirs, true)))
+}
+
+/// Every path the dpkg database lists, as a complete index; `None` when
+/// there is no dpkg database. Any unreadable list is an error.
+pub fn load_dpkg(env: &Env) -> Result<Option<OwnedIndex>, CoreError> {
+    if !dpkg_present(env) {
+        return Ok(None);
+    }
+    let files = crate::sources::dpkg::owned_paths(env)?;
+    Ok(Some(OwnedIndex::new(files, Vec::<PathBuf>::new(), true)))
+}
+
+/// Every path the rpm database lists, from one `rpm -qa` query; `None`
+/// when `rpm` is not installed. A failed or undecodable query is an error.
+pub fn load_rpm(
+    env: &Env,
+    runner: &dyn crate::command::CommandRunner,
+) -> Result<Option<OwnedIndex>, CoreError> {
+    if !rpm_present(env) {
+        return Ok(None);
+    }
+    let files = crate::sources::rpm::query(env, runner)?
+        .into_iter()
+        .flat_map(|p| p.files);
+    Ok(Some(OwnedIndex::new(files, Vec::<PathBuf>::new(), true)))
+}
+
 /// Reads every package's file list from the pacman database. `None` when the
 /// database is missing. Any unreadable entry is an error: a partial index
 /// would report owned paths as unowned.
@@ -416,6 +499,67 @@ mod tests {
             d.add_line(l);
         }
         d
+    }
+
+    #[test]
+    fn detect_prefers_pacman_then_dpkg_then_rpm() {
+        let t = FixtureTree::new();
+        assert_eq!(detect_package_db(&t.env()), None);
+        t.write_exec("/usr/bin/rpm", b"#!/bin/sh\n");
+        assert_eq!(detect_package_db(&t.env()), None);
+        t.write("/usr/lib/sysimage/rpm/rpmdb.sqlite", b"x");
+        assert_eq!(detect_package_db(&t.env()), Some(PackageDb::Rpm));
+        t.write("/var/lib/dpkg/status", b"");
+        assert_eq!(detect_package_db(&t.env()), Some(PackageDb::Rpm));
+        t.write("/var/lib/dpkg/status", b"Package: x\n");
+        t.mkdir("/var/lib/dpkg/info");
+        assert_eq!(detect_package_db(&t.env()), Some(PackageDb::Dpkg));
+        t.write("/var/lib/pacman/local/ALPM_DB_VERSION", b"9\n");
+        assert_eq!(detect_package_db(&t.env()), Some(PackageDb::Pacman));
+    }
+
+    #[test]
+    fn load_package_db_combines_every_present_database() {
+        let t = FixtureTree::new();
+        t.write(
+            "/var/lib/pacman/local/foo-1-1/files",
+            b"%FILES%\nopt/foo/\nopt/foo/bin\n\n",
+        );
+        t.write(
+            "/var/lib/dpkg/status",
+            b"Package: bar\nStatus: install ok installed\n\n",
+        );
+        t.write(
+            "/var/lib/dpkg/info/bar.list",
+            b"/.\n/opt/bar\n/opt/bar/run\n",
+        );
+        let runner = crate::testing::FakeRunner::new();
+        let idx = load_package_db(&t.env(), &runner).unwrap().unwrap();
+        assert!(idx.owns_at_or_below(Path::new("/opt/foo")));
+        assert!(idx.owns_at_or_below(Path::new("/opt/bar")));
+        // An unreadable present database fails the whole index.
+        std::fs::remove_dir_all(t.env().sys("/var/lib/dpkg/info")).unwrap();
+        std::fs::create_dir(t.env().sys("/var/lib/dpkg/info")).unwrap();
+        t.write("/var/lib/dpkg/info/broken.list", b"");
+        std::fs::remove_file(t.env().sys("/var/lib/dpkg/info/broken.list")).unwrap();
+        std::fs::create_dir(t.env().sys("/var/lib/dpkg/info/broken.list")).unwrap();
+        assert!(load_package_db(&t.env(), &runner).is_err());
+    }
+
+    #[test]
+    fn load_package_db_dispatches_to_pacman() {
+        let t = FixtureTree::new();
+        t.write(
+            "/var/lib/pacman/local/foo-1-1/files",
+            b"%FILES%\nopt/foo/\nopt/foo/bin\n\n",
+        );
+        let runner = crate::testing::FakeRunner::new();
+        let idx = load_package_db(&t.env(), &runner).unwrap().unwrap();
+        assert!(idx.owns_at_or_below(Path::new("/opt/foo")));
+        assert_eq!(
+            load_package_db(&FixtureTree::new().env(), &runner).unwrap(),
+            None
+        );
     }
 
     fn covers(d: &TmpfilesDeclared, p: &str) -> bool {

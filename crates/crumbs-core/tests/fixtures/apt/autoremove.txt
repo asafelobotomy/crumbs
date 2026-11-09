@@ -1,0 +1,15 @@
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following packages will be REMOVED:
+  cowsay* libgdbm-compat4t64* libgdbm6t64* libperl5.40*
+  libtext-charwidth-perl* netbase* perl* perl-modules-5.40*
+0 upgraded, 0 newly installed, 8 to remove and 5 not upgraded.
+Purg cowsay [3.03+dfsg2-8]
+Purg perl [5.40.1-6+deb13u1]
+Purg libperl5.40 [5.40.1-6+deb13u1]
+Purg libgdbm-compat4t64 [1.24-2]
+Purg libgdbm6t64 [1.24-2]
+Purg libtext-charwidth-perl [0.04-11+b4]
+Purg netbase [6.5]
+Purg perl-modules-5.40 [5.40.1-6+deb13u1]

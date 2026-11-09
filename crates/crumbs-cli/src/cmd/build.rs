@@ -573,6 +573,31 @@ mod tests {
     }
 
     #[test]
+    fn execute_confirmed_refuses_root_with_another_users_home() {
+        use crate::cmd::act::{AllowedRunning, Privilege, execute_confirmed};
+        let t = inky();
+        let mut env = t.env();
+        let built = uninstall(&env, &leftovers_only("inky"), None).unwrap();
+        // Root (as under `sudo -E`) with a HOME owned by the test user.
+        env.uid = 0;
+        let cfg = Config::default();
+        let privilege = Privilege::for_run(&env, false);
+        let ran = execute_confirmed(&env, &cfg, &built.targets, privilege, AllowedRunning::Any);
+        if crumbs_core::testing::running_as_root() {
+            // The fixture home is root's own here: nothing to refuse.
+            return;
+        }
+        assert_eq!(ran.exit_code, 2);
+        assert!(ran.reports.is_empty());
+        let msg = ran.refusal.unwrap();
+        assert!(
+            msg.contains("as root") && msg.contains("/home/user"),
+            "{msg}"
+        );
+        assert!(env.sys("/home/user/.cache/inky").exists());
+    }
+
+    #[test]
     fn execute_confirmed_runs_with_any_running_app_allowed() {
         use crate::cmd::act::{AllowedRunning, Privilege, execute_confirmed};
         let t = inky();

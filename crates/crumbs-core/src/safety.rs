@@ -101,6 +101,25 @@ pub const ETC_NEVER: &[&str] = &[
     "crypttab.initramfs",
     "machine-info",
     "resolv.conf",
+    "nsswitch.conf",
+    "shells",
+    "motd",
+    "opt",
+    "securetty",
+    "dconf",
+    "issue",
+    "issue.net",
+    "timezone",
+    "login.defs",
+    "apt",
+    "dpkg",
+    "dnf",
+    "yum.repos.d",
+    "rpm",
+    "sysconfig",
+    "alternatives",
+    "selinux",
+    "sudo.conf",
 ];
 
 /// Whether `name` may be a [`Scope::SystemTree`] target: not in
@@ -960,6 +979,10 @@ mod tests {
 
     #[test]
     fn user_temp_scope_rules() {
+        if crate::testing::running_as_root() {
+            eprintln!("skipped: temp cleanup is not offered as root");
+            return;
+        }
         let (t, env, cfg) = setup();
         t.write("tmp/x", b"x");
         t.write("tmp/d/y", b"y");
@@ -1385,6 +1408,29 @@ mod tests {
             "crypttab.initramfs",
             "machine-info",
             "resolv.conf",
+        ] {
+            assert!(!is_system_leftover_name(OsStr::new(n)), "{n}");
+        }
+        // Unowned on stock Debian/Ubuntu and Fedora.
+        for n in [
+            "nsswitch.conf",
+            "shells",
+            "motd",
+            "opt",
+            "securetty",
+            "dconf",
+            "issue",
+            "timezone",
+            "login.defs",
+            "apt",
+            "dpkg",
+            "dnf",
+            "yum.repos.d",
+            "rpm",
+            "sysconfig",
+            "alternatives",
+            "selinux",
+            "sudo.conf",
         ] {
             assert!(!is_system_leftover_name(OsStr::new(n)), "{n}");
         }

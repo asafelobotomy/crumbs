@@ -1,8 +1,11 @@
 //! Decides how an app itself is removed, before anything is touched. The
 //! checks here run as the user and change nothing.
 
+pub(crate) mod apt;
+pub(crate) mod dnf;
 mod flatpak;
 mod pacman;
+mod snap;
 mod unmanaged;
 
 use crate::command::CommandRunner;
@@ -85,7 +88,10 @@ pub fn plan_removal(
 ) -> Result<RemovalPlan, RemovalError> {
     match app.source {
         SourceKind::Pacman => pacman::plan(env, runner, app),
+        SourceKind::Rpm => dnf::plan(env, runner, app),
+        SourceKind::Dpkg => apt::plan(env, runner, app),
         SourceKind::Flatpak => flatpak::plan(app),
+        SourceKind::Snap => snap::plan(app),
         SourceKind::AppImage => Ok(RemovalPlan::default()),
         SourceKind::Unmanaged => Err(RemovalError::Unsupported(MSG_UNMANAGED.into())),
     }
@@ -104,7 +110,10 @@ pub fn still_installed(
 ) -> Result<Vec<String>, String> {
     match source {
         SourceKind::Pacman => pacman_still_installed(env, names),
+        SourceKind::Dpkg => apt::dpkg_still_installed(env, names),
+        SourceKind::Rpm => dnf::rpm_still_installed(env, runner, names),
         SourceKind::Flatpak => flatpak_still_installed(env, runner, names),
+        SourceKind::Snap => snap::snap_still_installed(env, runner, names),
         SourceKind::AppImage | SourceKind::Unmanaged => Ok(Vec::new()),
     }
 }

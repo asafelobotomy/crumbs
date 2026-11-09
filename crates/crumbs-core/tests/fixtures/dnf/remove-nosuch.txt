@@ -1,0 +1,3 @@
+No packages to remove for argument: nosuchpkg
+
+Nothing to do.

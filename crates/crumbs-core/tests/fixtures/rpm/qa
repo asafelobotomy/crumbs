@@ -1,0 +1,20 @@
+@@	coreutils	0:9.10-5.fc44.x86_64	5931185
+/usr/bin/[
+/usr/bin/arch
+/usr/bin/b2sum
+/usr/bin/base32
+/usr/bin/base64
+/usr/bin/basename
+@@	shadow-utils	2:4.19.0-7.fc44.x86_64	4159800
+/etc/default/useradd
+/etc/login.defs
+/etc/pam.d/passwd
+/usr/bin/adduser
+/usr/bin/chage
+/usr/bin/chgpasswd
+@@	gpg-pubkey	0:36f612dcf27f7d1a48a835e4dbfcf71c6d9f90a6-6786af3b.(none)	0
+@@	firefox	0:145.0-1.fc44.x86_64	280000000
+/usr/bin/firefox
+/usr/lib64/firefox
+/usr/lib64/firefox/firefox
+/usr/share/applications/firefox.desktop

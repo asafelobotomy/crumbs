@@ -523,6 +523,9 @@ pub fn apply(
         AllowedRunning::Only(confirmed)
     };
     let outcome = execute_confirmed(env, cfg, targets, privilege, allowed);
+    if let Some(msg) = &outcome.refusal {
+        return out.fail(2, msg);
+    }
     if let Some(msg) = outcome.running.first()
         && outcome.reports.is_empty()
     {
@@ -591,6 +594,18 @@ pub struct ExecOutcome {
     /// `<name> is running (pid …)`: with exit 1 for each running app that
     /// was not allowed, otherwise for each target app found running.
     pub running: Vec<String>,
+    /// With exit 2: why nothing ran (root acting on another user's home).
+    pub refusal: Option<String>,
+}
+
+/// Why crumbs refuses to act as root here, if it does.
+pub fn root_refusal(env: &Env) -> Option<String> {
+    env.foreign_home_as_root().map(|home| {
+        format!(
+            "refusing to act as root on another user's home ({}); run crumbs as that user, or as root with root's own HOME",
+            home.display()
+        )
+    })
 }
 
 /// Which target apps may be running while [`execute_confirmed`] runs.
@@ -633,7 +648,14 @@ pub fn execute_confirmed(
         exit_code,
         manual_commands,
         running,
+        refusal: None,
     };
+    if let Some(msg) = root_refusal(env) {
+        return ExecOutcome {
+            refusal: Some(msg),
+            ..refused(2, Vec::new(), Vec::new())
+        };
+    }
     let needs_rights = plans.iter().flat_map(|p| &p.actions).any(is_privileged);
     if needs_rights && privilege.esc.is_none() {
         let manual = manual_commands(env, plans.iter().flat_map(|p| &p.actions));
@@ -670,6 +692,7 @@ pub fn execute_confirmed(
         exit_code,
         manual_commands,
         running,
+        refusal: None,
     }
 }
 

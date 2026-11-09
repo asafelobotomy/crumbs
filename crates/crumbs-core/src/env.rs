@@ -95,6 +95,15 @@ fn load_distro(root: &Path) -> Distro {
         .unwrap_or_else(|_| Distro::unknown())
 }
 
+/// The owner of `home`, or of its nearest existing ancestor when it does
+/// not exist yet (a home that does not exist belongs to no one else).
+pub(crate) fn home_owner(home: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    home.ancestors()
+        .find_map(|p| fs::symlink_metadata(p).ok())
+        .map(|m| m.uid())
+}
+
 impl Env {
     pub fn from_system() -> Result<Env, CoreError> {
         let root = PathBuf::from("/");
@@ -169,6 +178,17 @@ impl Env {
 
     /// Test hook: sets [`Env::clock_shift`].
     #[cfg(any(test, feature = "test-support", debug_assertions))]
+    /// When crumbs runs as root with a home directory that root does not
+    /// own (`sudo -E`, `su -m`): that home, in-system. Acting there as root
+    /// would leave root-owned history, trash entries and edits in another
+    /// user's home, so callers refuse.
+    pub fn foreign_home_as_root(&self) -> Option<PathBuf> {
+        if self.uid != 0 {
+            return None;
+        }
+        (home_owner(&self.home) != Some(0)).then(|| self.unsys(&self.home))
+    }
+
     pub fn set_clock_shift(&mut self, shift: Duration) {
         self.clock_shift = shift;
     }
@@ -250,6 +270,20 @@ pub fn display_path(env: &Env, in_system: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn home_owner_falls_back_to_the_nearest_existing_ancestor() {
+        use std::os::unix::fs::MetadataExt;
+        let t = crate::testing::FixtureTree::new();
+        let mut env = t.env();
+        env.home = t.env().sys("/home/nobody-yet/sub");
+        let parent_uid = std::fs::metadata(t.env().sys("/")).unwrap().uid();
+        assert_eq!(home_owner(&env.home), Some(parent_uid));
+        env.uid = 0;
+        // The nearest existing directory is the test user's (or root's, in
+        // a container): foreign exactly when that owner is not root.
+        assert_eq!(env.foreign_home_as_root().is_some(), parent_uid != 0);
+    }
     use super::*;
     use crate::testing::FixtureTree;
 
