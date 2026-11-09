@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::{Subcommand, ValueEnum};
 use crumbs_core::command::SystemRunner;
-use crumbs_core::inventory::{Resolved, discover, find_app};
+use crumbs_core::inventory::{Inventory, Resolved, discover, find_app};
 use crumbs_core::leftovers::{Finding, find_leftovers, find_system_leftovers};
 use crumbs_core::safety::Scope;
 use crumbs_core::sources::ListOptions;
@@ -70,13 +70,33 @@ pub fn run(cmd: AppsCmd, env: &Env) -> anyhow::Result<ExitCode> {
     }
 }
 
-fn list(
+/// The apps `apps list` shows, with the config warnings.
+pub(crate) struct Listed {
+    pub inv: Inventory,
+    pub notes: Vec<ErrorEntry>,
+}
+
+impl Listed {
+    pub fn json_data(&self) -> serde_json::Value {
+        json!({ "apps": self.inv.apps, "statuses": self.inv.statuses })
+    }
+
+    /// Failed sources, then notes.
+    pub fn json_errors(&self) -> Vec<ErrorEntry> {
+        let mut errors: Vec<ErrorEntry> = self.inv.errors.iter().map(ErrorEntry::from).collect();
+        errors.extend(self.notes.iter().cloned());
+        errors
+    }
+}
+
+/// The installed apps, of `sources` only when any are given, in `sort`
+/// order.
+pub(crate) fn gather_list(
     env: &Env,
     sources: &[SourceKind],
     all: bool,
     sort: Sort,
-    json: bool,
-) -> anyhow::Result<ExitCode> {
+) -> anyhow::Result<Listed> {
     let (cfg, notes) = load_cfg(env)?;
     let mut inv = discover(
         env,
@@ -94,16 +114,22 @@ fn list(
         inv.apps
             .sort_by_key(|a| (a.install_size.is_none(), Reverse(a.install_size)));
     }
+    Ok(Listed { inv, notes })
+}
+
+fn list(
+    env: &Env,
+    sources: &[SourceKind],
+    all: bool,
+    sort: Sort,
+    json: bool,
+) -> anyhow::Result<ExitCode> {
+    let listed = gather_list(env, sources, all, sort)?;
+    let inv = &listed.inv;
     let code = source_exit_code(&inv.statuses, &inv.errors);
 
     if json {
-        let mut errors: Vec<ErrorEntry> = inv.errors.iter().map(ErrorEntry::from).collect();
-        errors.extend(notes);
-        print_json_entries(
-            "apps list",
-            &json!({ "apps": inv.apps, "statuses": inv.statuses }),
-            &errors,
-        )?;
+        print_json_entries("apps list", &listed.json_data(), &listed.json_errors())?;
     } else {
         let rows: Vec<Vec<String>> = inv
             .apps
@@ -126,34 +152,66 @@ fn list(
             writeln!(err, "warning: {}: {}", e.source.as_str(), e.message)?;
         }
         drop(err);
-        print_notes(&notes)?;
+        print_notes(&listed.notes)?;
     }
     Ok(ExitCode::from(code))
 }
 
-fn show(env: &Env, query: &str, show_low: bool, json: bool) -> anyhow::Result<ExitCode> {
+/// What `apps show` found for a query.
+pub(crate) enum Shown {
+    /// The app, and its leftovers (system ones too, as `uninstall` offers
+    /// them).
+    Found {
+        app: Box<App>,
+        leftovers: Vec<Finding>,
+    },
+    NotFound,
+    Ambiguous(Vec<App>),
+}
+
+/// The app `query` names and its leftovers, with the context they came
+/// from.
+pub(crate) fn gather_show(
+    env: &Env,
+    query: &str,
+    show_low: bool,
+) -> anyhow::Result<(Context, Shown)> {
     let cx = Context::load(env)?;
-    let inv = &cx.inv;
-    let mut errors: Vec<ErrorEntry> = inv.errors.iter().map(ErrorEntry::from).collect();
-    errors.extend(cx.notes.iter().cloned());
-    let mut err = anstream::stderr().lock();
-    match find_app(inv, query) {
+    let shown = match find_app(&cx.inv, query) {
         Resolved::Found(app) => {
-            // System leftovers too, as `uninstall` offers them.
             let mut leftovers = find_leftovers(&cx.idx, app, show_low);
             leftovers.extend(find_system_leftovers(env, &cx.cfg, &cx.idx, app, show_low));
+            Shown::Found {
+                app: Box::new(app.clone()),
+                leftovers,
+            }
+        }
+        Resolved::NotFound => Shown::NotFound,
+        Resolved::Ambiguous(candidates) => {
+            Shown::Ambiguous(candidates.into_iter().cloned().collect())
+        }
+    };
+    Ok((cx, shown))
+}
+
+fn show(env: &Env, query: &str, show_low: bool, json: bool) -> anyhow::Result<ExitCode> {
+    let (cx, shown) = gather_show(env, query, show_low)?;
+    let errors = cx.errors();
+    let mut err = anstream::stderr().lock();
+    match shown {
+        Shown::Found { app, leftovers } => {
             if json {
                 let data = json!({ "app": app, "leftovers": leftovers });
                 print_json_entries("apps show", &data, &errors)?;
             } else {
-                print_app(env, app)?;
+                print_app(env, &app)?;
                 print_leftovers(env, &leftovers)?;
                 drop(err);
                 print_notes(&cx.notes)?;
             }
-            Ok(ExitCode::from(if partial_failure(inv) { 3 } else { 0 }))
+            Ok(ExitCode::from(if partial_failure(&cx.inv) { 3 } else { 0 }))
         }
-        Resolved::NotFound => {
+        Shown::NotFound => {
             writeln!(err, "error: no installed app matches '{query}'")?;
             if json {
                 let data = json!({ "app": null, "query": query, "candidates": [] });
@@ -161,7 +219,7 @@ fn show(env: &Env, query: &str, show_low: bool, json: bool) -> anyhow::Result<Ex
             }
             Ok(ExitCode::from(2))
         }
-        Resolved::Ambiguous(candidates) => {
+        Shown::Ambiguous(candidates) => {
             writeln!(err, "error: '{query}' matches several apps:")?;
             if json {
                 let data = json!({ "app": null, "query": query, "candidates": candidates });

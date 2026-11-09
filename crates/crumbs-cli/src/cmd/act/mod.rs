@@ -18,7 +18,8 @@ use crumbs_core::safety::Scope;
 use crumbs_core::{App, Env, SourceKind};
 use serde_json::json;
 
-use super::context::print_notes;
+use super::build::{Refusal, Stop};
+use super::context::{notes_text, print_notes};
 use super::manual::{is_privileged, manual_commands};
 use super::render;
 use crate::output::{ErrorEntry, finding_kind, print_json_entries};
@@ -29,7 +30,7 @@ mod signals;
 #[cfg(debug_assertions)]
 mod test_runner;
 
-use privilege::Privilege;
+pub(crate) use privilege::Privilege;
 pub use privilege::usable;
 
 /// Flags shared by the commands that change files.
@@ -181,26 +182,11 @@ pub fn precheck(out: Out, act: &ActFlags) -> anyhow::Result<Option<ExitCode>> {
 }
 
 /// Exit 1 when some source failed, unless `--force` or `--dry-run` (a
-/// preview only warns).
-pub fn refuse_source_errors(
-    out: Out,
-    inv: &Inventory,
-    act: &ActFlags,
-) -> anyhow::Result<Option<ExitCode>> {
-    let failures: Vec<ErrorEntry> = inv.errors.iter().map(ErrorEntry::from).collect();
-    refuse_failed(out, &failures, act)
-}
-
-/// [`refuse_source_errors`] for any failures, one entry per failed source:
-/// their messages are shown (and under `--json` included) before the
-/// refusal.
-pub fn refuse_failed(
-    out: Out,
-    failures: &[ErrorEntry],
-    act: &ActFlags,
-) -> anyhow::Result<Option<ExitCode>> {
+/// preview only warns). `failures` has one entry per failed source: the
+/// refusal shows their messages (and under `--json` includes them) first.
+pub fn refuse_failed(failures: &[ErrorEntry], act: &ActFlags) -> Result<(), Stop> {
     if failures.is_empty() || act.force || act.dry_run {
-        return Ok(None);
+        return Ok(());
     }
     let mut failed: Vec<&str> = failures.iter().map(|e| e.source.as_str()).collect();
     failed.sort_unstable();
@@ -209,7 +195,31 @@ pub fn refuse_failed(
         "refusing: some sources failed ({}); re-run with --force to continue",
         failed.join(", ")
     );
-    out.fail_after(1, &msg, &[], failures).map(Some)
+    Err(Stop::Refused {
+        refusal: Refusal::new(1, msg),
+        causes: failures.to_vec(),
+    })
+}
+
+/// [`refuse_failed`] for the inventory's failed sources.
+pub fn refuse_source_errors(inv: &Inventory, act: &ActFlags) -> Result<(), Stop> {
+    let failures: Vec<ErrorEntry> = inv.errors.iter().map(ErrorEntry::from).collect();
+    refuse_failed(&failures, act)
+}
+
+/// Reports why a build stopped: a refusal (after its causes), a cancelled
+/// checklist, or an error for `main`.
+pub fn stop(out: Out, stop: Stop) -> anyhow::Result<ExitCode> {
+    match stop {
+        Stop::Refused { refusal, causes } => out.fail_after(
+            refusal.exit_code,
+            &refusal.message,
+            &refusal.details,
+            &causes,
+        ),
+        Stop::Aborted => out.aborted(),
+        Stop::Failed(e) => Err(e),
+    }
 }
 
 /// Findings a plan may ever contain: a shared `mimeapps.list` edit is
@@ -277,10 +287,10 @@ fn checklist_item(env: &Env, f: &Finding) -> String {
     )
 }
 
-pub struct Target<'a> {
+pub struct Target {
     pub heading: String,
-    /// `None` for orphans.
-    pub app: Option<&'a App>,
+    /// `None` for orphans and `clean`.
+    pub app: Option<App>,
     pub plan: Plan,
 }
 
@@ -353,25 +363,73 @@ pub fn drop_overlaps(targets: &mut [Target]) {
     }
 }
 
-/// The human preview: every plan, the `after_preview` notes, then the
-/// warnings in `errors`. Prints only; never prompts.
-pub fn print_preview(
+fn headed(targets: &[Target]) -> Vec<(String, &Plan)> {
+    targets
+        .iter()
+        .map(|t| (t.heading.clone(), &t.plan))
+        .collect()
+}
+
+/// The `note:` lines for `after_preview`, sanitised.
+fn after_text(after_preview: &[String]) -> String {
+    after_preview
+        .iter()
+        .map(|note| format!("note: {}\n", render::sanitise(note)))
+        .collect()
+}
+
+/// The human preview without colour: every plan, the `after_preview`
+/// notes, then the warnings in `errors`, as the CLI shows them (it prints
+/// the warnings on stderr).
+#[allow(dead_code, reason = "the mcp module (M4c) calls it")]
+pub fn preview_text(
+    env: &Env,
+    targets: &[Target],
+    after_preview: &[String],
+    errors: &[ErrorEntry],
+) -> String {
+    let mut text = String::new();
+    // Writing to a String cannot fail.
+    let _ = render::preview_to(&mut text, env, &headed(targets), false);
+    text.push_str(&after_text(after_preview));
+    text.push_str(&notes_text(errors));
+    text
+}
+
+/// Prints the human preview: the plans and notes on stdout, the warnings
+/// on stderr. Never prompts.
+fn print_preview(
     env: &Env,
     targets: &[Target],
     after_preview: &[String],
     errors: &[ErrorEntry],
 ) -> anyhow::Result<()> {
-    let headed: Vec<(String, &Plan)> = targets
-        .iter()
-        .map(|t| (t.heading.clone(), &t.plan))
-        .collect();
-    render::preview(env, &headed)?;
-    let mut out = anstream::stdout().lock();
-    for note in after_preview {
-        writeln!(out, "note: {}", render::sanitise(note))?;
-    }
-    drop(out);
+    render::preview(env, &headed(targets))?;
+    anstream::stdout()
+        .lock()
+        .write_all(after_text(after_preview).as_bytes())?;
     Ok(print_notes(errors)?)
+}
+
+/// Each target app that is running, with `<name> is running (pid …)`.
+fn running_apps<'t>(env: &Env, targets: &'t [Target]) -> Vec<(&'t App, String)> {
+    targets
+        .iter()
+        .filter_map(|t| t.app.as_ref())
+        .filter_map(|app| {
+            let pids = running_processes(env, app);
+            if pids.is_empty() {
+                return None;
+            }
+            let list: Vec<String> = pids.iter().map(u32::to_string).collect();
+            let msg = format!(
+                "{} is running (pid {})",
+                render::sanitise(&app.display_name),
+                list.join(", ")
+            );
+            Some((app, msg))
+        })
+        .collect()
 }
 
 /// Steps 4 to 7: preview, running-app check, confirmation, execution and
@@ -422,23 +480,15 @@ pub fn apply(
     }
 
     let interactive = prompt::is_interactive();
-    for app in targets.iter().filter_map(|t| t.app) {
-        let pids = running_processes(env, app);
-        if pids.is_empty() {
-            continue;
-        }
-        let list: Vec<String> = pids.iter().map(u32::to_string).collect();
-        let msg = format!(
-            "{} is running (pid {})",
-            render::sanitise(&app.display_name),
-            list.join(", ")
-        );
+    // The user said to continue although an app is running.
+    let mut confirmed = false;
+    for (app, msg) in running_apps(env, targets) {
         writeln!(anstream::stderr().lock(), "{msg}")?;
         if act.force {
             continue;
         }
         if !interactive {
-            return out.fail(1, &format!("{msg}; close it first or re-run with --force"));
+            return out.fail(1, &running_refusal(&msg));
         }
         if !prompt::confirm(&format!(
             "{} is running; continue anyway?",
@@ -446,6 +496,7 @@ pub fn apply(
         ))? {
             return out.aborted();
         }
+        confirmed = true;
     }
     if !act.yes {
         if !interactive {
@@ -456,12 +507,15 @@ pub fn apply(
         }
     }
 
-    before_execute_hook(env);
-    let reports = run_plans(env, cfg, &plans, &privilege);
-    let all_ok = reports
-        .iter()
-        .flatten()
-        .all(|r| r.results.iter().all(|x| x.ok));
+    let outcome = execute_confirmed(env, cfg, targets, privilege, act.force || confirmed);
+    if let Some(msg) = outcome.running.first()
+        && outcome.reports.is_empty()
+    {
+        // The app started after the check above: nothing ran.
+        writeln!(anstream::stderr().lock(), "{msg}")?;
+        return out.fail(1, &running_refusal(msg));
+    }
+    let reports = &outcome.reports;
     let not_granted = reports.iter().flatten().any(|r| r.escalation_failed);
     // The root shell ran and was stopped part-way: some privileged steps
     // ran, so this is not "nothing changed"; the results say which.
@@ -469,35 +523,114 @@ pub fn apply(
     if act.json {
         let data = json!({ "plans": plans, "report": reports });
         if not_granted {
-            let manual = failed_privileged(env, &plans, &reports);
-            return out.no_rights(NOT_GRANTED, &manual, data, errors);
+            return out.no_rights(NOT_GRANTED, &outcome.manual_commands, data, errors);
         }
         if stopped {
             let mut all = errors.to_vec();
             all.push(ErrorEntry::new("cli", BATCH_STOPPED.to_string()));
             writeln!(anstream::stderr().lock(), "error: {BATCH_STOPPED}")?;
             print_json_entries(out.command, &data, &all)?;
-            return Ok(ExitCode::from(3));
+            return Ok(ExitCode::from(outcome.exit_code));
         }
         print_json_entries(out.command, &data, errors)?;
     } else {
         writeln!(anstream::stdout().lock())?;
         let runs: Vec<(&Plan, &ExecReport)> = plans
             .iter()
-            .zip(&reports)
+            .zip(reports)
             .filter_map(|(p, r)| r.as_ref().map(|r| (*p, r)))
             .collect();
         render::report(env, &runs)?;
         if not_granted {
-            let manual = failed_privileged(env, &plans, &reports);
-            return out.no_rights(NOT_GRANTED, &manual, serde_json::Value::Null, errors);
+            return out.no_rights(
+                NOT_GRANTED,
+                &outcome.manual_commands,
+                serde_json::Value::Null,
+                errors,
+            );
         }
         if stopped {
             writeln!(anstream::stderr().lock(), "error: {BATCH_STOPPED}")?;
-            return Ok(ExitCode::from(3));
+            return Ok(ExitCode::from(outcome.exit_code));
         }
     }
-    Ok(ExitCode::from(if all_ok { 0 } else { 3 }))
+    Ok(ExitCode::from(outcome.exit_code))
+}
+
+/// The refusal for an app that is running, from its `is running` line.
+fn running_refusal(msg: &str) -> String {
+    format!("{msg}; close it first or re-run with --force")
+}
+
+/// What [`execute_confirmed`] did.
+pub struct ExecOutcome {
+    /// One per target, in order: `None` for a plan with nothing to do.
+    /// Empty when nothing ran.
+    pub reports: Vec<Option<ExecReport>>,
+    /// 0 when every action succeeded; 1 when an app is running (nothing
+    /// ran); 3 when some action failed or the privileged run stopped part
+    /// way; 5 when administrator rights were missing or not granted.
+    pub exit_code: u8,
+    /// With exit 5: the commands to run by hand for what needed the rights.
+    pub manual_commands: Vec<String>,
+    /// `<name> is running (pid …)` for each target app found running.
+    pub running: Vec<String>,
+}
+
+/// Runs `targets` once the user has confirmed them; never prompts. Nothing
+/// runs when a privileged action has no way to get the rights, or when a
+/// target app is running and not `force`. Otherwise the debug
+/// before-execute hook, then every plan with [`execute_many`] (Ctrl-C held
+/// while a privileged batch runs), which re-checks every action and
+/// writes the history.
+pub fn execute_confirmed(
+    env: &Env,
+    cfg: &Config,
+    targets: &[Target],
+    privilege: Privilege,
+    force: bool,
+) -> ExecOutcome {
+    let plans: Vec<&Plan> = targets.iter().map(|t| &t.plan).collect();
+    let refused = |exit_code: u8, manual_commands: Vec<String>, running: Vec<String>| ExecOutcome {
+        reports: Vec::new(),
+        exit_code,
+        manual_commands,
+        running,
+    };
+    let needs_rights = plans.iter().flat_map(|p| &p.actions).any(is_privileged);
+    if needs_rights && privilege.esc.is_none() {
+        let manual = manual_commands(env, plans.iter().flat_map(|p| &p.actions));
+        return refused(EXIT_NO_RIGHTS, manual, Vec::new());
+    }
+    let running: Vec<String> = running_apps(env, targets)
+        .into_iter()
+        .map(|(_, msg)| msg)
+        .collect();
+    if !running.is_empty() && !force {
+        return refused(1, Vec::new(), running);
+    }
+
+    before_execute_hook(env);
+    let reports = run_plans(env, cfg, &plans, &privilege);
+    let all_ok = reports
+        .iter()
+        .flatten()
+        .all(|r| r.results.iter().all(|x| x.ok));
+    let not_granted = reports.iter().flatten().any(|r| r.escalation_failed);
+    let stopped = reports.iter().flatten().any(|r| r.batch_stopped);
+    let (exit_code, manual_commands) = if not_granted {
+        (EXIT_NO_RIGHTS, failed_privileged(env, &plans, &reports))
+    } else if stopped || !all_ok {
+        (3, Vec::new())
+    } else {
+        (0, Vec::new())
+    };
+    ExecOutcome {
+        reports,
+        exit_code,
+        manual_commands,
+        running,
+    }
 }
 
 /// Runs every plan with [`execute_many`], so all privileged actions of
@@ -612,7 +745,7 @@ mod tests {
         )
     }
 
-    fn target(actions: Vec<PlannedAction>) -> Target<'static> {
+    fn target(actions: Vec<PlannedAction>) -> Target {
         let total_size = actions.iter().map(|a| a.size).sum();
         Target {
             heading: String::new(),

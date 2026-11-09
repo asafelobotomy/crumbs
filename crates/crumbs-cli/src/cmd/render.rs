@@ -10,7 +10,7 @@ use crumbs_core::safety::Scope;
 use crumbs_core::size::DiskUsage;
 
 use super::manual::{is_privileged, root_command};
-use crate::output::{fmt_size, print_table_with_details};
+use crate::output::{fmt_size, write_table_with_details};
 
 fn verb(a: &Action) -> &'static str {
     match a {
@@ -150,19 +150,31 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-/// Prints each plan under its heading, then the totals lines: trashed and
-/// deleted items are counted apart, whatever `--permanent` was.
+/// Prints each plan under its heading, then the totals lines, to stdout
+/// with colour (anstream drops it where the terminal does not want it).
 pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
+    let mut text = String::new();
+    preview_to(&mut text, env, plans, true)?;
+    anstream::stdout().lock().write_all(text.as_bytes())?;
+    Ok(())
+}
+
+/// Writes each plan under its heading, then the totals lines: trashed and
+/// deleted items are counted apart, whatever `--permanent` was. The table
+/// headers are bold only with `color`.
+pub fn preview_to(
+    w: &mut dyn std::fmt::Write,
+    env: &Env,
+    plans: &[(String, &Plan)],
+    color: bool,
+) -> std::fmt::Result {
     for (i, (heading, plan)) in plans.iter().enumerate() {
-        {
-            let mut out = anstream::stdout().lock();
-            if i > 0 {
-                writeln!(out)?;
-            }
-            writeln!(out, "{}", sanitise(heading))?;
+        if i > 0 {
+            writeln!(w)?;
         }
+        writeln!(w, "{}", sanitise(heading))?;
         if plan.actions.is_empty() {
-            writeln!(anstream::stdout().lock(), "  nothing to remove")?;
+            writeln!(w, "  nothing to remove")?;
         } else {
             let rows: Vec<Vec<String>> = plan
                 .actions
@@ -190,19 +202,24 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
                         .unwrap_or_default(),
                 })
                 .collect();
-            print_table_with_details(&["ACTION", "SIZE", "PATH", "REASON"], &rows, &details)?;
+            write_table_with_details(
+                w,
+                &["ACTION", "SIZE", "PATH", "REASON"],
+                &rows,
+                &details,
+                color,
+            )?;
         }
-        let mut out = anstream::stdout().lock();
         for line in plan.actions.iter().filter_map(|a| also_removed(&a.action)) {
-            writeln!(out, "{line}")?;
+            writeln!(w, "{line}")?;
         }
         for n in &plan.notes {
-            writeln!(out, "note: {}", sanitise(n))?;
+            writeln!(w, "note: {}", sanitise(n))?;
         }
     }
     let all = || plans.iter().flat_map(|(_, p)| &p.actions);
     if all().any(is_privileged) {
-        writeln!(anstream::stdout().lock(), "note: {NOTE_PRIVILEGED}")?;
+        writeln!(w, "note: {NOTE_PRIVILEGED}")?;
     }
     // (count, size, whether some size is unknown)
     let tally = |want: fn(&Action) -> bool| {
@@ -221,11 +238,10 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
             Action::UserCommand { .. } | Action::PrivilegedCommand { .. }
         )
     });
-    let mut out = anstream::stdout().lock();
-    writeln!(out)?;
+    writeln!(w)?;
     if trashed > 0 {
         writeln!(
-            out,
+            w,
             "will move {} ({}) to the trash",
             plural(trashed, "item", "items"),
             total(trash_size, trash_unknown)
@@ -233,17 +249,17 @@ pub fn preview(env: &Env, plans: &[(String, &Plan)]) -> anyhow::Result<()> {
     }
     if deleted > 0 {
         writeln!(
-            out,
+            w,
             "will permanently delete {} ({})",
             plural(deleted, "item", "items"),
             total(delete_size, delete_unknown)
         )?;
     }
     if edits > 0 {
-        writeln!(out, "will edit {edits} files (a backup of each is kept)")?;
+        writeln!(w, "will edit {edits} files (a backup of each is kept)")?;
     }
     if commands > 0 {
-        writeln!(out, "will run {}", plural(commands, "command", "commands"))?;
+        writeln!(w, "will run {}", plural(commands, "command", "commands"))?;
     }
     Ok(())
 }

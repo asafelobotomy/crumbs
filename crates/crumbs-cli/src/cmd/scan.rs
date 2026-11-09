@@ -4,10 +4,11 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use clap::Args;
-use crumbs_core::Env;
 use crumbs_core::bloat::{BloatItem, Category, CategoryReport, ScanContext, ScanReport, scan_all};
 use crumbs_core::command::SystemRunner;
+use crumbs_core::{Env, SourceError};
 
+use super::build::{Refusal, Stop};
 use super::context::{ScanSetup, print_notes};
 use super::render::sanitise;
 use crate::output::{ErrorEntry, fmt_size, print_json_entries, print_table_with_details};
@@ -63,19 +64,51 @@ fn skipped(category: Category) -> CategoryReport {
     }
 }
 
-pub fn run(env: &Env, args: &ScanArgs) -> anyhow::Result<ExitCode> {
+/// What `scan` found, with the warnings it reports.
+pub(crate) struct Scanned {
+    pub report: ScanReport,
+    pub inv_errors: Vec<SourceError>,
+    /// Config warnings; they never change the exit code.
+    pub notes: Vec<ErrorEntry>,
+}
+
+impl Scanned {
+    /// 3 when some category failed, else 0.
+    fn exit_code(&self) -> u8 {
+        if self.report.categories.iter().any(|r| r.error.is_some()) {
+            3
+        } else {
+            0
+        }
+    }
+
+    /// The envelope's `errors`: failed categories, failed sources, notes.
+    pub fn json_errors(&self) -> Vec<ErrorEntry> {
+        let mut errors: Vec<ErrorEntry> = self
+            .report
+            .categories
+            .iter()
+            .filter_map(|r| {
+                r.error
+                    .as_ref()
+                    .map(|m| ErrorEntry::new(r.category.as_str(), m.clone()))
+            })
+            .collect();
+        errors.extend(self.inv_errors.iter().map(ErrorEntry::from));
+        errors.extend(self.notes.iter().cloned());
+        errors
+    }
+}
+
+/// Scans the categories `args` names (or the default ones).
+pub(crate) fn gather(env: &Env, args: &ScanArgs) -> Result<Scanned, Stop> {
     let usage = if args.user && args.system {
         Some(USER_AND_SYSTEM.to_string())
     } else {
         cross_kind(&args.categories, args.user, args.system)
     };
     if let Some(msg) = usage {
-        writeln!(anstream::stderr().lock(), "error: {msg}")?;
-        if args.json {
-            let entry = [ErrorEntry::new("cli", msg)];
-            print_json_entries("scan", &serde_json::Value::Null, &entry)?;
-        }
-        return Ok(ExitCode::from(2));
+        return Err(Refusal::new(2, msg).into());
     }
     let setup = ScanSetup::load(env)?;
     let listed: Vec<Category> = if args.categories.is_empty() {
@@ -112,27 +145,35 @@ pub fn run(env: &Env, args: &ScanArgs) -> anyhow::Result<ExitCode> {
             })
             .collect(),
     };
-    let failed = report.categories.iter().any(|r| r.error.is_some());
-    let code = ExitCode::from(if failed { 3 } else { 0 });
+    Ok(Scanned {
+        report,
+        inv_errors: setup.inv.errors,
+        notes: setup.notes,
+    })
+}
+
+pub fn run(env: &Env, args: &ScanArgs) -> anyhow::Result<ExitCode> {
+    let scanned = match gather(env, args) {
+        Ok(scanned) => scanned,
+        Err(Stop::Refused { refusal, .. }) => {
+            writeln!(anstream::stderr().lock(), "error: {}", refusal.message)?;
+            if args.json {
+                let entry = [ErrorEntry::new("cli", refusal.message)];
+                print_json_entries("scan", &serde_json::Value::Null, &entry)?;
+            }
+            return Ok(ExitCode::from(refusal.exit_code));
+        }
+        Err(s) => return Err(s.into_error()),
+    };
+    let code = ExitCode::from(scanned.exit_code());
 
     if args.json {
-        let mut errors: Vec<ErrorEntry> = report
-            .categories
-            .iter()
-            .filter_map(|r| {
-                r.error
-                    .as_ref()
-                    .map(|m| ErrorEntry::new(r.category.as_str(), m.clone()))
-            })
-            .collect();
-        errors.extend(setup.inv.errors.iter().map(ErrorEntry::from));
-        errors.extend(setup.notes);
-        print_json_entries("scan", &report, &errors)?;
+        print_json_entries("scan", &scanned.report, &scanned.json_errors())?;
         return Ok(code);
     }
 
-    print_human(&report, args.details)?;
-    for e in &setup.inv.errors {
+    print_human(&scanned.report, args.details)?;
+    for e in &scanned.inv_errors {
         writeln!(
             anstream::stderr().lock(),
             "warning: {}: {}",
@@ -140,7 +181,7 @@ pub fn run(env: &Env, args: &ScanArgs) -> anyhow::Result<ExitCode> {
             sanitise(&e.message)
         )?;
     }
-    print_notes(&setup.notes)?;
+    print_notes(&scanned.notes)?;
     Ok(code)
 }
 

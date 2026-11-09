@@ -1,6 +1,7 @@
 //! Human and JSON rendering helpers.
 
-use std::io::{self, Write};
+use std::fmt;
+use std::io::{self, Write as _};
 
 use anstyle::Style;
 use crumbs_core::SourceError;
@@ -129,14 +130,31 @@ pub fn print_table_with_details(
     rows: &[Vec<String>],
     details: &[Vec<String>],
 ) -> io::Result<()> {
+    let mut text = String::new();
+    write_table_with_details(&mut text, header, rows, details, true).map_err(io::Error::other)?;
+    anstream::stdout().lock().write_all(text.as_bytes())
+}
+
+/// [`print_table_with_details`] into `w`; the header is bold only with
+/// `color`.
+pub fn write_table_with_details(
+    w: &mut dyn fmt::Write,
+    header: &[&str],
+    rows: &[Vec<String>],
+    details: &[Vec<String>],
+    color: bool,
+) -> fmt::Result {
     let mut widths: Vec<usize> = header.iter().map(|h| h.chars().count()).collect();
     for row in rows {
         for (w, cell) in widths.iter_mut().zip(row) {
             *w = (*w).max(cell.chars().count());
         }
     }
-    let bold = Style::new().bold();
-    let mut out = anstream::stdout().lock();
+    let bold = if color {
+        Style::new().bold()
+    } else {
+        Style::new()
+    };
     let last = header.len().saturating_sub(1);
     let line = |cells: &mut dyn Iterator<Item = &str>| -> String {
         let mut s = String::new();
@@ -151,11 +169,11 @@ pub fn print_table_with_details(
         s
     };
     let head = line(&mut header.iter().copied());
-    writeln!(out, "{bold}{head}{bold:#}")?;
+    writeln!(w, "{bold}{head}{bold:#}")?;
     for (i, row) in rows.iter().enumerate() {
-        writeln!(out, "{}", line(&mut row.iter().map(String::as_str)))?;
+        writeln!(w, "{}", line(&mut row.iter().map(String::as_str)))?;
         for d in details.get(i).into_iter().flatten() {
-            writeln!(out, "    - {d}")?;
+            writeln!(w, "    - {d}")?;
         }
     }
     Ok(())

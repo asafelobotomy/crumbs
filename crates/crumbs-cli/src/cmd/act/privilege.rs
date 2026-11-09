@@ -19,9 +19,9 @@ pub fn usable(esc: &Escalation) -> bool {
 
 /// How this run gets administrator rights: the escalation program (if
 /// any) and the runner of the privileged batch.
-pub(super) struct Privilege {
-    pub(super) esc: Option<Escalation>,
-    pub(super) runner: Box<dyn PrivilegedRunner>,
+pub(crate) struct Privilege {
+    pub(crate) esc: Option<Escalation>,
+    pub(crate) runner: Box<dyn PrivilegedRunner>,
 }
 
 impl Privilege {
@@ -35,7 +35,7 @@ impl Privilege {
     /// dismissed; `partial:<n>`: like `sh`, but the shell stops before step
     /// `n`, as if it were killed); on the real root it is ignored. Release
     /// builds refuse to start when `CRUMBS_TEST_*` is set.
-    pub(super) fn for_run(env: &Env, needed: bool) -> Privilege {
+    pub(crate) fn for_run(env: &Env, needed: bool) -> Privilege {
         let system =
             || -> Box<dyn PrivilegedRunner> { Box::new(SystemPrivilegedRunner::new(&env.root)) };
         if !needed {
