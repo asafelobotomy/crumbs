@@ -123,6 +123,7 @@ fn restore_with(
                     restores: Some(e.id.clone()),
                     argv: None,
                     packages: None,
+                    source: None,
                     kind: None,
                     scope: None,
                 };
@@ -269,7 +270,12 @@ fn restore_one(
 /// them marked as dependencies.
 fn reinstall_hint(e: &HistoryEntry) -> String {
     const CANNOT: &str = "packages cannot be restored by crumbs";
-    let asked = e.app_id.as_deref().and_then(|a| a.strip_prefix("pacman:"));
+    let source = e.source.unwrap_or(crate::model::SourceKind::Pacman);
+    let prefix_id = format!("{}:", source.as_str());
+    let asked = e
+        .app_id
+        .as_deref()
+        .and_then(|a| a.strip_prefix(prefix_id.as_str()));
     let (explicit, deps): (Vec<&str>, Vec<&str>) = e
         .packages
         .iter()
@@ -277,11 +283,35 @@ fn reinstall_hint(e: &HistoryEntry) -> String {
         .map(|(name, _)| name.as_str())
         .partition(|n| Some(*n) == asked);
     let mut commands = Vec::new();
-    if !explicit.is_empty() {
-        commands.push(format!("pacman -S {}", explicit.join(" ")));
-    }
-    if !deps.is_empty() {
-        commands.push(format!("pacman -S --asdeps {}", deps.join(" ")));
+    match source {
+        crate::model::SourceKind::Dpkg => {
+            if !explicit.is_empty() {
+                commands.push(format!("apt-get install {}", explicit.join(" ")));
+            }
+            if !deps.is_empty() {
+                let d = deps.join(" ");
+                commands.push(format!("apt-get install {d} && apt-mark auto {d}"));
+            }
+        }
+        crate::model::SourceKind::Rpm | crate::model::SourceKind::Snap => {
+            let tool = if source == crate::model::SourceKind::Rpm {
+                "dnf"
+            } else {
+                "snap"
+            };
+            let all: Vec<&str> = explicit.iter().chain(deps.iter()).copied().collect();
+            if !all.is_empty() {
+                commands.push(format!("{tool} install {}", all.join(" ")));
+            }
+        }
+        _ => {
+            if !explicit.is_empty() {
+                commands.push(format!("pacman -S {}", explicit.join(" ")));
+            }
+            if !deps.is_empty() {
+                commands.push(format!("pacman -S --asdeps {}", deps.join(" ")));
+            }
+        }
     }
     let prefix = if e.ok {
         CANNOT.to_string()
@@ -1053,6 +1083,43 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(out[0].ok, "{out:?}");
         assert_eq!(out[0].error.as_deref(), Some(NOTHING_RESTORABLE));
+    }
+
+    #[test]
+    fn restore_hint_names_the_package_manager() {
+        let entry = |source: &str, app: &str, pkgs: &str| -> HistoryEntry {
+            let src = if source.is_empty() {
+                String::new()
+            } else {
+                format!(r#","source":"{source}""#)
+            };
+            serde_json::from_str(&format!(
+                r#"{{"id":"x","batch":"b","time":"t","action":"package-remove","path":"/usr/bin/x",
+                "trashed":null,"backup":null,"size":0,"ok":true,"error":null,"app_id":"{app}",
+                "packages":{pkgs}{src}}}"#
+            ))
+            .unwrap()
+        };
+        let two = r#"[["foo","1"],["libfoo","2"]]"#;
+        let hint = |e: &HistoryEntry| reinstall_hint(e);
+        assert_eq!(
+            hint(&entry("", "pacman:foo", two)),
+            "packages cannot be restored by crumbs; reinstall with: \
+             pacman -S foo && pacman -S --asdeps libfoo"
+        );
+        assert_eq!(
+            hint(&entry("dpkg", "dpkg:foo", two)),
+            "packages cannot be restored by crumbs; reinstall with: \
+             apt-get install foo && apt-get install libfoo && apt-mark auto libfoo"
+        );
+        assert_eq!(
+            hint(&entry("rpm", "rpm:foo", two)),
+            "packages cannot be restored by crumbs; reinstall with: dnf install foo libfoo"
+        );
+        assert_eq!(
+            hint(&entry("snap", "snap:foo", r#"[["foo","1"]]"#)),
+            "packages cannot be restored by crumbs; reinstall with: snap install foo"
+        );
     }
 
     #[test]

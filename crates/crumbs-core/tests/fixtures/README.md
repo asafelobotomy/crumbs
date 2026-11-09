@@ -24,3 +24,13 @@ Captured from the podman images named below (offline, `--network=none`), then tr
 - `list`: hand-written in the column layout of `snap list --unicode=never`
   (`Name Version Rev Tracking Publisher Notes`; verified publishers end in `**`).
   snapd needs systemd, so it does not run in the test containers.
+
+## apt/
+
+Captured in `docker.io/library/debian:trixie` after `apt-get update` and
+`apt-get install sl cowsay`, with `LC_ALL=C` (stdout and stderr together):
+
+- `purge-sl.txt`: `apt-get -s purge sl` (exit 0).
+- `purge-perl-base.txt`: `apt-get -s purge perl-base` (exit 0; removes an essential package).
+- `purge-nosuch.txt`: `apt-get -s purge nosuchpkg` (exit 100, `E:` line).
+- `autoremove.txt`: `apt-get -s autoremove --purge` after `apt-mark auto cowsay` (exit 0).

@@ -55,6 +55,10 @@ pub struct HistoryEntry {
     /// `PackageRemove` entries only: each package's `(name, version)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packages: Option<Vec<(String, String)>>,
+    /// `PackageRemove` entries only: the package source. Missing in lines
+    /// written before it existed, which were all pacman.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::model::SourceKind>,
     /// The command whose batch this is: [`KIND_UNINSTALL`],
     /// [`KIND_ORPHANS`] or [`KIND_CLEAN`]. Missing in lines written before
     /// it existed, and in `Restore` entries.
@@ -319,6 +323,7 @@ mod tests {
             restores: None,
             argv: None,
             packages: None,
+            source: None,
             scope: None,
         }
     }

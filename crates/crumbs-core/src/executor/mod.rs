@@ -838,6 +838,10 @@ fn record(env: &Env, plan: &Plan, batch: &str, i: usize, attempt: Attempt) -> Ac
         restores: None,
         argv: attempt.argv,
         packages: attempt.packages,
+        source: match &pa.action {
+            Action::PackageRemove { source, .. } => Some(*source),
+            _ => None,
+        },
         kind: plan.kind.clone(),
         scope: match pa.action {
             // Only root deletes say where they ran (docs/json-schema.md).

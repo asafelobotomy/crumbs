@@ -1,6 +1,7 @@
 //! Decides how an app itself is removed, before anything is touched. The
 //! checks here run as the user and change nothing.
 
+mod apt;
 mod flatpak;
 mod pacman;
 mod snap;
@@ -89,9 +90,7 @@ pub fn plan_removal(
         SourceKind::Rpm => Err(RemovalError::Unsupported(
             "removing rpm packages isn't supported yet; use --leftovers-only".into(),
         )),
-        SourceKind::Dpkg => Err(RemovalError::Unsupported(
-            "removing dpkg packages isn't supported yet; use --leftovers-only".into(),
-        )),
+        SourceKind::Dpkg => apt::plan(env, runner, app),
         SourceKind::Flatpak => flatpak::plan(app),
         SourceKind::Snap => snap::plan(app),
         SourceKind::AppImage => Ok(RemovalPlan::default()),
@@ -112,7 +111,7 @@ pub fn still_installed(
 ) -> Result<Vec<String>, String> {
     match source {
         SourceKind::Pacman => pacman_still_installed(env, names),
-        SourceKind::Dpkg => Err("checking dpkg packages isn't supported yet".into()),
+        SourceKind::Dpkg => apt::dpkg_still_installed(env, names),
         SourceKind::Rpm => Err("checking rpm packages isn't supported yet".into()),
         SourceKind::Flatpak => flatpak_still_installed(env, runner, names),
         SourceKind::Snap => snap::snap_still_installed(env, runner, names),
