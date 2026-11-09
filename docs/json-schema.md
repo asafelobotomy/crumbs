@@ -1482,10 +1482,12 @@ The four preview tools change nothing (`readOnlyHint: true`). A preview builds t
 
 `apply` takes `plan_id` (required) and nothing else: no argument can confirm a plan. It has `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: false`. It runs the previewed plan once, only after the user confirms it in the client:
 
-- before protocol 2026-07-28 through the server's own `elicitation/create` (a form with one boolean, `confirm`), waiting up to 10 minutes for the answer;
-- from 2026-07-28 through an `InputRequiredResult`. The first `apply` returns one input request (an elicitation under a key `confirm-<32 hex>`) with the plan id as `requestState`, and the client calls `apply` again with `requestState` and `inputResponses`. An answer counts only under that key and only after the server issued it.
+- a client that starts with `initialize` gets the server's own `elicitation/create` (a form with one boolean, `confirm`), and the server waits up to 10 minutes for the answer. This holds even when `initialize` asks for protocol 2026-07-28: the server negotiates 2025-11-25;
+- a client on the 2026-07-28 inline lifecycle (`server/discover`, then `_meta` carrying `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities` on every request) gets an `InputRequiredResult`. The first `apply` returns one input request (an elicitation under a key `confirm-<32 hex>`) with the plan id as `requestState`, and the client calls `apply` again with `requestState` and `inputResponses`. An answer counts only under that key and only after the server issued it.
 
-Both need a form `accept` with `confirm` true. The plan is removed when it runs, and on a no, a cancel or a timeout, and a plan that is used or has expired is `plan not found or expired; preview again`. A malformed `plan_id` is refused the same way.
+On the inline lifecycle a request without `_meta` is rejected by `rmcp` with JSON-RPC error -32602 and runs nothing. Every other mismatch fails closed: a client whose capabilities (in the handshake or the request) do not allow a form is refused, and a retry with another plan's state, a missing state or answer, or an answer under another key is refused with `that is not the answer to this plan's confirmation; nothing was run`, the plan kept.
+
+Both need a form `accept` with `confirm` true. The plan is removed when it runs, and on a no, a cancel or a timeout, and a plan that is used or has expired is `plan not found or expired; preview again`. A malformed `plan_id` is refused the same way. On the `elicitation/create` path a yes that arrives after the plan expired runs nothing and is refused with `the plan expired while waiting for your answer; preview again` (exit_code 2); the plan stays removed. While one `apply` waits for that answer, other `apply` calls wait.
 
 The result is one of the following. `exit_code` is the CLI's exit code for the same run.
 
@@ -1493,23 +1495,22 @@ The result is one of the following. `exit_code` is the CLI's exit code for the s
 |---|---|
 | `{ "applied": false, "reason": "declined" }` | The user said no (`confirm` false, or `decline`). `reason` is also `"cancelled"` or `"timed out"`. Not an error. |
 | `{ "applied": true, "report": [...], "exit_code": 0 }` | The plan ran. `report` is the array `data.report` has for `uninstall`, `orphans --clean` and `clean`. |
-| the same with `exit_code` 3, tool error | Partial failure. When the privileged run stopped part-way, also `"error": "the privileged run stopped before it finished; the step it was in may have partly run, and the steps after it did not run"`. |
-| `{ "applied": true, "outcomes": [...], "exit_code": 0 }` | A restore ran. `outcomes` as in `restore` above. `exit_code` 3 and a tool error when any outcome is not `ok`. |
+| the same with `exit_code` 3, tool error | Partial failure; `applied` is `false` when no action succeeded. When the privileged run stopped part-way, also `"error": "the privileged run stopped before it finished; the step it was in may have partly run, and the steps after it did not run"`. |
+| `{ "applied": true, "outcomes": [...], "exit_code": 0 }` | A restore ran. `outcomes` as in `restore` above. `exit_code` 3 and a tool error when any outcome is not `ok`; `applied` is `false` when none is. |
 | `{ "applied": ..., "exit_code": 5, "error": ..., "manual_commands": [...] }` | Administrator rights were needed and not available or not granted. Not an error result. See below. |
 
-<!-- FINAL WAVE: the `applied` meaning below is the current code; the final wave changes it to "at least one action succeeded" (a system-only plan with a denied prompt then gives false). Update this paragraph and the README. -->
-`applied` is currently `true` when anything ran (including the user-level steps of a plan whose root steps were then denied, exit 5) and `false` when nothing ran.
+`applied` is `true` when at least one action result is `ok` across the plans (for a restore, at least one outcome), and `false` otherwise. A plan whose user-level steps ran before its root steps were denied (exit 5) gives `true`; a plan made only of root steps with a denied prompt gives `false`.
 
 **Exit 5 result.** Fields:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `applied` | boolean | `false` when nothing ran; `true` with exit 5 when user-level steps ran and only the root steps did not. |
+| `applied` | boolean | `true` when at least one action succeeded: user-level steps ran and only the root steps did not. `false` when nothing succeeded (no escalation program, or a denied prompt for a plan of root steps only). |
 | `exit_code` | number | `5`. |
 | `error` | string | `no way to get administrator rights` (no escalation program: nothing ran, no history) or `administrator rights were not granted; nothing that needs them was changed` (the prompt was cancelled, denied or failed). |
 | `manual_commands` | array of string | The commands to run yourself, as in the CLI's exit-5 `data.manual_commands`. |
 | `note` | string | Present only when a command is an `rm -rf --one-file-system`: `check that nothing is mounted inside these paths before running the rm commands`. |
-| `report` | array | Present only when something ran: the reports, with `escalation_failed` true on the root steps. |
+| `report` | array | Present only when `applied` is `true` (something ran): the reports, with `escalation_failed` true on the root steps. |
 | `escalation_output` | string | Present only when the escalation program printed something (the first non-empty output, sanitised). |
 
 ```json

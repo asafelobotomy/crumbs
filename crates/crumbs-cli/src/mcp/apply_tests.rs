@@ -13,7 +13,7 @@ use crumbs_core::privilege::{Escalation, EscalationKind, Interaction};
 use rmcp::model::{CallToolResponse, CallToolResult, InputResponses};
 use serde_json::{Value, json};
 
-use super::confirm::{CONFIRM_SUFFIX, PLAN_NOT_FOUND};
+use super::confirm::{CONFIRM_SUFFIX, EXPIRED_WHILE_ASKING, PLAN_NOT_FOUND};
 use super::plans::{MAX_PLANS, PlanId, PlanPayload, StoredPlan, TOO_MANY_PLANS};
 use super::server::Server;
 use super::testing::{Answer, Asker, Connected, inky_with_system, test_server};
@@ -85,10 +85,15 @@ async fn apply_confirmed_runs_plan_and_writes_history() {
         results.as_array().unwrap().iter().all(|r| r["ok"] == true),
         "{d}"
     );
-    // The user was asked once, with the preview the agent was shown.
+    // The user was asked once, with the preview the agent was shown, one
+    // blank line, then the question.
+    assert!(
+        preview_text.ends_with('\n') && !preview_text.ends_with("\n\n"),
+        "{preview_text:?}"
+    );
     assert_eq!(
         c.handler.asked(),
-        [format!("{preview_text}{CONFIRM_SUFFIX}")]
+        [format!("{preview_text}\nApply this plan?")]
     );
     // In the trash, and in the history.
     assert!(!env.sys(CACHE).exists());
@@ -238,7 +243,8 @@ async fn apply_refuses_swapped_target() {
     let r = apply(&c, &id).await;
     assert_eq!(r.is_error, Some(true), "{r:?}");
     let d = data(&r);
-    assert_eq!(d["applied"], true, "{d}");
+    // Its one action failed: nothing was applied, and the report says why.
+    assert_eq!(d["applied"], false, "{d}");
     assert_eq!(d["exit_code"], 3, "{d}");
     let result = &d["report"][0]["results"][0];
     assert_eq!(result["ok"], false, "{d}");
@@ -482,11 +488,9 @@ impl PrivilegedRunner for DeniedLoudly {
     }
 }
 
-#[tokio::test]
-async fn denied_escalation_returns_its_output_sanitised() {
-    let t = inky_with_system();
-    let env = t.env();
-    let mut server = test_server(env.clone(), None);
+/// A server whose escalation exists and is always denied.
+fn denying_server(env: Env) -> Server {
+    let mut server = test_server(env, None);
     server.privilege = Arc::new(|_: &Env, _: bool| Privilege {
         esc: Some(Escalation {
             kind: EscalationKind::Run0,
@@ -495,7 +499,41 @@ async fn denied_escalation_returns_its_output_sanitised() {
         }),
         runner: Box::new(DeniedLoudly),
     });
-    let c = Connected::start_server(server, Asker::new(Answer::yes())).await;
+    server
+}
+
+#[tokio::test]
+async fn denied_escalation_of_a_system_only_plan_applies_nothing() {
+    let t = inky_with_system();
+    let env = t.env();
+    let c = Connected::start_server(denying_server(env.clone()), Asker::new(Answer::yes())).await;
+    let id = preview(&c, &["/opt/inky"]).await;
+    let r = apply(&c, &id).await;
+    assert_ne!(r.is_error, Some(true), "{r:?}");
+    let d = data(&r);
+    assert_eq!(d["applied"], false, "{d}");
+    assert_eq!(d["exit_code"], 5, "{d}");
+    assert!(!d["manual_commands"].as_array().unwrap().is_empty(), "{d}");
+    assert_eq!(d["note"], NOTE_CHECK_MOUNTS, "{d}");
+    assert!(
+        d["escalation_output"]
+            .as_str()
+            .unwrap()
+            .contains("not authorized"),
+        "{d}"
+    );
+    // Nothing ran, so there is no report.
+    assert!(d.get("report").is_none(), "{d}");
+    assert!(env.sys("/opt/inky/bin/inky").exists());
+    assert!(env.sys(CACHE).join("blob").exists());
+    c.close().await;
+}
+
+#[tokio::test]
+async fn denied_escalation_returns_its_output_sanitised() {
+    let t = inky_with_system();
+    let env = t.env();
+    let c = Connected::start_server(denying_server(env.clone()), Asker::new(Answer::yes())).await;
     let id = preview(&c, &[CACHE, "/opt/inky"]).await;
     let r = apply(&c, &id).await;
     let d = data(&r);
@@ -687,6 +725,34 @@ async fn mrtr_answer_before_the_question_is_refused() {
         .await,
     );
     assert_eq!(data(&r)["applied"], true, "{r:?}");
+    c.close().await;
+}
+
+#[tokio::test]
+async fn plan_that_expires_while_the_user_answers_runs_nothing() {
+    let t = inky_with_system();
+    let env = t.env();
+    let server = test_server(env.clone(), None);
+    let shift = server.clock_shift.clone();
+    // A slow yes: by the time it arrives the plan has expired.
+    let mut asker = Asker::new(Answer::yes());
+    asker.while_asked = Some(Arc::new(move || {
+        *shift.lock().unwrap() = Some(Duration::from_secs(601));
+    }));
+    let c = Connected::start_server(server.clone(), asker).await;
+    let id = preview(&c, &[]).await;
+    let r = apply(&c, &id).await;
+    assert_eq!(r.is_error, Some(true), "{r:?}");
+    assert_eq!(text(&r), EXPIRED_WHILE_ASKING);
+    assert_eq!(c.handler.asked().len(), 1);
+    assert!(env.sys(CACHE).join("blob").exists());
+    assert!(history(&env).is_empty());
+    // The plan stays dropped, even with the clock back.
+    *server.clock_shift.lock().unwrap() = None;
+    assert!(!stored(&c, &id));
+    let r = apply(&c, &id).await;
+    assert_eq!(text(&r), PLAN_NOT_FOUND);
+    assert_eq!(c.handler.asked().len(), 1);
     c.close().await;
 }
 

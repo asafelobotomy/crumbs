@@ -22,7 +22,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-/// What the user is asked: the preview, then this.
+/// What the user is asked: the preview, one blank line, then this.
 pub(crate) const CONFIRM_SUFFIX: &str = "\n\nApply this plan?";
 
 /// How long the server waits for the user's answer to `elicitation/create`.
@@ -40,11 +40,16 @@ pub(crate) struct Confirm {
 
 rmcp::elicit_safe!(Confirm);
 
-/// The message of the confirmation: the preview the CLI would show, then
-/// the question.
+/// The message of the confirmation: the preview the CLI would show, one
+/// blank line, then the question. The preview's own trailing newlines are
+/// dropped, so exactly one blank line separates the two.
 pub(crate) fn message(preview_text: &str) -> String {
-    format!("{preview_text}{CONFIRM_SUFFIX}")
+    format!("{}{CONFIRM_SUFFIX}", preview_text.trim_end_matches('\n'))
 }
+
+/// The refusal when the plan expired while the user was being asked.
+pub(crate) const EXPIRED_WHILE_ASKING: &str =
+    "the plan expired while waiting for your answer; preview again";
 
 /// How a confirmation round ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,6 +268,19 @@ mod tests {
         let schema = &req["params"]["requestedSchema"];
         assert_eq!(schema["properties"]["confirm"]["type"], "boolean");
         assert_eq!(schema["required"], json!(["confirm"]));
+    }
+
+    #[test]
+    fn one_blank_line_before_the_question() {
+        assert_eq!(message("PLAN\n"), "PLAN\n\nApply this plan?");
+        assert_eq!(message("PLAN"), "PLAN\n\nApply this plan?");
+        assert_eq!(message("a\nb\n\n"), "a\nb\n\nApply this plan?");
+        let r = input_required("ab12", "confirm-xyz", "PLAN\n").unwrap();
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(
+            v["inputRequests"]["confirm-xyz"]["params"]["message"],
+            "PLAN\n\nApply this plan?"
+        );
     }
 
     #[test]

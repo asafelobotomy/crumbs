@@ -268,7 +268,7 @@ impl Server {
 
     /// Drops the plans that have expired; every tool call starts here.
     pub(super) fn purge_plans(&self) {
-        self.plans().purge_expired(self.env.now());
+        self.plans().purge_expired(self.now());
     }
 
     /// Runs `f` off the async thread, stores what it previews and returns
@@ -303,7 +303,7 @@ impl Server {
         let mut plan_id = Value::Null;
         let mut expires = Value::Null;
         if has_actions {
-            let expires_at = self.env.now() + PLAN_TTL;
+            let expires_at = self.now() + PLAN_TTL;
             let Some(expires_text) = crumbs_core::history::rfc3339(expires_at) else {
                 return Ok(refusal_result(&Refusal::new(
                     1,

@@ -41,6 +41,10 @@ pub(crate) struct Server {
     /// How long `apply` waits for the user's answer.
     pub(super) confirm_timeout: Duration,
     pub(super) privilege: PrivilegeFor,
+    /// Test hook: a clock shift every clone sees at once, so a test can
+    /// move the clock while the server waits for an answer.
+    #[cfg(test)]
+    pub(super) clock_shift: Arc<Mutex<Option<Duration>>>,
     tool_router: ToolRouter<Server>,
 }
 
@@ -54,8 +58,21 @@ impl Server {
             plans: Arc::default(),
             apply_lock: Arc::default(),
             privilege: Arc::new(Privilege::for_server),
+            #[cfg(test)]
+            clock_shift: Arc::default(),
             tool_router: Server::tool_router(),
         }
+    }
+
+    /// The current time, as [`Env::now`] tells it.
+    pub(super) fn now(&self) -> std::time::SystemTime {
+        #[cfg(test)]
+        if let Some(shift) = self.clock_shift.lock().ok().and_then(|s| *s) {
+            let mut env = self.env.clone();
+            env.set_clock_shift(shift);
+            return env.now();
+        }
+        self.env.now()
     }
 }
 

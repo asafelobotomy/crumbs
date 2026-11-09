@@ -73,6 +73,9 @@ pub(crate) struct Asker {
     pub asked: Arc<Mutex<Vec<String>>>,
     /// Declares the elicitation capability.
     pub capable: bool,
+    /// Runs while the question is open, before the answer goes back: a
+    /// slow user, scripted.
+    pub while_asked: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Asker {
@@ -81,6 +84,7 @@ impl Asker {
             answer,
             asked: Arc::default(),
             capable: true,
+            while_asked: None,
         }
     }
 
@@ -105,6 +109,9 @@ impl ClientHandler for Asker {
     ) -> Result<ElicitResult, ErrorData> {
         if let ElicitRequestParams::FormElicitationParams { message, .. } = &request {
             self.asked.lock().unwrap().push(message.clone());
+        }
+        if let Some(while_asked) = &self.while_asked {
+            while_asked();
         }
         Ok(match &self.answer {
             Answer::Accept(content) => {

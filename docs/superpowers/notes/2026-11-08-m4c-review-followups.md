@@ -1,15 +1,15 @@
 # M4c review follow-ups
 
-M4c is done: `crumbs mcp`, an `rmcp` 3.9.0 stdio MCP server behind the cargo feature `mcp` (on by default), with 11 tools (six read, four preview, `apply`), a single-use plan store, and confirmation through `elicitation/create` (before protocol 2026-07-28) or `InputRequiredResult` (from 2026-07-28). This note lists what the task reviews and rulings accepted or deferred. Each item fails safe today: `apply` never runs without the user's yes, and every M1 to M4b safety check still runs.
+M4c is done: `crumbs mcp`, an `rmcp` 3.9.0 stdio MCP server behind the cargo feature `mcp` (on by default), with 11 tools (six read, four preview, `apply`), a single-use plan store, and confirmation through `elicitation/create` (clients that send `initialize`) or `InputRequiredResult` (the 2026-07-28 inline lifecycle). This note lists what the task reviews and rulings accepted or deferred. Each item fails safe today: `apply` never runs without the user's yes, and every M1 to M4b safety check still runs.
 
-## Planned for the final wave
+## Done in the final wave
 
-1. **`applied` semantics.** Today `applied` is `true` when anything ran, including the user-level steps of a plan whose root steps were denied (exit 5). The ruling for the final wave: `applied` means at least one action result is `ok`, so a system-only plan with a denied prompt gives `applied: false`. `README.md` and `docs/json-schema.md` each have one marked line (`FINAL WAVE`) to update.
+1. **`applied` semantics.** `applied` now means at least one action result is `ok` (for a restore, at least one outcome), so a system-only plan with a denied prompt gives `applied: false` and no `report`; a plan whose user-level steps ran before the root steps were denied gives `applied: true` with exit 5. `README.md` and `docs/json-schema.md` say so.
 
 ## Protocol and library
 
 2. **MCP logging is deprecated in `rmcp`** (SEP-2577, no replacement yet). Warnings still go out as `notifications/message` at level `warning`, with `allow(deprecated)` and a reason in `log.rs` and `server.rs`. Revisit when the SDK offers another channel.
-3. **The multi round trip path was tested in process only.** It is covered by the in-process harness (including the `asked` flag, key and state checks). No real client was driven at protocol 2026-07-28, and a scripted client that asked for that version in the debug binary was served `elicitation/create` instead, so the version `rmcp` negotiates with a given client is worth checking before relying on the path.
+3. **Which client gets which confirmation path.** The path follows the client's lifecycle, not the version it asks for. A client that sends `initialize` is negotiated to 2025-11-25 even when it asks for 2026-07-28, and gets `elicitation/create`. A client on the 2026-07-28 inline lifecycle (`server/discover`, then per-request `_meta` with `protocolVersion` and `clientCapabilities`) gets `InputRequiredResult`. On that lifecycle `rmcp` rejects a request without `_meta` (-32602) and nothing runs; every other mismatch (capabilities, state, key) fails closed. The final review checked this end to end over stdio, and `multi_round_trip_confirmation_over_stdio` in `crates/crumbs-cli/tests/mcp.rs` now drives the debug binary through it on a fake root: `input_required`, a declined retry that runs nothing, then an accepted retry that trashes the file. No released client has been tried on the inline lifecycle yet.
 4. **`rmcp` waits 5 seconds** for in-flight responses after stdin closes. Documented: clients must keep stdin open. Nothing to fix on the crumbs side.
 5. **Confirmation timeout.** The server waits 10 minutes for the answer on the elicitation path, so a client with a shorter request timeout reports its own timeout first. The multi round trip path has no server-side wait.
 
