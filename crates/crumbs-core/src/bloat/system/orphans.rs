@@ -23,12 +23,17 @@ impl Scanner for OrphanPkgsScanner {
     }
 
     fn unavailable(&self, cx: &ScanContext) -> Option<String> {
-        resolve_trusted(cx.env, "pacman")
+        super::package_manager(cx.env)
             .is_none()
-            .then(|| not_installed("pacman"))
+            .then(|| not_installed(super::NO_PACKAGE_MANAGER))
     }
 
     fn scan(&self, cx: &ScanContext) -> Result<Vec<BloatItem>, CoreError> {
+        match super::package_manager(cx.env) {
+            Some(super::PackageManager::AptGet) => return apt(cx),
+            Some(super::PackageManager::Dnf) => return dnf(cx),
+            _ => {}
+        }
         let Some(pacman) = resolve_trusted(cx.env, "pacman") else {
             return Ok(Vec::new());
         };
@@ -134,4 +139,89 @@ fn installed_sizes(cx: &ScanContext) -> HashMap<String, u64> {
         }
     }
     sizes
+}
+
+fn removal_error(program: &str, e: crate::removal::RemovalError) -> CoreError {
+    CoreError::Command {
+        program: program.into(),
+        message: e.to_string(),
+    }
+}
+
+fn orphan_item(
+    names: Vec<String>,
+    size: Option<u64>,
+    action: crate::plan::Action,
+) -> Vec<BloatItem> {
+    let crate::plan::Action::PackageRemove { program, args, .. } = action else {
+        return Vec::new();
+    };
+    let mut note = names
+        .iter()
+        .take(NOTE_NAMES)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > NOTE_NAMES {
+        note.push_str(", …");
+    }
+    let mut item = privileged_item(
+        Category::OrphanPkgs,
+        format!("{} orphaned packages", names.len()),
+        size,
+        Some(note),
+        &program,
+        args,
+    );
+    item.preselected = false;
+    vec![item]
+}
+
+/// Debian/Ubuntu: what `apt-get autoremove --purge` would remove, purged as
+/// that exact list (never `autoremove` as root).
+fn apt(cx: &ScanContext) -> Result<Vec<BloatItem>, CoreError> {
+    use crate::removal::apt::{parse_simulation, purge_action};
+    let Some(apt) = resolve_trusted(cx.env, "apt-get") else {
+        return Ok(Vec::new());
+    };
+    let out = cx.runner.run(&apt, &["-s", "autoremove", "--purge"])?;
+    let removed = parse_simulation(&out).map_err(|e| removal_error("apt-get", e))?;
+    if removed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sizes: HashMap<String, u64> = fs::read(cx.env.sys(crate::sources::dpkg::STATUS))
+        .map(|b| {
+            crate::sources::dpkg::parse_status(&String::from_utf8_lossy(&b))
+                .into_iter()
+                .filter_map(|s| Some((s.name, s.installed_kib? * 1024)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let names: Vec<String> = removed.iter().map(|(n, _)| n.clone()).collect();
+    let versions: Vec<String> = removed.iter().map(|(_, v)| v.clone()).collect();
+    let size: u64 = names
+        .iter()
+        .filter_map(|n| sizes.get(n.split(':').next().unwrap_or(n)))
+        .sum();
+    let action = purge_action(names.clone(), versions);
+    Ok(orphan_item(names, Some(size), action))
+}
+
+/// Fedora: what `dnf autoremove` would remove, removed as that exact list
+/// with dependency clean-up off. The size is unknown (dnf's table rounds).
+fn dnf(cx: &ScanContext) -> Result<Vec<BloatItem>, CoreError> {
+    use crate::removal::dnf::{parse_transaction, remove_action};
+    let Some(dnf) = resolve_trusted(cx.env, "dnf") else {
+        return Ok(Vec::new());
+    };
+    let out = cx.runner.run(&dnf, &["autoremove", "--assumeno"])?;
+    if out.stdout.lines().any(|l| l.trim() == "Nothing to do.") && !out.stdout.contains("Removing")
+    {
+        return Ok(Vec::new());
+    }
+    let removed = parse_transaction(&out).map_err(|e| removal_error("dnf", e))?;
+    let names: Vec<String> = removed.iter().map(|(n, _)| n.clone()).collect();
+    let versions: Vec<String> = removed.iter().map(|(_, v)| v.clone()).collect();
+    let action = remove_action(names.clone(), versions);
+    Ok(orphan_item(names, None, action))
 }

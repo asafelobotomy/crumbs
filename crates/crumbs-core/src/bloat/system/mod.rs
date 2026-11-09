@@ -24,6 +24,30 @@ use crate::error::CoreError;
 use crate::safety::Scope;
 
 /// The reason string of a category whose tool is missing.
+/// The package manager whose cache and orphans the system categories use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PackageManager {
+    Pacman,
+    AptGet,
+    Dnf,
+}
+
+pub(super) const NO_PACKAGE_MANAGER: &str = "pacman, apt-get or dnf";
+
+/// The first of pacman, apt-get and dnf in the trusted directories.
+pub(super) fn package_manager(env: &crate::env::Env) -> Option<PackageManager> {
+    use crate::command::resolve_trusted;
+    if resolve_trusted(env, "pacman").is_some() {
+        Some(PackageManager::Pacman)
+    } else if resolve_trusted(env, "apt-get").is_some() {
+        Some(PackageManager::AptGet)
+    } else if resolve_trusted(env, "dnf").is_some() {
+        Some(PackageManager::Dnf)
+    } else {
+        None
+    }
+}
+
 pub(super) fn not_installed(tool: &str) -> String {
     format!("{tool} not installed")
 }

@@ -363,6 +363,12 @@ fn escalation_args(esc: &Escalation, script: &[u8]) -> Vec<OsString> {
     match esc.kind {
         EscalationKind::Run0 | EscalationKind::Sudo => args.push(OsString::from("--")),
         EscalationKind::Pkexec => {}
+        // The program is the shell itself.
+        EscalationKind::AlreadyRoot => {
+            args.push(OsString::from("-c"));
+            args.push(OsStr::from_bytes(script).to_os_string());
+            return args;
+        }
     }
     args.push(OsString::from(SHELL));
     args.push(OsString::from("-c"));
@@ -796,6 +802,7 @@ mod tests {
             argv(EscalationKind::Run0),
             [os("--"), os("/bin/sh"), os("-c"), os("echo hi")]
         );
+        assert_eq!(argv(EscalationKind::AlreadyRoot), [os("-c"), os("echo hi")]);
         assert_eq!(
             argv(EscalationKind::Pkexec),
             [os("/bin/sh"), os("-c"), os("echo hi")]

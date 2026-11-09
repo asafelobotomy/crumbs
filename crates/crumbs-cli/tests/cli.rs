@@ -2600,7 +2600,7 @@ fn scan_system_unavailable_shows_reason() {
     assert_eq!(code, 0, "{stdout}{stderr}");
     let line = stdout.lines().find(|l| l.starts_with("pkg-cache")).unwrap();
     assert!(
-        line.contains("unavailable (pacman not installed)"),
+        line.contains("unavailable (pacman, apt-get or dnf not installed)"),
         "{stdout}"
     );
     assert!(
@@ -2612,7 +2612,7 @@ fn scan_system_unavailable_shows_reason() {
     // JSON keeps its own field and has no human text.
     let v = stdout_json(crumbs(&t).args(["scan", "--system", "--json"]));
     let first = &v["data"]["categories"][0];
-    assert_eq!(first["unavailable"], "pacman not installed", "{v}");
+    assert_eq!(first["unavailable"], "pacman, apt-get or dnf not installed", "{v}");
 }
 
 #[test]

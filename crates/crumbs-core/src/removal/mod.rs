@@ -1,8 +1,8 @@
 //! Decides how an app itself is removed, before anything is touched. The
 //! checks here run as the user and change nothing.
 
-mod apt;
-mod dnf;
+pub(crate) mod apt;
+pub(crate) mod dnf;
 mod flatpak;
 mod pacman;
 mod snap;

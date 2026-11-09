@@ -29,6 +29,9 @@ pub enum EscalationKind {
     Run0,
     Pkexec,
     Sudo,
+    /// crumbs already runs as root: the batch runs with the trusted `sh`
+    /// directly, no escalation tool involved.
+    AlreadyRoot,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
@@ -102,6 +105,9 @@ fn find_escalation(env: &Env, runner: &dyn CommandRunner, i: Interaction) -> Opt
         program: env.unsys(&path),
         requires_tty,
     };
+    if env.uid == 0 {
+        return resolve_trusted(env, "sh").map(|p| found(EscalationKind::AlreadyRoot, p, false));
+    }
     if let Some(run0) = resolve_trusted(env, "run0")
         && modern_systemd(env, runner)
     {
@@ -133,6 +139,30 @@ mod tests {
                 timed_out: false,
             },
         )
+    }
+
+    #[test]
+    fn already_root_runs_batch_with_sh() {
+        let t = FixtureTree::new();
+        t.write_exec("/usr/bin/sh", b"");
+        t.write_exec("/usr/bin/pkexec", b"");
+        let mut env = t.env();
+        env.uid = 0;
+        let e = find_escalation(&env, &FakeRunner::new(), Interaction::NoTerminal).unwrap();
+        assert_eq!(e.kind, EscalationKind::AlreadyRoot);
+        assert_eq!(e.program, PathBuf::from("/usr/bin/sh"));
+        assert!(!e.requires_tty);
+    }
+
+    #[test]
+    fn already_root_is_never_chosen_for_non_root() {
+        let t = FixtureTree::new();
+        t.write_exec("/usr/bin/sh", b"");
+        t.write_exec("/usr/bin/pkexec", b"");
+        let mut env = t.env();
+        env.uid = 1000;
+        let e = find_escalation(&env, &FakeRunner::new(), Interaction::Terminal).unwrap();
+        assert_eq!(e.kind, EscalationKind::Pkexec);
     }
 
     #[test]

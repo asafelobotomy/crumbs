@@ -66,6 +66,7 @@ fn print_human(r: &DoctorReport) -> anyhow::Result<()> {
                 EscalationKind::Run0 => "run0",
                 EscalationKind::Pkexec => "pkexec",
                 EscalationKind::Sudo => "sudo",
+                EscalationKind::AlreadyRoot => "running as root",
             };
             // The same rule `uninstall` uses: sudo needs a terminal.
             let usable = super::act::usable(e);
