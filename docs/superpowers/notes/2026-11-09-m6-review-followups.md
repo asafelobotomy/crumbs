@@ -20,4 +20,3 @@ M6 left these out on purpose, or noticed them on the way.
 7. **The `.rpm` is built with `rpmbuild`,** from `packaging/rpm/crumbs.spec`, not cargo-generate-rpm: cargo-generate-rpm 0.21.1 cannot own directories, so `rpm -e` left `/usr/share/doc/crumbs` and `/usr/share/licenses/crumbs` behind.
 8. **rpm self-removal is not tested.** In Debian, the packaging test removes the `.deb` with `crumbs uninstall dpkg:crumbs`. In Fedora it uses `rpm -e`, because dnf's simulation needs repository metadata and the test container has no network.
 9. **The source AUR package tests in the debug profile.** `check()` runs `cargo test`, not `cargo test --release`, because the CLI tests rely on debug-only fixture roots.
-10. **The maintainer address** in the `.deb`, the AUR files and `packaging/deb/copyright` is `asafelobotomy@users.noreply.github.com`, a placeholder that receives no mail. Replace it with a real contact address before publishing.

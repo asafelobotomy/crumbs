@@ -1,8 +1,8 @@
-# Maintainer: asafelobotomy <asafelobotomy@users.noreply.github.com>
+# Maintainer: asafelobotomy <213836723+asafelobotomy@users.noreply.github.com>
 
 pkgname=crumbs-bin
 _pkgname=crumbs
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Find and remove app leftovers, caches and system bloat (static binary)"
 arch=('x86_64')
