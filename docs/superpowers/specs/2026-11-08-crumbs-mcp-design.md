@@ -1,6 +1,6 @@
 # crumBS MCP server — design
 
-**Status:** approved in conversation on 2026-11-08; awaiting written-spec review.
+**Status:** implemented as M4c. Where this spec and the code differ (the tools take extra optional arguments, the confirmation has two paths, `applied` semantics), the code and `docs/json-schema.md` are authoritative.
 **Builds on:** `docs/superpowers/specs/2026-11-08-crumbs-design.md` (the main spec) and milestone 4b. 4b's Task 8 splits `cmd/act.rs` so that planning and rendering can run without a terminal.
 
 ## 1. Purpose

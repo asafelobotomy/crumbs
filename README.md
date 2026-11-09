@@ -2,7 +2,7 @@
 
 crumBS is a Linux command-line tool that lists the apps installed on your system across pacman, Flatpak, AppImage and unmanaged `.desktop` sources, finds the files they leave behind, finds space you can reclaim (caches, the trash, old temporary files, logs, superseded AppImages), and moves the items you pick to the trash. It is pre-alpha software.
 
-**Status:** M4b: `uninstall` fully removes pacman and Flatpak apps (and AppImages), and now also unmanaged apps by path; `uninstall` and `orphans --system` find system leftovers in `/etc` and `/opt`. `scan` and `clean` handle system bloat with `--system`, on top of M3's reclaimable space in your own files and M2's leftovers, orphans, history and restore. Everything that needs administrator rights runs in one batch behind one prompt. apt, dnf and Snap come later.
+**Status:** M4c: `crumbs mcp` serves crumbs to AI agents, with the user's confirmation for every change. M4b: `uninstall` fully removes pacman and Flatpak apps (and AppImages), and now also unmanaged apps by path; `uninstall` and `orphans --system` find system leftovers in `/etc` and `/opt`. `scan` and `clean` handle system bloat with `--system`, on top of M3's reclaimable space in your own files and M2's leftovers, orphans, history and restore. Everything that needs administrator rights runs in one batch behind one prompt. apt, dnf and Snap come later.
 
 ## Build
 
@@ -10,6 +10,8 @@ crumBS is a Linux command-line tool that lists the apps installed on your system
 cargo build --release
 ./target/release/crumbs --help
 ```
+
+`crumbs mcp` (see "Using crumbs from an AI agent") is built in by default. `cargo build --no-default-features` builds the CLI without it, and without the `rmcp`, `tokio` and `schemars` dependencies; the `mcp` subcommand then does not exist.
 
 ## Commands
 
@@ -24,6 +26,7 @@ cargo build --release
 - `crumbs scan [--category <name>]... [--details] [--user | --system] [--json]` lists reclaimable space by category. `--system` lists the system categories instead. It only reads: it changes nothing, needs no administrator rights and writes no history. With `--details` every item is listed. Naming categories scans exactly those, even ones switched off in the config.
 - `crumbs clean [<category>...] [-i] [--dry-run] [--yes] [--permanent] [--force] [--user | --system] [--json]` frees the space `scan` found. With no category it cleans every enabled user category; `--system` cleans the system categories instead. Naming categories cleans exactly those, and naming a system category implies `--system`. `-i` opens a checklist over all items. `--user` with `--system`, or a category of the other kind, is a usage error (exit 2).
 - `crumbs doctor [--json]` reports which sources and tools crumbs can use.
+- `crumbs mcp` serves crumbs to an AI agent over the Model Context Protocol on stdin and stdout (see "Using crumbs from an AI agent").
 
 ### Categories
 
@@ -222,6 +225,73 @@ A `..` in a `protect`, `exclude` or `appimage_dirs` entry is resolved as the sys
 
 Exit codes: 0 ok, 1 error, 2 usage error or ambiguous app, 3 partial failure (including a privileged run that stopped part-way), 4 aborted by the user, 5 administrator rights needed but unavailable or denied.
 
+## Using crumbs from an AI agent
+
+`crumbs mcp` is an [MCP](https://modelcontextprotocol.io) server over stdio. An MCP client such as Claude Code or Claude Desktop starts it, and the agent can then look at your machine and prepare clean-ups with the same data the CLI shows. **Nothing changes until you say yes, in the client, to the exact plan.**
+
+### What an agent can and cannot do
+
+It has 11 tools:
+
+- **Read:** `doctor`, `apps_list`, `app_show`, `scan`, `orphans`, `history`. They change nothing.
+- **Preview:** `preview_uninstall`, `preview_clean`, `preview_orphans`, `preview_restore`. Each builds the plan the matching CLI command would run, changes nothing, and returns the plan, a `plan_id` and the preview text the CLI would print.
+- **Apply:** `apply` takes only a `plan_id`.
+
+The limits that hold whatever the agent does:
+
+- **Every change needs your yes.** `apply` asks you through the client, showing the whole preview followed by `Apply this plan?`. Only your answer to that question counts. No tool argument can confirm a plan. Declining, cancelling or letting the question time out runs nothing.
+- **Agents cannot add anything crumbs did not find.** `select` (in `preview_uninstall` and `preview_clean`) and `paths` (in `preview_orphans`) accept only items that crumbs itself finds for that same request, and a path it did not find is refused. System leftovers in `/etc` and `/opt` are planned only when named. Without `select` the CLI's defaults apply.
+- **Plans are single-use and expire after 10 minutes.** A plan is removed when it runs, when you say no, and when it expires; a server restart drops them all. At most 64 plans can be pending, and a preview past that is refused until some are applied or expire.
+- **All the CLI's safety checks still run.** A plan keeps the fingerprints from its scan, every path is checked again right before it is acted on, protected paths are refused, and the history is written, so `crumbs restore` works as usual.
+- **A running app is never closed or forced.** If an app in the plan is running, `apply` refuses and tells the agent to preview again once it is closed; the CLI's `--force` does not exist here.
+- **Administrator rights go through polkit, never `sudo`.** Root steps run in one batch through `run0` or `pkexec`, with stdin from `/dev/null`, so the usual polkit prompt appears on your desktop. `sudo` needs a terminal and is never used.
+
+### Confirmation
+
+The confirmation is a protocol feature, so it reaches you directly and not through the agent:
+
+- Before protocol 2026-07-28 the server sends `elicitation/create` with a form whose only field is `confirm`.
+- From 2026-07-28 it returns an `InputRequiredResult` (multi round trip) carrying the same form, and the client retries `apply` with your answer.
+
+A client that cannot show forms (it did not declare elicitation with form mode) gets an error that names the command to run in a terminal instead, for example `this client can't ask you to confirm; run this in a terminal instead: crumbs uninstall inky --leftovers-only`. Nothing runs, and the plan stays. Where a selection has no CLI flag the command ends with `-i`, and the message says `pick the same items with -i`.
+
+### Results of `apply`
+
+- `{ "applied": false, "reason": "declined" }`, or `"cancelled"` or `"timed out"`: you said no (or did not answer), nothing ran.
+- `{ "applied": true, "report": [...], "exit_code": 0 }`: the plan ran. The report is the CLI's `--json` report. A partial failure (exit 3) has the same shape with `exit_code` 3 and the tool error flag set. A restore has `outcomes` instead of `report`.
+- **Exit 5, administrator rights needed but not available or not granted.** The result is not an error. It holds `exit_code` 5, an `error` text, and `manual_commands`: the commands to run yourself, one per privileged step, exactly as the CLI prints them. When a command is an `rm -rf --one-file-system`, `note` says to check that nothing is mounted inside those paths first, because run by hand crumbs' own checks do not happen. When the denied prompt followed steps that did not need rights, `report` holds what ran, and `escalation_output` holds what the escalation program printed, when it printed anything. With no escalation program at all, nothing runs and `applied` is false.
+- **Refusals** (an unknown or used plan, a running app, a changed file) are tool errors whose text is the CLI's message and whose structured content is `{ "exit_code", "details" }`.
+
+<!-- FINAL WAVE: `applied` below documents the current code (true when any step ran, including after exit 5); the final wave changes it to "at least one action succeeded". Update this line and the matching one in docs/json-schema.md. -->
+`applied` is currently `true` when anything ran, and `false` when nothing did (declined, or no escalation program).
+
+### Things to know
+
+- **A graphical polkit agent must be running** for root steps. Without one (a bare TTY or SSH session, for instance) the escalation fails and `apply` returns the exit-5 result above, with the commands to run yourself.
+- **Keep stdin open.** The server runs until the client closes stdin, and after that the MCP library waits only 5 seconds for responses still in flight, so a client that closes stdin right after sending `apply` can lose the result.
+- **Startup may tighten the history files.** Like the CLI, the server makes a looser mode on `history.jsonl` and its directory owner-only. The server sends this and other warnings (config and rule problems) as MCP log messages at level `warning`; stdout carries only the protocol and stderr stays quiet.
+- **Tool arguments** mirror the CLI's flags. Together, `user` and `system` are an error for `scan`, `orphans` and `preview_clean`, as in the CLI. [docs/json-schema.md](docs/json-schema.md#mcp-tools-crumbs-mcp) lists every tool's arguments and results.
+
+### Client configuration
+
+Claude Code:
+
+```sh
+claude mcp add crumbs -- crumbs mcp
+```
+
+Claude Desktop, in `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "crumbs": { "command": "crumbs", "args": ["mcp"] }
+  }
+}
+```
+
+`crumbs` must be on the client's `PATH`; otherwise give the full path as `command`. Without the `mcp` feature (`--no-default-features`) there is no `crumbs mcp`.
+
 ## Safety
 
 - **Trash first.** Files go to the freedesktop trash, not the void. Only `--permanent` deletes, and it says so in the preview. The exceptions are emptying the trash and clearing `/tmp` (`clean trash`, `clean temp`), which are always permanent and say so, as are the system categories, package removals and system leftovers (they run commands as root).
@@ -238,5 +308,6 @@ Exit codes: 0 ok, 1 error, 2 usage error or ambiguous app, 3 partial failure (in
 
 ## Docs
 
-- [JSON output schema](docs/json-schema.md)
+- [JSON output schema](docs/json-schema.md), with the `crumbs mcp` tools
+- [MCP server design](docs/superpowers/specs/2026-11-08-crumbs-mcp-design.md)
 - [Design](docs/superpowers/specs/2026-11-08-crumbs-design.md)
