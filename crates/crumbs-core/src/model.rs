@@ -91,6 +91,9 @@ pub struct App {
     pub exec_names: Vec<String>,
     pub wm_classes: Vec<String>,
     pub has_gui: bool,
+    /// The desktop this package is a part of (`uQ`), if any. Removing it
+    /// takes an extra confirmation; see [`desktop_of`].
+    pub part_of: Option<String>,
     /// An unmanaged app's canonical program (symlinks followed), in-system.
     #[serde(skip)]
     pub program: Option<PathBuf>,
@@ -118,15 +121,54 @@ impl App {
             exec_names: Vec::new(),
             wm_classes: Vec::new(),
             has_gui: false,
+            part_of: desktop_of(source, name).map(str::to_string),
             program: None,
             program_link: None,
         }
     }
 }
 
+/// Packages that make up the uQ desktop: its shell, the pinned Hyprland,
+/// and the apps it is built around. Removing one breaks the session or a
+/// part of it, so `uninstall` asks twice (see `--desktop`).
+pub const UQ_PACKAGES: [&str; 6] = [
+    "uq",
+    "uq-hyprland-pin",
+    "scdr",
+    "noti-fi",
+    "crum-bs",
+    "crum-bs-bin",
+];
+
+/// The desktop a package belongs to, by its package manager name. Flatpaks,
+/// AppImages and unmanaged apps are never part of one.
+pub fn desktop_of(source: SourceKind, name: &str) -> Option<&'static str> {
+    let package = matches!(
+        source,
+        SourceKind::Pacman | SourceKind::Dpkg | SourceKind::Rpm
+    );
+    (package && UQ_PACKAGES.contains(&name)).then_some("uQ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uq_packages_are_part_of_the_desktop() {
+        assert_eq!(
+            App::new(SourceKind::Pacman, "uq").part_of.as_deref(),
+            Some("uQ")
+        );
+        assert_eq!(
+            App::new(SourceKind::Pacman, "crum-bs").part_of.as_deref(),
+            Some("uQ")
+        );
+        assert_eq!(App::new(SourceKind::Pacman, "firefox").part_of, None);
+        // Only a package is: an AppImage or Flatpak of the same name is not.
+        assert_eq!(App::new(SourceKind::AppImage, "uq").part_of, None);
+        assert_eq!(App::new(SourceKind::Flatpak, "scdr").part_of, None);
+    }
 
     #[test]
     fn app_id_is_source_qualified() {

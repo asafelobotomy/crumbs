@@ -111,3 +111,25 @@ paths = ["~/.zoom", "$XDG_CONFIG_HOME/zoomus.conf"]
 [[app]]
 match = { package = ["android-studio"] }
 paths = ["$XDG_CONFIG_HOME/Google/AndroidStudio*", "$XDG_CACHE_HOME/Google/AndroidStudio*"]
+
+# uQ desktop: the shell's Hyprland files and generated theme. ~/.config/hypr
+# itself is shared with a plain Hyprland setup and is not listed.
+[[app]]
+match = { package = ["uq"] }
+paths = ["$XDG_CONFIG_HOME/hypr/uq", "$XDG_STATE_HOME/uq"]
+
+# scdr: rules and imported ananicy rules. /var/lib/scdr is the daemon's own.
+[[app]]
+match = { package = ["scdr"] }
+paths = ["/etc/scdr"]
+
+# noti-fi: notifd's rules and history
+[[app]]
+match = { package = ["noti-fi"] }
+paths = ["$XDG_CONFIG_HOME/notifd", "$XDG_DATA_HOME/notifd"]
+
+# appOFholding: its library database, sandbox homes and extracted AppImages.
+# The AppImages it manages are its own as well; crumBS leaves them alone.
+[[app]]
+match = { package = ["appofholding"], appimage = ["appofholding"] }
+paths = ["$XDG_DATA_HOME/appofholding", "$XDG_CONFIG_HOME/appofholding", "$XDG_CACHE_HOME/appofholding"]

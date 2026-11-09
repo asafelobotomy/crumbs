@@ -3493,3 +3493,40 @@ fn version_flag_prints_name_and_version() {
         .success()
         .stdout(format!("crumbs {}\n", env!("CARGO_PKG_VERSION")));
 }
+
+// ---- packages that are part of the uQ desktop ----
+
+#[test]
+fn uninstall_uq_package_needs_desktop_flag() {
+    let t = pacman_fixture(PACMAN_OK);
+    t.pacman_pkg("scdr", "0.2.0-8", Some(1_000), &["usr/bin/scdrd"]);
+    // Without a terminal, --yes alone is not enough: refused, nothing run.
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "sh").args([
+        "uninstall",
+        "scdr",
+        "--yes",
+    ]));
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("pacman:scdr is part of the uQ desktop; re-run with --desktop"),
+        "{stderr}"
+    );
+    assert!(pkg_present(&t, "scdr-0.2.0-8"));
+    assert!(!real(&t, "/pacman-args").exists());
+    // A dry run is refused the same way without a terminal (the MCP server).
+    let (code, _, _) = run_out(crumbs(&t).args(["uninstall", "scdr", "--dry-run"]));
+    assert_eq!(code, 1);
+    // --leftovers-only keeps the package, so it needs no --desktop.
+    let (code, stdout, stderr) =
+        run_out(crumbs(&t).args(["uninstall", "scdr", "--leftovers-only", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    // With --desktop the plan removes it.
+    let v = stdout_json(crumbs(&t).args(["uninstall", "scdr", "--desktop", "--dry-run", "--json"]));
+    let actions = v["data"]["plans"][0]["actions"].as_array().unwrap();
+    assert_eq!(actions[0]["action"]["type"], "package-remove", "{v}");
+    // apps show and the JSON both say which desktop it belongs to.
+    let v = stdout_json(crumbs(&t).args(["apps", "show", "scdr", "--json"]));
+    assert_eq!(v["data"]["app"]["part_of"], "uQ", "{v}");
+    let v = stdout_json(crumbs(&t).args(["apps", "show", "firefox", "--json"]));
+    assert_eq!(v["data"]["app"]["part_of"], serde_json::Value::Null, "{v}");
+}
