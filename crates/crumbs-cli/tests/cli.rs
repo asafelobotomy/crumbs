@@ -63,6 +63,17 @@ fn apps_list_snapshot() {
     let out = crumbs(&t).args(["apps", "list"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     let text = String::from_utf8(out.stdout).unwrap();
+    let text = without_dir_blocks(
+        &t,
+        text,
+        &[
+            ("cache           1", 4 * 1024, 1),
+            ("  foo", 4 * 1024, 1),
+            ("thumbnails      1", 4 * 1024, 1),
+            ("  thumbnails", 4 * 1024, 1),
+            ("reclaimable:", 16 * 1024, 2),
+        ],
+    );
     let root = regex_escape(&t.dir.path().to_string_lossy());
     insta::with_settings!({ filters => vec![(root.as_str(), "[ROOT]")] }, {
         insta::assert_snapshot!(text);

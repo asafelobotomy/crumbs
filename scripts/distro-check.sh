@@ -69,7 +69,9 @@ inside() {
         esac
     }
     before=$(count)
-    CRUMBS_ALLOW_REAL_ESCALATION=1 "$CRUMBS" uninstall "$ID" --yes --json > /tmp/uninstall.json
+    # As root with root's own home: CI runners set HOME to a directory root
+    # does not own, and crumbs rightly refuses to act there as root.
+    HOME=/root CRUMBS_ALLOW_REAL_ESCALATION=1 "$CRUMBS" uninstall "$ID" --yes --json > /tmp/uninstall.json
     python3 -m json.tool /tmp/uninstall.json >/dev/null
     case "$DISTRO" in
         arch) ! pacman -Q sl >/dev/null 2>&1 ;;
