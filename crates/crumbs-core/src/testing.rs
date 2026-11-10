@@ -44,16 +44,18 @@ impl FixtureTree {
         self.dir.path().join(rel.trim_start_matches('/'))
     }
 
-    /// Gives the fixture's `/tmp`, once it is a real directory, the sticky
+    /// Gives the fixture's `/tmp` and `/var/tmp`, once real directories, the sticky
     /// bit (mode 1777) like the real one; crumbs refuses a `/tmp` without
     /// it. Called by every helper that creates paths.
     fn sticky_tmp(&self) {
-        let tmp = self.real("tmp");
-        if let Ok(m) = fs::symlink_metadata(&tmp)
-            && m.is_dir()
-            && m.permissions().mode() & 0o1000 == 0
-        {
-            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o1777)).unwrap();
+        for rel in ["tmp", "var/tmp"] {
+            let tmp = self.real(rel);
+            if let Ok(m) = fs::symlink_metadata(&tmp)
+                && m.is_dir()
+                && m.permissions().mode() & 0o1000 == 0
+            {
+                fs::set_permissions(&tmp, fs::Permissions::from_mode(0o1777)).unwrap();
+            }
         }
     }
 

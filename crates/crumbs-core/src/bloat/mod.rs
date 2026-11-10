@@ -2,6 +2,7 @@
 //! and the parallel scan driver.
 
 mod appimage;
+mod aur;
 mod browser;
 mod cache;
 mod dev;
@@ -43,6 +44,7 @@ pub enum Category {
     FlatpakUnused,
     AppimageOld,
     Logs,
+    AurBuild,
     PkgCache,
     OrphanPkgs,
     Journal,
@@ -52,7 +54,7 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 15] = [
+    pub const ALL: [Category; 16] = [
         Category::Cache,
         Category::Thumbnails,
         Category::Trash,
@@ -62,6 +64,7 @@ impl Category {
         Category::FlatpakUnused,
         Category::AppimageOld,
         Category::Logs,
+        Category::AurBuild,
         Category::PkgCache,
         Category::OrphanPkgs,
         Category::Journal,
@@ -81,6 +84,7 @@ impl Category {
             Category::FlatpakUnused => "flatpak-unused",
             Category::AppimageOld => "appimage-old",
             Category::Logs => "logs",
+            Category::AurBuild => "aur-build",
             Category::PkgCache => "pkg-cache",
             Category::OrphanPkgs => "orphan-pkgs",
             Category::Journal => "journal",
@@ -218,6 +222,7 @@ pub fn scanners() -> Vec<Box<dyn Scanner>> {
         Box::new(flatpak::FlatpakUnusedScanner),
         Box::new(appimage::AppimageOldScanner),
         Box::new(logs::LogsScanner),
+        Box::new(aur::AurBuildScanner),
         Box::new(system::PkgCacheScanner),
         Box::new(system::OrphanPkgsScanner),
         Box::new(system::JournalScanner),
@@ -313,6 +318,7 @@ mod tests {
             "flatpak-unused",
             "appimage-old",
             "logs",
+            "aur-build",
             "pkg-cache",
             "orphan-pkgs",
             "journal",
@@ -320,7 +326,7 @@ mod tests {
             "system-temp",
             "flatpak-unused-system",
         ];
-        assert_eq!(Category::ALL.len(), 15);
+        assert_eq!(Category::ALL.len(), 16);
         for (c, n) in Category::ALL.iter().zip(names) {
             assert_eq!(c.as_str(), n);
             assert_eq!(Category::from_str(n).unwrap(), *c);
@@ -330,7 +336,12 @@ mod tests {
                 *c
             );
             assert_eq!(c.default_on(), *c != Category::DevCache);
-            assert_eq!(c.system(), names.iter().position(|x| x == &n).unwrap() >= 9);
+            // The system categories come last, from `pkg-cache` on.
+            let first_system = names.iter().position(|x| *x == "pkg-cache").unwrap();
+            assert_eq!(
+                c.system(),
+                names.iter().position(|x| x == &n).unwrap() >= first_system
+            );
         }
         assert!(Category::from_str("nope").is_err());
         assert!(Category::ALL.windows(2).all(|w| w[0] < w[1]));

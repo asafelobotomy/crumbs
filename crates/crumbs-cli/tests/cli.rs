@@ -1474,7 +1474,8 @@ fn scan_json_shape() {
             "dev-cache",
             "flatpak-unused",
             "appimage-old",
-            "logs"
+            "logs",
+            "aur-build"
         ]
     );
     let cache = &cats[0];

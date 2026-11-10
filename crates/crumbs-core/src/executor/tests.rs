@@ -2828,3 +2828,27 @@ fn measurement_counts_a_folder_missing_both_times_as_empty() {
     assert!(report.results[0].ok, "{:?}", report.results[0]);
     assert_eq!(report.results[0].freed, Some(gone));
 }
+
+#[test]
+fn execute_refuses_a_build_tree_in_use() {
+    // A /var/tmp build tree is deleted only while no process works in it.
+    let t = FixtureTree::new();
+    t.write("var/tmp/pamac-build-user/brave/src/x", b"x");
+    t.write("var/tmp/pamac-build-other/a/x", b"x");
+    t.symlink("proc/77/cwd", "/var/tmp/pamac-build-user/brave/src");
+    t.write("proc/77/comm", b"makepkg\n");
+    let env = t.env();
+    let mut busy = planned(&env, delete("/var/tmp/pamac-build-user"));
+    busy.scope = Scope::UserTemp;
+    let mut idle = planned(&env, delete("/var/tmp/pamac-build-other"));
+    idle.scope = Scope::UserTemp;
+    let report = execute(&env, &Config::default(), &plan_of(vec![busy, idle]));
+    assert!(!report.results[0].ok);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("refusing: /var/tmp/pamac-build-user is in use by makepkg (pid 77)")
+    );
+    assert!(env.sys("/var/tmp/pamac-build-user/brave/src/x").exists());
+    assert!(report.results[1].ok, "{:?}", report.results[1]);
+    assert!(!env.sys("/var/tmp/pamac-build-other").exists());
+}
