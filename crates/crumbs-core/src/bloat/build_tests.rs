@@ -537,3 +537,49 @@ fn a_repository_cannot_point_git_at_another_work_tree() {
     };
     assert!(ignored_by_git(&cx, git, &repo, &["target".to_string()]).is_empty());
 }
+
+#[test]
+fn a_linked_parent_of_home_keeps_items_under_home() {
+    // /home is a link to /data/home: resolving ~/Projects must not move
+    // items out of home as the safety checks see it.
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/git", b"#!/bin/sh\n");
+    t.mkdir("data/home/user/Projects/app/.git");
+    t.write("data/home/user/Projects/app/Cargo.toml", b"");
+    t.write("data/home/user/Projects/app/target/x", b"x");
+    t.symlink("home", "data/home");
+    let args = ignore_args(&t, "/data/home/user/Projects/app", &["target"]);
+    let runner = on_git(FakeRunner::new(), &args, &["target"]);
+    let cfg = Config::default();
+    let items = scan_cfg(&t, &runner, &cfg);
+    assert_eq!(items.len(), 1, "{items:?}");
+    let p = items[0].path.clone().unwrap();
+    assert_eq!(p, PathBuf::from("/home/user/Projects/app/target"));
+    verify(
+        &t.env(),
+        &cfg,
+        Scope::Home,
+        &p,
+        items[0].fingerprint.as_ref().unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_process_seen_through_the_linked_parent_still_holds_it_back() {
+    // /proc shows the resolved path of a process working in the repository.
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/git", b"#!/bin/sh\n");
+    t.mkdir("data/home/user/Projects/app/.git");
+    t.write("data/home/user/Projects/app/Cargo.toml", b"");
+    t.write("data/home/user/Projects/app/target/x", b"x");
+    t.symlink("home", "data/home");
+    let real_repo = t.dir.path().join("data/home/user/Projects/app");
+    t.symlink("proc/5/cwd", real_repo.to_str().unwrap());
+    t.write("proc/5/comm", b"cargo\n");
+    let args = ignore_args(&t, "/data/home/user/Projects/app", &["target"]);
+    let runner = on_git(FakeRunner::new(), &args, &["target"]);
+    let items = scan_cfg(&t, &runner, &Config::default());
+    assert!(!items[0].preselected, "{:?}", items[0]);
+    assert_eq!(items[0].note.as_deref(), Some("app is in use by cargo (pid 5)"));
+}

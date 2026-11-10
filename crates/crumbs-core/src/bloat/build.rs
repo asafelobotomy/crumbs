@@ -55,6 +55,7 @@ impl Scanner for BuildOutputScanner {
             return Ok(Vec::new());
         };
         let home = cx.env.unsys(&cx.env.home);
+        let real_home = fs::canonicalize(&cx.env.home).ok();
         let roots: Vec<PathBuf> = if cx.cfg.project_dirs.is_empty() {
             DEFAULT_ROOTS.iter().map(|r| home.join(r)).collect()
         } else {
@@ -68,14 +69,23 @@ impl Scanner for BuildOutputScanner {
             let Ok(real_root) = fs::canonicalize(cx.env.sys_path(&root)) else {
                 continue;
             };
-            let root = cx.env.unsys(&real_root);
+            // In-system, under home as the safety checks see it: a linked
+            // parent of home (`/home` -> `/data/home`) is not followed, so
+            // the resolved path is rebased onto home. Outside home: skipped.
+            let Some(root) = real_home
+                .as_ref()
+                .and_then(|h| real_root.strip_prefix(h).ok())
+                .map(|rel| home.join(rel))
+            else {
+                continue;
+            };
             let mut queue = repositories(&real_root);
             while let Some(repo) = queue.pop() {
                 if seen_repos.contains(&repo) {
                     continue;
                 }
                 seen_repos.push(repo.clone());
-                let (items, nested) = repo_items(cx, &git, &root, &repo);
+                let (items, nested) = repo_items(cx, &git, &root, &real_root, &repo);
                 out.extend(items);
                 // A repository inside this one answers for itself.
                 queue.extend(nested);
@@ -170,13 +180,14 @@ fn is_output_name(name: &str) -> bool {
 }
 
 /// The build output in one repository (real path `repo`), found below its
-/// project folder `root` (in-system), and the repositories nested in it
+/// project folder `root` (in-system; `real_root` resolved), and the repositories nested in it
 /// (a `.git` directory or file below it: a submodule, a worktree, a
 /// clone), which are not searched here: their own git decides for them.
 fn repo_items(
     cx: &ScanContext,
     git: &Path,
     root: &Path,
+    real_root: &Path,
     repo: &Path,
 ) -> (Vec<BloatItem>, Vec<PathBuf>) {
     // Candidates, relative to the repository.
@@ -212,7 +223,10 @@ fn repo_items(
     }
     rels.sort();
     let ignored = ignored_by_git(cx, git, repo, &rels);
-    let in_system_repo = cx.env.unsys(repo);
+    let in_system_repo = match repo.strip_prefix(real_root) {
+        Ok(rel) => root.join(rel),
+        Err(_) => return (Vec::new(), nested),
+    };
     let repo_label = in_system_repo
         .strip_prefix(root)
         .ok()

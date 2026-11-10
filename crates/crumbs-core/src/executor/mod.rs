@@ -1384,7 +1384,14 @@ const COMM_LEN: usize = 15;
 /// lowest pid when there are several.
 pub fn process_using(env: &Env, in_system: &Path) -> Option<(u32, String)> {
     let real = env.sys_path(in_system);
-    let inside = |p: &Path| p.starts_with(in_system) || p.starts_with(&real);
+    // /proc shows resolved paths: a linked parent (`/home` -> `/data/home`)
+    // would otherwise hide the process.
+    let canon = fs::canonicalize(&real).ok();
+    let inside = |p: &Path| {
+        p.starts_with(in_system)
+            || p.starts_with(&real)
+            || canon.as_ref().is_some_and(|c| p.starts_with(c))
+    };
     let rd = fs::read_dir(env.sys_path(Path::new("/proc"))).ok()?;
     rd.flatten()
         .filter_map(|e| {
@@ -1412,12 +1419,18 @@ pub fn process_using(env: &Env, in_system: &Path) -> Option<(u32, String)> {
 /// lowest pid when there are several.
 pub fn process_working_in(env: &Env, in_system: &Path) -> Option<(u32, String)> {
     let real = env.sys_path(in_system);
+    // /proc shows resolved paths: a linked parent (`/home` -> `/data/home`)
+    // would otherwise hide the process.
+    let canon = fs::canonicalize(&real).ok();
     let rd = fs::read_dir(env.sys_path(Path::new("/proc"))).ok()?;
     rd.flatten()
         .filter_map(|e| {
             let pid: u32 = e.file_name().to_str()?.parse().ok()?;
             let cwd = fs::read_link(e.path().join("cwd")).ok()?;
-            if !(cwd.starts_with(in_system) || cwd.starts_with(&real)) {
+            if !(cwd.starts_with(in_system)
+                || cwd.starts_with(&real)
+                || canon.as_ref().is_some_and(|c| cwd.starts_with(c)))
+            {
                 return None;
             }
             let comm = fs::read_to_string(e.path().join("comm")).unwrap_or_default();
