@@ -11,10 +11,12 @@ use crate::error::CoreError;
 
 /// The root step, run as `sh -c PRUNE_TIMESHIFT crumbs-snapshots <keep>`
 /// in the privileged batch (whose `PATH` holds only the trusted system
-/// directories). It lists Timeshift's snapshots, checks that every name is
+/// directories). Globbing is off (`set -f`), so a listed name is never
+/// expanded against root's working directory. It lists Timeshift's snapshots, checks that every name is
 /// Timeshift's `YYYY-MM-DD_HH-MM-SS` before deleting any, and deletes all
 /// but the newest `<keep>` (at least 1), oldest first, with Timeshift.
-pub const PRUNE_TIMESHIFT: &str = r#"keep=${1-}
+pub const PRUNE_TIMESHIFT: &str = r#"set -f
+keep=${1-}
 case "$keep" in ''|*[!0-9]*) echo "crumbs: bad keep count '$keep'" >&2; exit 2 ;; esac
 [ "$keep" -ge 1 ] || { echo "crumbs: keep at least 1 snapshot" >&2; exit 2; }
 list=$(timeshift --list --scripted) || exit 1

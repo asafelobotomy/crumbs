@@ -203,7 +203,9 @@ pub fn load_config(env: &Env) -> Result<Config, CoreError> {
     let temp_age_days = at_least_one("temp_age_days", raw.temp_age_days, 7);
     let log_age_days = at_least_one("log_age_days", raw.log_age_days, 14);
     let build_age_days = at_least_one("build_age_days", raw.build_age_days, 7);
-    let snapshots_keep = at_least_one("snapshots_keep", raw.snapshots_keep, 3) as u32;
+    // Beyond u32: keep everything, never wrap round to a small count.
+    let snapshots_keep =
+        u32::try_from(at_least_one("snapshots_keep", raw.snapshots_keep, 3)).unwrap_or(u32::MAX);
     let pkg_cache_keep = match raw.pkg_cache_keep {
         None => 2,
         Some(n) => u32::try_from(n).unwrap_or_else(|_| {
@@ -621,6 +623,14 @@ mod tests {
             "{:?}",
             c.warnings
         );
+
+        // A keep count beyond u32 keeps everything rather than wrapping.
+        let tk = crate::testing::FixtureTree::new();
+        tk.write(
+            "home/user/.config/crumbs/config.toml",
+            b"snapshots_keep = 4294967296\n",
+        );
+        assert_eq!(load_config(&tk.env()).unwrap().snapshots_keep, u32::MAX);
 
         // build-output runs unnamed only when categories_on lists it: an
         // older config's categories_off cannot switch it on.

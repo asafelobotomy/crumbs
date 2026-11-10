@@ -684,7 +684,17 @@ fn snapshots_unavailable_without_timeshift_setup() {
 /// Runs the root step's script against a fake `timeshift` that lists
 /// `listing` and logs every delete; returns the deleted names.
 fn run_prune(listing: &str, keep: &str) -> (bool, Vec<String>) {
+    run_prune_in(listing, keep, None)
+}
+
+/// [`run_prune`] with the root shell's working directory holding `file`.
+fn run_prune_in(listing: &str, keep: &str, file: Option<&str>) -> (bool, Vec<String>) {
     let t = FixtureTree::new();
+    let cwd = t.dir.path().join("cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    if let Some(f) = file {
+        std::fs::write(cwd.join(f), "").unwrap();
+    }
     let bin = t.dir.path().join("bin");
     let log = t.dir.path().join("deleted");
     let fake = format!(
@@ -696,6 +706,7 @@ fn run_prune(listing: &str, keep: &str) -> (bool, Vec<String>) {
     std::fs::write(&tool, fake).unwrap();
     std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let status = std::process::Command::new("/bin/sh")
+        .current_dir(&cwd)
         .args([
             "-c",
             super::snapshots::PRUNE_TIMESHIFT,
@@ -737,4 +748,14 @@ fn prune_script_refuses_unexpected_names_and_counts() {
         let (ok, deleted) = run_prune(LISTING, bad);
         assert!(!ok && deleted.is_empty(), "keep {bad:?}");
     }
+}
+
+#[test]
+fn prune_script_never_globs_a_listed_name() {
+    // `2026-1*` must not become a file of root's working directory that
+    // looks like a snapshot name and is then deleted.
+    let odd = "0    >  2026-1*  D\n1    >  2026-11-10_08-18-24  O\n";
+    let (ok, deleted) = run_prune_in(odd, "1", Some("2026-11-09_00-00-00"));
+    assert!(!ok, "the literal name is not a snapshot name");
+    assert!(deleted.is_empty(), "{deleted:?}");
 }
