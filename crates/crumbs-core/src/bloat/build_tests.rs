@@ -104,16 +104,6 @@ fn projects() -> FixtureTree {
     t
 }
 
-fn rels() -> [&'static str; 5] {
-    [
-        "android/app/build",
-        "kept/node_modules",
-        "target",
-        "tools/.venv",
-        "web/node_modules",
-    ]
-}
-
 #[test]
 fn lists_ignored_build_output_beside_its_project_file() {
     let t = projects();
