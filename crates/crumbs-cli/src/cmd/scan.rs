@@ -125,8 +125,7 @@ pub(crate) fn gather(env: &Env, args: &ScanArgs) -> Result<Scanned, Stop> {
             .collect()
     };
     // Naming categories scans exactly those, whatever the config says.
-    let enabled =
-        |c: Category| !args.categories.is_empty() || !setup.cfg.categories_off.contains(&c);
+    let enabled = |c: Category| !args.categories.is_empty() || setup.cfg.enabled(c);
     let which: Vec<Category> = listed.iter().copied().filter(|c| enabled(*c)).collect();
     let cx = ScanContext {
         env,

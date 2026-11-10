@@ -123,6 +123,13 @@ impl Category {
         )
     }
 
+    /// Whether the category runs unnamed only when `categories_on` lists
+    /// it: `build-output`, which reaches into your projects. A config's
+    /// `categories_off` cannot switch it on.
+    pub fn opt_in_only(self) -> bool {
+        self == Category::BuildOutput
+    }
+
     /// Whether the category is enabled when the config doesn't say.
     pub fn default_on(self) -> bool {
         !matches!(self, Category::DevCache | Category::BuildOutput)

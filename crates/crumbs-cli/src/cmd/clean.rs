@@ -111,7 +111,7 @@ pub(crate) fn build(env: &Env, args: &CleanArgs, pick: Pick<String>) -> Result<D
             if named {
                 args.categories.contains(c)
             } else {
-                c.system() == args.system && !setup.cfg.categories_off.contains(c)
+                c.system() == args.system && setup.cfg.enabled(*c)
             }
         })
         .collect();
