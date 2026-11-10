@@ -279,9 +279,14 @@ pub(super) fn ignored_by_git(
     rels: &[String],
 ) -> Vec<String> {
     let repo_arg = repo.to_string_lossy();
-    let args = [
+    let work_tree = format!("--work-tree={repo_arg}");
+    let mut args: Vec<&str> = vec![
         "-C",
         &repo_arg,
+        // Names such as `we*rd` are names, not patterns.
+        "--literal-pathspecs",
+        // The repository's own core.worktree must not send git elsewhere.
+        &work_tree,
         "-c",
         "core.fsmonitor=false",
         "-c",
@@ -292,7 +297,10 @@ pub(super) fn ignored_by_git(
         "--exclude-standard",
         "--directory",
         "-z",
+        // Only the candidates are walked, not every untracked folder.
+        "--",
     ];
+    args.extend(rels.iter().map(String::as_str));
     let listed: Vec<String> = match cx.runner.run(git, &args) {
         Ok(o) if o.status == 0 && !o.timed_out => o
             .stdout
