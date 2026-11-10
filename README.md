@@ -64,9 +64,9 @@ An item whose app is running (a cache, a browser cache, an old AppImage) is list
 
 `app-cache` holds back an app that is running: a process names its folder as its `--user-data-dir`, or has a file open in it. `aur-build` holds back a tree a process works in (a running `makepkg`), and checks again right before deleting.
 
-`build-output` looks for git repositories up to three levels below your project folders (`project_dirs`, or `~/Projects`, `~/projects`, `~/src`, `~/code`, `~/dev`, `~/git`, `~/repos` and `~/workspace`), and in each up to four levels down for build folders of a known kind: `target` beside a `Cargo.toml` (or with Cargo's `CACHEDIR.TAG`), `node_modules`, `.next`, `.svelte-kit`, `.turbo` or `.parcel-cache` beside a `package.json`, `build` beside a Gradle or CMake file, `.gradle` beside a Gradle build, `.venv` or `venv` holding `pyvenv.cfg`. A folder is listed only when `git check-ignore` says git ignores it, so nothing tracked is offered. Its note says when it was last used; one used within `build_age_days` (7) is not preselected, and nor is any in a repository a process works in (`app is in use by cargo (pid 4242)`). It is off by default: `crumbs clean build-output`, or remove it from `categories_off`.
+`build-output` looks for git repositories up to three levels below your project folders (`project_dirs`, or `~/Projects`, `~/projects`, `~/src`, `~/code`, `~/dev`, `~/git`, `~/repos` and `~/workspace`), and in each up to four levels down for build folders of a known kind: `target` beside a `Cargo.toml` (or with Cargo's `CACHEDIR.TAG`), `node_modules`, `.next`, `.svelte-kit`, `.turbo` or `.parcel-cache` beside a `package.json`, `build` beside a Gradle or CMake file, `.gradle` beside a Gradle build, `.venv` or `venv` holding `pyvenv.cfg`. A folder is listed only when `git check-ignore` says git ignores it, so nothing tracked is offered. Its note says when it last changed (running what it holds changes nothing); one changed within `build_age_days` (7) is not preselected, and nor is one a running program comes from or has a file open in (`in use by node (pid 92)`), or any in a repository a process works in (`app is in use by cargo (pid 4242)`). A Python virtual environment is never preselected: something outside the project may run from it, and it may have no requirements file to be rebuilt from. git runs with `core.fsmonitor` and `core.untrackedCache` off, so a project's own git config cannot run a command during a scan, and a repository nested inside another (a submodule, a worktree, a clone) is checked by its own git. It runs only when named (`crumbs clean build-output`) or listed in `categories_on`.
 
-`containers` lists nothing for an engine that is missing or that you cannot reach (Docker without access to its daemon). Image layers shared with other images stay, so less may be freed than the images' size; the space freed is measured.
+`containers` lists nothing for an engine that is missing or that you cannot reach (Docker without access to its daemon). Image layers shared with other images stay, so less may be freed than the images' size; podman's is measured (Docker's storage cannot be read without administrator rights). Volumes are never preselected, even when the category is named: tick them with `-i`.
 
 ### System categories
 
@@ -82,7 +82,7 @@ An item whose app is running (a cache, a browser cache, an old AppImage) is list
 | `flatpak-unused-system` | Flatpak runtimes no app uses, in the system installation (size decided by Flatpak) | no: only when named |
 | `snapshots` | Timeshift snapshots beyond the newest `snapshots_keep` (3), oldest first | no: only when named |
 
-The three opt-in categories are never run by a plain `crumbs clean --system`; name them (`crumbs clean orphan-pkgs`) or tick them with `-i`. Timeshift lists its snapshots only to root, and a scan never asks for administrator rights, so `snapshots` shows one item with no count or size. When cleaned, its root step asks Timeshift for the list, checks that every name is Timeshift's `YYYY-MM-DD_HH-MM-SS` before deleting any (an unexpected name stops it with nothing deleted), and deletes all but the newest `snapshots_keep` with `timeshift --delete`. A category whose tool is missing (no pacman, no journalctl, no coredump directory) is shown as `unavailable (<reason>)`, which is not an error.
+The three opt-in categories are never run by a plain `crumbs clean --system`; name them (`crumbs clean orphan-pkgs`) or tick them with `-i`. Timeshift lists its snapshots only to root, and a scan never asks for administrator rights, so `snapshots` shows one item with no count or size. When cleaned, its root step asks Timeshift for the list, checks that every name is Timeshift's `YYYY-MM-DD_HH-MM-SS` before deleting any (an unexpected name stops it with nothing deleted), and deletes all but the newest `snapshots_keep` with `timeshift --delete`. The preview's `as root:` line, and the command to run by hand when no administrator rights are available, show the script as `$'...'` with `\n` for each line break: one line, and pasted into bash or zsh it is the exact script. A category whose tool is missing (no pacman, no journalctl, no coredump directory) is shown as `unavailable (<reason>)`, which is not an error.
 
 System cleanup is never moved to the trash: the commands run as root and cannot be undone, and the preview says so. Example (a throwaway test tree):
 
@@ -237,11 +237,12 @@ will permanently delete 3 items (16.0 KiB)
 
 Optional keys in `~/.config/crumbs/config.toml`:
 
-- `categories_off = ["dev-cache", "build-output"]` lists the categories `scan` and `clean` skip unless you name them. That is the default; an unknown name is ignored with a warning.
+- `categories_off = ["dev-cache"]` lists the categories `scan` and `clean` skip unless you name them. The default is `["dev-cache"]`; an unknown name is ignored with a warning.
+- `categories_on = ["build-output"]` lists categories they run even when `categories_off` names them. `build-output` runs unnamed only when listed here, so a `categories_off` written before it existed never switches it on.
 - `project_dirs = ["~/Projects", "~/work"]`: where `build-output` looks for git repositories (each starts with `/` or `~/`). The default is `~/Projects`, `~/projects`, `~/src`, `~/code`, `~/dev`, `~/git`, `~/repos` and `~/workspace`.
 - `temp_age_days = 7`: how many days a file in `/tmp` must have gone unmodified and unchanged to be listed under `temp`. The later of its modification and change times counts (and for a folder, of everything in it), so files just unpacked from an archive with old dates are not old.
 - `log_age_days = 14`: the same for `logs`.
-- `build_age_days = 7`: how many days a build folder must have gone unused for `build-output` to preselect it.
+- `build_age_days = 7`: how many days a build folder must have gone unchanged for `build-output` to preselect it.
 - `snapshots_keep = 3`: how many of the newest Timeshift snapshots `snapshots` keeps.
 
 These must be at least 1; a smaller value is replaced by 1 with a warning (`config.toml: temp_age_days must be at least 1; using 1`).

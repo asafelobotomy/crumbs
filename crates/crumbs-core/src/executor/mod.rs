@@ -1350,13 +1350,6 @@ fn is_generic(n: &OsStr) -> bool {
 /// The kernel cuts `comm` at 15 bytes.
 const COMM_LEN: usize = 15;
 
-/// PIDs (sorted) of processes that look like `app`: the basename of the
-/// `exe` link (without the kernel's ` (deleted)` suffix), of `comm` or of
-/// `cmdline`'s first argument is one of `exec_names`; `cmdline`'s first
-/// or second argument is the app's `program` (or `program_link`) path; the `exe` link is the
-/// root-joined `location`; or `environ` holds `APPIMAGE=<location>`. Names
-/// in [`GENERIC_BASENAMES`] never match by basename. Unreadable entries
-/// are skipped.
 /// A running process that runs a program from `in_system` (its executable
 /// is there) or has a file open there, as `(pid, command name)`; the
 /// lowest pid when there are several.
@@ -1406,6 +1399,13 @@ pub fn process_working_in(env: &Env, in_system: &Path) -> Option<(u32, String)> 
         .min()
 }
 
+/// PIDs (sorted) of processes that look like `app`: the basename of the
+/// `exe` link (without the kernel's ` (deleted)` suffix), of `comm` or of
+/// `cmdline`'s first argument is one of `exec_names`; `cmdline`'s first
+/// or second argument is the app's `program` (or `program_link`) path; the `exe` link is the
+/// root-joined `location`; or `environ` holds `APPIMAGE=<location>`. Names
+/// in [`GENERIC_BASENAMES`] never match by basename. Unreadable entries
+/// are skipped.
 pub fn running_processes(env: &Env, app: &App) -> Vec<u32> {
     let Ok(dir) = fs::read_dir(env.sys_path(Path::new("/proc"))) else {
         return Vec::new();
