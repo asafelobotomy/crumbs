@@ -87,7 +87,7 @@ fn pkg_cache_parses_dry_run() {
     assert_eq!(i.action, priv_action("paccache", &["-rk2"]));
     assert_eq!(i.scope, Scope::System);
     assert!(i.path.is_none() && i.preselected && i.fingerprint.is_none());
-    assert_eq!(runner.calls(), ["paccache -dk2"]);
+    assert_eq!(runner.calls(), ["paccache -dk2", "paccache -duk0"]);
 
     // The configured keep count is used.
     let cfg = Config {
@@ -111,6 +111,38 @@ fn pkg_cache_parses_dry_run() {
     let runner = FakeRunner::new().on("paccache", &["-dk2"], out(1, "", "boom\n"));
     let rep = scan(&t, &runner, Category::PkgCache);
     assert!(rep.error.as_deref().unwrap().contains("boom"));
+}
+
+#[test]
+fn pkg_cache_offers_packages_no_longer_installed() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/pacman", b"#!/bin/sh\n");
+    t.write_exec("usr/bin/paccache", b"#!/bin/sh\n");
+    let none = "==> no candidate packages found for pruning\n";
+    let runner = FakeRunner::new()
+        .on("paccache", &["-dk2"], out(0, none, ""))
+        .on("paccache", &["-duk0"], out(0, PACCACHE_DRY, ""));
+    let rep = scan(&t, &runner, Category::PkgCache);
+    assert_eq!(rep.items.len(), 1, "{rep:?}");
+    let i = &rep.items[0];
+    assert_eq!(i.label, "cached packages no longer installed");
+    assert_eq!(i.size, Some(90_355_794));
+    assert_eq!(i.action, priv_action("paccache", &["-ruk0"]));
+    assert!(i.preselected && i.rebuildable);
+    // Both: two items, the uninstalled ones first.
+    let runner = FakeRunner::new()
+        .on("paccache", &["-dk2"], out(0, PACCACHE_DRY, ""))
+        .on("paccache", &["-duk0"], out(0, PACCACHE_DRY, ""));
+    let rep = scan(&t, &runner, Category::PkgCache);
+    assert_eq!(rep.items.len(), 2);
+    // A failing uninstalled dry run only drops that item.
+    let runner = FakeRunner::new()
+        .on("paccache", &["-dk2"], out(0, PACCACHE_DRY, ""))
+        .on("paccache", &["-duk0"], out(1, "", "boom\n"));
+    let rep = scan(&t, &runner, Category::PkgCache);
+    assert!(rep.error.is_none(), "{rep:?}");
+    assert_eq!(rep.items.len(), 1);
+    assert_eq!(rep.items[0].action, priv_action("paccache", &["-rk2"]));
 }
 
 #[test]
