@@ -1,9 +1,13 @@
 //! The bloat model: categories of reclaimable space, the scanner registry
 //! and the parallel scan driver.
 
+mod app;
 mod appimage;
+mod aur;
 mod browser;
+mod build;
 mod cache;
+mod containers;
 mod dev;
 mod flatpak;
 mod logs;
@@ -43,16 +47,21 @@ pub enum Category {
     FlatpakUnused,
     AppimageOld,
     Logs,
+    AurBuild,
+    AppCache,
+    Containers,
+    BuildOutput,
     PkgCache,
     OrphanPkgs,
     Journal,
     Coredumps,
     SystemTemp,
     FlatpakUnusedSystem,
+    Snapshots,
 }
 
 impl Category {
-    pub const ALL: [Category; 15] = [
+    pub const ALL: [Category; 20] = [
         Category::Cache,
         Category::Thumbnails,
         Category::Trash,
@@ -62,12 +71,17 @@ impl Category {
         Category::FlatpakUnused,
         Category::AppimageOld,
         Category::Logs,
+        Category::AurBuild,
+        Category::AppCache,
+        Category::Containers,
+        Category::BuildOutput,
         Category::PkgCache,
         Category::OrphanPkgs,
         Category::Journal,
         Category::Coredumps,
         Category::SystemTemp,
         Category::FlatpakUnusedSystem,
+        Category::Snapshots,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -81,12 +95,17 @@ impl Category {
             Category::FlatpakUnused => "flatpak-unused",
             Category::AppimageOld => "appimage-old",
             Category::Logs => "logs",
+            Category::AurBuild => "aur-build",
+            Category::AppCache => "app-cache",
+            Category::Containers => "containers",
+            Category::BuildOutput => "build-output",
             Category::PkgCache => "pkg-cache",
             Category::OrphanPkgs => "orphan-pkgs",
             Category::Journal => "journal",
             Category::Coredumps => "coredumps",
             Category::SystemTemp => "system-temp",
             Category::FlatpakUnusedSystem => "flatpak-unused-system",
+            Category::Snapshots => "snapshots",
         }
     }
 
@@ -100,12 +119,20 @@ impl Category {
                 | Category::Coredumps
                 | Category::SystemTemp
                 | Category::FlatpakUnusedSystem
+                | Category::Snapshots
         )
+    }
+
+    /// Whether the category runs unnamed only when `categories_on` lists
+    /// it: `build-output`, which reaches into your projects. A config's
+    /// `categories_off` cannot switch it on.
+    pub fn opt_in_only(self) -> bool {
+        self == Category::BuildOutput
     }
 
     /// Whether the category is enabled when the config doesn't say.
     pub fn default_on(self) -> bool {
-        self != Category::DevCache
+        !matches!(self, Category::DevCache | Category::BuildOutput)
     }
 }
 
@@ -218,12 +245,17 @@ pub fn scanners() -> Vec<Box<dyn Scanner>> {
         Box::new(flatpak::FlatpakUnusedScanner),
         Box::new(appimage::AppimageOldScanner),
         Box::new(logs::LogsScanner),
+        Box::new(aur::AurBuildScanner),
+        Box::new(app::AppCacheScanner),
+        Box::new(containers::ContainersScanner),
+        Box::new(build::BuildOutputScanner),
         Box::new(system::PkgCacheScanner),
         Box::new(system::OrphanPkgsScanner),
         Box::new(system::JournalScanner),
         Box::new(system::CoredumpsScanner),
         Box::new(system::SystemTempScanner),
         Box::new(system::FlatpakUnusedSystemScanner),
+        Box::new(system::SnapshotsScanner),
     ]
 }
 
@@ -313,14 +345,19 @@ mod tests {
             "flatpak-unused",
             "appimage-old",
             "logs",
+            "aur-build",
+            "app-cache",
+            "containers",
+            "build-output",
             "pkg-cache",
             "orphan-pkgs",
             "journal",
             "coredumps",
             "system-temp",
             "flatpak-unused-system",
+            "snapshots",
         ];
-        assert_eq!(Category::ALL.len(), 15);
+        assert_eq!(Category::ALL.len(), 20);
         for (c, n) in Category::ALL.iter().zip(names) {
             assert_eq!(c.as_str(), n);
             assert_eq!(Category::from_str(n).unwrap(), *c);
@@ -329,8 +366,16 @@ mod tests {
                 serde_json::from_str::<Category>(&format!("\"{n}\"")).unwrap(),
                 *c
             );
-            assert_eq!(c.default_on(), *c != Category::DevCache);
-            assert_eq!(c.system(), names.iter().position(|x| x == &n).unwrap() >= 9);
+            assert_eq!(
+                c.default_on(),
+                !matches!(c, Category::DevCache | Category::BuildOutput)
+            );
+            // The system categories come last, from `pkg-cache` on.
+            let first_system = names.iter().position(|x| *x == "pkg-cache").unwrap();
+            assert_eq!(
+                c.system(),
+                names.iter().position(|x| x == &n).unwrap() >= first_system
+            );
         }
         assert!(Category::from_str("nope").is_err());
         assert!(Category::ALL.windows(2).all(|w| w[0] < w[1]));

@@ -55,8 +55,18 @@ cargo build --release
 | `flatpak-unused` | Flatpak runtimes no installed app uses, as Flatpak itself counts them (listed by name, or not at all when there are none) | yes, but only runs when named |
 | `appimage-old` | superseded AppImage versions (the newest, any version a launcher points at and any running one are kept) | yes |
 | `logs` | old `.log` files under `~/.local/state` | yes |
+| `aur-build` | pamac's build trees (`pamac-build-<you>` in its `BuildDirectory`, `/var/tmp` by default), one item, deleted permanently; pamac rebuilds a package when it updates it | yes |
+| `app-cache` | the Chromium caches of Electron and other Chromium-based apps in `~/.config/<app>` (Discord, VS Code, Cursor, Slack, Claude, ...): `Cache`, `Code Cache`, `GPUCache`, the `Dawn`/`Gr`/`Shader` caches and VS Code's `CachedData`, never their settings or site data | yes |
+| `containers` | podman's and Docker's untagged images (one item per engine, `<engine> image prune -f`) and unused volumes (one item each, `<engine> volume rm <name>`, never preselected: a volume can hold data) | yes |
+| `build-output` | build folders in your git projects that git ignores: Cargo's `target`, `node_modules` and web bundler caches, Gradle's and CMake's `build`, a project's `.gradle`, Python `.venv`s | no |
 
 An item whose app is running (a cache, a browser cache, an old AppImage) is listed but not selected, and says so. `~/.cache` is not only caches, so a folder there is also listed but not selected when it holds a git working tree up to two levels down (`contains a git checkout (<where>)`; it is not counted as rebuildable either), unless it is a cache made of git checkouts by design (`yay`, `paru`, `pikaur`, `pre-commit`, `antidote`) or carries a `CACHEDIR.TAG`, or when a running process works inside it (`in use by cargo (pid 4242)`, its current directory is there). Other work kept in `~/.cache` has no such sign; leave it out with `--exclude` or `exclude` in the config. Emptying the trash cannot be undone, so a plain `crumbs clean` never plans it: name the category (`crumbs clean trash`) or tick it with `-i`.
+
+`app-cache` holds back an app that is running: a process names its folder as its `--user-data-dir`, or has a file open in it. `aur-build` holds back a tree a process works in (a running `makepkg`), and checks again right before deleting.
+
+`build-output` looks for git repositories up to three levels below your project folders (`project_dirs`, or `~/Projects`, `~/projects`, `~/src`, `~/code`, `~/dev`, `~/git`, `~/repos` and `~/workspace`), and in each up to four levels down for build folders of a known kind: `target` beside a `Cargo.toml` (or with Cargo's `CACHEDIR.TAG`), `node_modules`, `.next`, `.svelte-kit`, `.turbo` or `.parcel-cache` beside a `package.json`, `build` beside a Gradle or CMake file, `.gradle` beside a Gradle build, `.venv` or `venv` holding `pyvenv.cfg`. A folder is listed only when `git check-ignore` says git ignores it, so nothing tracked is offered. Its note says when it last changed (running what it holds changes nothing); one changed within `build_age_days` (7) is not preselected, and nor is one a running program comes from or has a file open in (`in use by node (pid 92)`), or any in a repository a process works in (`app is in use by cargo (pid 4242)`). A Python virtual environment is never preselected: something outside the project may run from it, and it may have no requirements file to be rebuilt from. git runs with `core.fsmonitor` and `core.untrackedCache` off, so a project's own git config cannot run a command during a scan, and a repository nested inside another (a submodule, a worktree, a clone) is checked by its own git. It runs only when named (`crumbs clean build-output`) or listed in `categories_on`.
+
+`containers` lists nothing for an engine that is missing or that you cannot reach (Docker without access to its daemon). Image layers shared with other images stay, so less may be freed than the images' size; podman's is measured (Docker's storage cannot be read without administrator rights). Volumes are never preselected, even when the category is named: tick them with `-i`.
 
 ### System categories
 
@@ -64,14 +74,15 @@ An item whose app is running (a cache, a browser cache, an old AppImage) is list
 
 | Name | What it is | Runs by default with `clean --system` |
 |---|---|---|
-| `pkg-cache` | old package versions in pacman's cache (`paccache -rk<pkg_cache_keep>`; without `paccache`, `pacman -Sc`, which also drops unused sync databases) | yes |
+| `pkg-cache` | old package versions in pacman's cache (`paccache -rk<pkg_cache_keep>`; without `paccache`, `pacman -Sc`, which also drops unused sync databases), and every cached version of packages no longer installed (`paccache -ruk0`) | yes |
 | `orphan-pkgs` | packages installed as dependencies that nothing needs (`pacman -Qdtq`), removed as the exact closure `pacman -Rs --print` showed | no: only when named |
 | `journal` | the systemd journal, vacuumed to `journal_max` when it is larger | yes |
 | `coredumps` | `core.*` files in `/var/lib/systemd/coredump` | yes |
 | `system-temp` | `systemd-tmpfiles --clean --prefix=/tmp --prefix=/var/tmp`: stale files by the tmpfiles.d age rules, size unknown | yes |
 | `flatpak-unused-system` | Flatpak runtimes no app uses, in the system installation (size decided by Flatpak) | no: only when named |
+| `snapshots` | Timeshift snapshots beyond the newest `snapshots_keep` (3), oldest first | no: only when named |
 
-The two opt-in categories are never run by a plain `crumbs clean --system`; name them (`crumbs clean orphan-pkgs`) or tick them with `-i`. A category whose tool is missing (no pacman, no journalctl, no coredump directory) is shown as `unavailable (<reason>)`, which is not an error.
+The three opt-in categories are never run by a plain `crumbs clean --system`; name them (`crumbs clean orphan-pkgs`) or tick them with `-i`. Timeshift lists its snapshots only to root, and a scan never asks for administrator rights, so `snapshots` shows one item with no count or size. When cleaned, its root step asks Timeshift for the list, checks that every name is Timeshift's `YYYY-MM-DD_HH-MM-SS` before deleting any (an unexpected name stops it with nothing deleted), and deletes all but the newest `snapshots_keep` with `timeshift --delete`. The preview's `as root:` line, and the command to run by hand when no administrator rights are available, show the script as `$'...'` with `\n` for each line break: one line, and pasted into bash or zsh it is the exact script. A category whose tool is missing (no pacman, no journalctl, no coredump directory) is shown as `unavailable (<reason>)`, which is not an error.
 
 System cleanup is never moved to the trash: the commands run as root and cannot be undone, and the preview says so. Example (a throwaway test tree):
 
@@ -227,15 +238,19 @@ will permanently delete 3 items (16.0 KiB)
 Optional keys in `~/.config/crumbs/config.toml`:
 
 - `categories_off = ["dev-cache"]` lists the categories `scan` and `clean` skip unless you name them. The default is `["dev-cache"]`; an unknown name is ignored with a warning.
+- `categories_on = ["build-output"]` lists categories they run even when `categories_off` names them. `build-output` runs unnamed only when listed here, so a `categories_off` written before it existed never switches it on.
+- `project_dirs = ["~/Projects", "~/work"]`: where `build-output` looks for git repositories (each starts with `/` or `~/`). The default is `~/Projects`, `~/projects`, `~/src`, `~/code`, `~/dev`, `~/git`, `~/repos` and `~/workspace`.
 - `temp_age_days = 7`: how many days a file in `/tmp` must have gone unmodified and unchanged to be listed under `temp`. The later of its modification and change times counts (and for a folder, of everything in it), so files just unpacked from an archive with old dates are not old.
 - `log_age_days = 14`: the same for `logs`.
+- `build_age_days = 7`: how many days a build folder must have gone unchanged for `build-output` to preselect it.
+- `snapshots_keep = 3`: how many of the newest Timeshift snapshots `snapshots` keeps.
 
-Both must be at least 1; a smaller value is replaced by 1 with a warning (`config.toml: temp_age_days must be at least 1; using 1`).
+These must be at least 1; a smaller value is replaced by 1 with a warning (`config.toml: temp_age_days must be at least 1; using 1`).
 
 - `pkg_cache_keep = 2`: how many versions of each package `pkg-cache` keeps. 0 is allowed; a negative value is replaced by 2 with a warning.
 - `journal_max = "500M"`: the size `journal` vacuums the systemd journal down to; `journal` lists nothing while the journal is at or below it. Digits with an optional `K`, `M`, `G` or `T` (`^[0-9]+[KMGT]?$`), above 0; anything else is replaced by `500M` with a warning.
 
-A `..` in a `protect`, `exclude` or `appimage_dirs` entry is resolved as the system would: `/../x` is `/x`.
+A `..` in a `protect`, `exclude`, `appimage_dirs` or `project_dirs` entry is resolved as the system would: `/../x` is `/x`.
 
 Exit codes: 0 ok, 1 error, 2 usage error or ambiguous app, 3 partial failure (including a privileged run that stopped part-way), 4 aborted by the user, 5 administrator rights needed but unavailable or denied.
 

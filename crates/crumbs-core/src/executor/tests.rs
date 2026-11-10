@@ -2687,6 +2687,23 @@ fn measured_dirs_of_known_cleanup_commands() {
         },
     );
     assert_eq!(user, p("/home/user/.local/share/flatpak"));
+    let engine = |program: &str, args: &[&str]| {
+        measured_dirs(
+            &env,
+            &Action::UserCommand {
+                program: program.into(),
+                args: args.iter().map(|a| (*a).to_string()).collect(),
+            },
+        )
+    };
+    let storage = p("/home/user/.local/share/containers/storage");
+    assert_eq!(engine("podman", &["image", "prune", "-f"]), storage);
+    assert_eq!(engine("podman", &["volume", "rm", "cache"]), storage);
+    assert_eq!(
+        engine("docker", &["image", "prune", "-f"]),
+        p("/var/lib/docker")
+    );
+    assert!(engine("podman", &["run", "x"]).is_empty());
     // Anything else is not measured: an app's uninstall, an unknown tool.
     assert!(dirs("flatpak", &["uninstall", "--system", "-y", "org.app"]).is_empty());
     assert!(dirs("snap", &["remove", "--purge", "x"]).is_empty());
@@ -2827,4 +2844,105 @@ fn measurement_counts_a_folder_missing_both_times_as_empty() {
     );
     assert!(report.results[0].ok, "{:?}", report.results[0]);
     assert_eq!(report.results[0].freed, Some(gone));
+}
+
+#[test]
+fn execute_refuses_a_build_tree_in_use() {
+    // A /var/tmp build tree is deleted only while no process works in it.
+    let t = FixtureTree::new();
+    t.write("var/tmp/pamac-build-user/brave/src/x", b"x");
+    t.write("var/tmp/pamac-build-other/a/x", b"x");
+    t.symlink("proc/77/cwd", "/var/tmp/pamac-build-user/brave/src");
+    t.write("proc/77/comm", b"makepkg\n");
+    let env = t.env();
+    let mut busy = planned(&env, delete("/var/tmp/pamac-build-user"));
+    busy.scope = Scope::UserTemp;
+    let mut idle = planned(&env, delete("/var/tmp/pamac-build-other"));
+    idle.scope = Scope::UserTemp;
+    let report = execute(&env, &Config::default(), &plan_of(vec![busy, idle]));
+    assert!(!report.results[0].ok);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("refusing: /var/tmp/pamac-build-user is in use by makepkg (pid 77)")
+    );
+    assert!(env.sys("/var/tmp/pamac-build-user/brave/src/x").exists());
+    assert!(report.results[1].ok, "{:?}", report.results[1]);
+    assert!(!env.sys("/var/tmp/pamac-build-other").exists());
+}
+
+#[test]
+fn commands_sharing_a_measured_folder_are_not_measured() {
+    // Both paccache steps shrink the package cache in one batch: neither
+    // can be credited with the whole drop, so both keep their estimates.
+    let t = FixtureTree::new();
+    logging_program(&t, "paccache", &t.dir.path().join("l.log"), "", 0);
+    let a = t.write("var/cache/pacman/pkg/a-1.pkg.tar.zst", &[1u8; 20_000]);
+    let b = t.write("var/cache/pacman/pkg/b-1.pkg.tar.zst", &[1u8; 20_000]);
+    let env = t.env();
+    let mut first = priv_cmd("paccache", &["-ruk0"]);
+    first.size = 1000;
+    let mut second = priv_cmd("paccache", &["-rk2"]);
+    second.size = 2000;
+    let report = execute_full(
+        &env,
+        &Config::default(),
+        &plan_of(vec![first, second]),
+        &FakeRunner::new(),
+        &RemovingRunner {
+            remove: vec![a, b],
+            out: b"@@crumbs 0 0\n@@crumbs 1 0\n".to_vec(),
+        },
+        Some(&esc()),
+        &no_post_check,
+    );
+    assert!(report.results.iter().all(|r| r.ok), "{:?}", report.results);
+    assert_eq!(report.results[0].freed, None);
+    assert_eq!(report.results[1].freed, None);
+    assert_eq!(report.freed, 3000);
+}
+
+#[test]
+fn an_unreadable_measured_folder_is_not_measured() {
+    // Docker's /var/lib/docker cannot be read by the user: before and after
+    // are both empty, which says nothing about what the prune freed.
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: root reads every folder");
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let t = FixtureTree::new();
+    logging_program(&t, "docker", &t.dir.path().join("l.log"), "", 0);
+    let locked = t.mkdir("var/lib/docker");
+    t.write("var/lib/docker/overlay2/x", b"x");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let env = t.env();
+    let mut plan = command_plan("docker", &["image", "prune", "-f"]);
+    plan.actions[0].size = 5000;
+    let report = execute_with(&env, &Config::default(), &plan, &RemovingCommand(vec![]));
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    assert_eq!(report.results[0].freed, None);
+    assert_eq!(report.freed, 5000);
+}
+
+#[test]
+fn a_build_tree_in_tmp_keeps_the_temp_rechecks() {
+    // Only /var/tmp children are re-checked as build trees; in /tmp a
+    // pamac-build-* entry still has to be an old temporary file.
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: temp cleanup is not offered as root");
+        return;
+    }
+    let t = FixtureTree::new();
+    let f = t.write("tmp/pamac-build-user/a/x", b"fresh");
+    age_days(&f, 0);
+    let env = temp_env(&t);
+    let mut item = planned(&env, delete("/tmp/pamac-build-user"));
+    item.scope = Scope::UserTemp;
+    let report = execute(&env, &Config::default(), &plan_of(vec![item]));
+    assert!(!report.results[0].ok);
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("refusing: /tmp/pamac-build-user is no longer an old temporary file")
+    );
 }

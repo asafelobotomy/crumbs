@@ -126,7 +126,9 @@ impl Scanner for CacheScanner {
                 item.preselected = false;
                 item.rebuildable = false;
                 item.note = Some(format!("contains a git checkout ({})", inner.display()));
-            } else if let Some((pid, comm)) = working_in(cx, &cache.join(&name)) {
+            } else if let Some((pid, comm)) =
+                crate::executor::process_working_in(cx.env, &cache.join(&name))
+            {
                 item.preselected = false;
                 item.note = Some(format!("in use by {comm} (pid {pid})"));
             }
@@ -208,36 +210,6 @@ fn git_checkout(dir: &Path) -> Option<PathBuf> {
         level = next;
     }
     None
-}
-
-/// A running process whose current directory is `in_system` or below it
-/// (a build or a shell working there), as `(pid, command name)`.
-fn working_in(cx: &ScanContext, in_system: &Path) -> Option<(u32, String)> {
-    let proc_dir = cx.env.sys_path(Path::new("/proc"));
-    let real = cx.env.sys_path(in_system);
-    let rd = fs::read_dir(proc_dir).ok()?;
-    let mut found: Vec<(u32, String)> = rd
-        .flatten()
-        .filter_map(|e| {
-            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
-            let cwd = fs::read_link(e.path().join("cwd")).ok()?;
-            if !(cwd.starts_with(in_system) || cwd.starts_with(&real)) {
-                return None;
-            }
-            let comm = fs::read_to_string(e.path().join("comm")).unwrap_or_default();
-            let comm = comm.trim();
-            Some((
-                pid,
-                if comm.is_empty() {
-                    "a process".into()
-                } else {
-                    comm.to_string()
-                },
-            ))
-        })
-        .collect();
-    found.sort();
-    found.into_iter().next()
 }
 
 pub struct ThumbnailsScanner;

@@ -29,8 +29,28 @@ pub struct Config {
     pub journal_max: String,
     /// Categories skipped when none are named. Defaults to `[DevCache]`.
     pub categories_off: Vec<Category>,
+    /// Categories run when none are named, whatever `categories_off` says;
+    /// the only way to run an opt-in-only category ([`Category::opt_in_only`],
+    /// `build-output`) unnamed.
+    pub categories_on: Vec<Category>,
+    /// Folders `build-output` looks in for git repositories; empty means
+    /// the usual ones below home (`~/Projects`, `~/src`, `~/code`, ...).
+    pub project_dirs: Vec<PathBuf>,
+    /// Days a build folder must have gone unused to be preselected.
+    pub build_age_days: u64,
+    /// Newest system snapshots `snapshots` keeps. Default 3.
+    pub snapshots_keep: u32,
     /// One message per entry dropped on load (never read from the file).
     pub warnings: Vec<String>,
+}
+
+impl Config {
+    /// Whether `scan` and `clean` run the category when none are named:
+    /// listed in `categories_on`, or not opt-in-only and not in
+    /// `categories_off`.
+    pub fn enabled(&self, c: Category) -> bool {
+        self.categories_on.contains(&c) || (!c.opt_in_only() && !self.categories_off.contains(&c))
+    }
 }
 
 impl Default for Config {
@@ -44,6 +64,10 @@ impl Default for Config {
             pkg_cache_keep: 2,
             journal_max: "500M".into(),
             categories_off: vec![Category::DevCache],
+            categories_on: Vec::new(),
+            project_dirs: Vec::new(),
+            build_age_days: 7,
+            snapshots_keep: 3,
             warnings: Vec::new(),
         }
     }
@@ -63,6 +87,10 @@ struct RawConfig {
     pkg_cache_keep: Option<i64>,
     journal_max: Option<String>,
     categories_off: Option<Vec<String>>,
+    categories_on: Vec<String>,
+    project_dirs: Vec<String>,
+    build_age_days: Option<i64>,
+    snapshots_keep: Option<i64>,
 }
 
 /// Expands a leading `~` against the in-system home. Returns `None` for
@@ -133,6 +161,7 @@ pub fn load_config(env: &Env) -> Result<Config, CoreError> {
     let protect = strings("protect", &raw.protect);
     let exclude = strings("exclude", &raw.exclude);
     let appimage_dirs = strings("appimage_dirs", &raw.appimage_dirs);
+    let project_dirs = strings("project_dirs", &raw.project_dirs);
     let categories_off = match &raw.categories_off {
         None => vec![Category::DevCache],
         Some(names) => names
@@ -148,6 +177,19 @@ pub fn load_config(env: &Env) -> Result<Config, CoreError> {
             })
             .collect(),
     };
+    let categories_on = raw
+        .categories_on
+        .iter()
+        .filter_map(|n| match n.parse::<Category>() {
+            Ok(c) => Some(c),
+            Err(_) => {
+                warnings.push(format!(
+                    "config.toml: unknown category '{n}' in categories_on"
+                ));
+                None
+            }
+        })
+        .collect();
     let mut at_least_one = |key: &str, v: Option<i64>, default: u64| match v {
         None => default,
         Some(n) => u64::try_from(n)
@@ -160,6 +202,10 @@ pub fn load_config(env: &Env) -> Result<Config, CoreError> {
     };
     let temp_age_days = at_least_one("temp_age_days", raw.temp_age_days, 7);
     let log_age_days = at_least_one("log_age_days", raw.log_age_days, 14);
+    let build_age_days = at_least_one("build_age_days", raw.build_age_days, 7);
+    // Beyond u32: keep everything, never wrap round to a small count.
+    let snapshots_keep =
+        u32::try_from(at_least_one("snapshots_keep", raw.snapshots_keep, 3)).unwrap_or(u32::MAX);
     let pkg_cache_keep = match raw.pkg_cache_keep {
         None => 2,
         Some(n) => u32::try_from(n).unwrap_or_else(|_| {
@@ -187,6 +233,10 @@ pub fn load_config(env: &Env) -> Result<Config, CoreError> {
         pkg_cache_keep,
         journal_max,
         categories_off,
+        categories_on,
+        project_dirs: paths(project_dirs),
+        build_age_days,
+        snapshots_keep,
         warnings,
     })
 }
@@ -525,6 +575,9 @@ mod tests {
         let d = load_config(&t.env()).unwrap();
         assert_eq!((d.temp_age_days, d.log_age_days), (7, 14));
         assert_eq!(d.categories_off, [Category::DevCache]);
+        assert!(d.categories_on.is_empty());
+        assert!(d.project_dirs.is_empty());
+        assert_eq!((d.build_age_days, d.snapshots_keep), (7, 3));
 
         t.write(
             "/home/user/.config/crumbs/config.toml",
@@ -545,6 +598,64 @@ mod tests {
         let c = load_config(&t.env()).unwrap();
         assert!(c.categories_off.is_empty());
         assert!(c.warnings.is_empty());
+
+        // The build-output and snapshot keys.
+        let t = crate::testing::FixtureTree::new();
+        t.write(
+            "home/user/.config/crumbs/config.toml",
+            b"project_dirs = [\"~/work\", \"rel\"]\nbuild_age_days = 30\nsnapshots_keep = 0\n",
+        );
+        let c = load_config(&t.env()).unwrap();
+        assert_eq!(c.project_dirs, [PathBuf::from("/home/user/work")]);
+        assert_eq!(c.build_age_days, 30);
+        assert_eq!(c.snapshots_keep, 1);
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("project_dirs entry 'rel'")),
+            "{:?}",
+            c.warnings
+        );
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("snapshots_keep must be at least 1")),
+            "{:?}",
+            c.warnings
+        );
+
+        // A keep count beyond u32 keeps everything rather than wrapping.
+        let tk = crate::testing::FixtureTree::new();
+        tk.write(
+            "home/user/.config/crumbs/config.toml",
+            b"snapshots_keep = 4294967296\n",
+        );
+        assert_eq!(load_config(&tk.env()).unwrap().snapshots_keep, u32::MAX);
+
+        // build-output runs unnamed only when categories_on lists it: an
+        // older config's categories_off cannot switch it on.
+        let t = crate::testing::FixtureTree::new();
+        let cfg_at = |text: &[u8]| {
+            t.write("home/user/.config/crumbs/config.toml", text);
+            load_config(&t.env()).unwrap()
+        };
+        let d = Config::default();
+        assert!(!d.enabled(Category::BuildOutput) && !d.enabled(Category::DevCache));
+        assert!(d.enabled(Category::Cache));
+        let c = cfg_at(b"categories_off = []\n");
+        assert!(!c.enabled(Category::BuildOutput));
+        assert!(c.enabled(Category::DevCache), "dev-cache keeps its rule");
+        let c = cfg_at(b"categories_on = [\"build-output\", \"nope\"]\n");
+        assert!(c.enabled(Category::BuildOutput));
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("unknown category 'nope' in categories_on")),
+            "{:?}",
+            c.warnings
+        );
+        let c = cfg_at(b"categories_on = [\"logs\"]\ncategories_off = [\"logs\"]\n");
+        assert!(c.enabled(Category::Logs), "categories_on wins");
     }
 
     #[test]

@@ -249,7 +249,19 @@ fn run_plans(
 ) -> Vec<ExecReport> {
     let batches = batch_ids(env, plans.len());
     let checks = Rechecks::new(runner);
-    // The batch's cleanup commands, measured before it runs.
+    // The batch's cleanup commands, measured before it runs. They all run
+    // between the two measurements, so a folder two of them shrink cannot
+    // be credited to either: those are not measured.
+    let batch_dirs: Vec<PathBuf> = plans
+        .iter()
+        .flat_map(|p| &p.actions)
+        .filter(|pa| matches!(pa.action, Action::PrivilegedCommand { .. }))
+        .flat_map(|pa| measured_dirs(env, &pa.action))
+        .collect();
+    let shared = |dirs: &[PathBuf]| {
+        dirs.iter()
+            .any(|d| batch_dirs.iter().filter(|b| *b == d).count() > 1)
+    };
     let before: Vec<Vec<Option<Snapshot>>> = plans
         .iter()
         .map(|p| {
@@ -257,7 +269,12 @@ fn run_plans(
                 .iter()
                 .map(|pa| match pa.action {
                     Action::PrivilegedCommand { .. } => {
-                        measure(env, &measured_dirs(env, &pa.action))
+                        let dirs = measured_dirs(env, &pa.action);
+                        if shared(&dirs) {
+                            None
+                        } else {
+                            measure(env, &dirs)
+                        }
                     }
                     _ => None,
                 })
@@ -378,8 +395,9 @@ impl Attempt {
 /// The in-system folders a known cleanup command shrinks, so the executor
 /// can measure what it freed: the package caches (`paccache`, `pacman
 /// -Sc`, `apt-get clean`, `dnf clean`), the journal (`journalctl
-/// --vacuum-*`), `systemd-tmpfiles --clean --prefix=...` and `flatpak
-/// uninstall --unused`. Empty for any other command.
+/// --vacuum-*`), `systemd-tmpfiles --clean --prefix=...`, `flatpak
+/// uninstall --unused` and the `containers` commands of podman and Docker.
+/// Empty for any other command.
 pub fn measured_dirs(env: &Env, action: &Action) -> Vec<PathBuf> {
     let (Action::UserCommand { program, args } | Action::PrivilegedCommand { program, args }) =
         action
@@ -404,6 +422,13 @@ pub fn measured_dirs(env: &Env, action: &Action) -> Vec<PathBuf> {
             .filter_map(|a| a.strip_prefix("--prefix="))
             .map(PathBuf::from)
             .collect(),
+        // What `containers` runs: rootless podman keeps everything here.
+        "podman" if (has("image") && has("prune")) || (has("volume") && has("rm")) => {
+            vec![env.unsys(&env.data_home).join("containers/storage")]
+        }
+        "docker" if (has("image") && has("prune")) || (has("volume") && has("rm")) => {
+            vec!["/var/lib/docker".into()]
+        }
         "flatpak" if has("uninstall") && has("--unused") => {
             if has("--user") {
                 vec![env.unsys(&env.data_home).join("flatpak")]
@@ -420,10 +445,18 @@ pub fn measured_dirs(env: &Env, action: &Action) -> Vec<PathBuf> {
 /// the bytes read and how many parts could not be read.
 type Snapshot = Vec<(bool, u64, u64)>;
 
-/// Measures `dirs`; `None` when there are none.
+/// Measures `dirs`; `None` when there are none, or when one exists but
+/// cannot be listed at all (Docker's root-only `/var/lib/docker`): an
+/// empty measurement before and after would claim nothing was freed.
 fn measure(env: &Env, dirs: &[PathBuf]) -> Option<Snapshot> {
     if dirs.is_empty() {
         return None;
+    }
+    for d in dirs {
+        let real = env.sys_path(d);
+        if fs::symlink_metadata(&real).is_ok() && fs::read_dir(&real).is_err() {
+            return None;
+        }
     }
     let exists: Vec<bool> = dirs
         .iter()
@@ -1084,6 +1117,14 @@ fn run_command(
     Err(last_line(&out.stderr).unwrap_or_else(|| format!("exited with status {}", out.status)))
 }
 
+/// A `UserTemp` target that is a package manager's build tree rather
+/// than a temporary file: a direct child of `/var/tmp` (only `aur-build`
+/// plans those). In `/tmp`, even a `pamac-build-*` entry keeps temp's
+/// staleness re-check.
+fn is_build_tree(path: &Path) -> bool {
+    path.parent() == Some(Path::new("/var/tmp"))
+}
+
 /// Scope rules beyond `verify` that are re-run right before acting: a
 /// `UserTemp` entry must still be stale (old, unused, nothing open); a
 /// `SystemTree` target must pass [`recheck_system_tree`].
@@ -1095,6 +1136,14 @@ fn recheck_scope(
     path: &Path,
 ) -> Result<(), String> {
     match scope {
+        // A build tree (`aur-build`): kept while a process works in it.
+        Scope::UserTemp if is_build_tree(path) => match process_working_in(env, path) {
+            Some((pid, comm)) => Err(format!(
+                "refusing: {} is in use by {comm} (pid {pid})",
+                display_path(env, path)
+            )),
+            None => Ok(()),
+        },
         Scope::UserTemp => crate::bloat::temp::still_stale(env, cfg, path, env.now())
             .map_err(|reason| format!("refusing: {} {reason}", display_path(env, path))),
         // Unreachable in practice: a SystemTree `Delete` is privileged and
@@ -1300,6 +1349,55 @@ fn is_generic(n: &OsStr) -> bool {
 
 /// The kernel cuts `comm` at 15 bytes.
 const COMM_LEN: usize = 15;
+
+/// A running process that runs a program from `in_system` (its executable
+/// is there) or has a file open there, as `(pid, command name)`; the
+/// lowest pid when there are several.
+pub fn process_using(env: &Env, in_system: &Path) -> Option<(u32, String)> {
+    let real = env.sys_path(in_system);
+    let inside = |p: &Path| p.starts_with(in_system) || p.starts_with(&real);
+    let rd = fs::read_dir(env.sys_path(Path::new("/proc"))).ok()?;
+    rd.flatten()
+        .filter_map(|e| {
+            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+            let dir = e.path();
+            let exe = fs::read_link(dir.join("exe")).is_ok_and(|t| inside(&strip_deleted(&t)));
+            let open = exe
+                || fs::read_dir(dir.join("fd")).is_ok_and(|fds| {
+                    fds.flatten()
+                        .any(|f| fs::read_link(f.path()).is_ok_and(|t| inside(&t)))
+                });
+            if !open {
+                return None;
+            }
+            let comm = fs::read_to_string(dir.join("comm")).unwrap_or_default();
+            let comm = comm.trim();
+            let comm = if comm.is_empty() { "a process" } else { comm };
+            Some((pid, comm.to_string()))
+        })
+        .min()
+}
+
+/// A running process whose current directory is `in_system` or below it
+/// (a build or a shell working there), as `(pid, command name)`; the
+/// lowest pid when there are several.
+pub fn process_working_in(env: &Env, in_system: &Path) -> Option<(u32, String)> {
+    let real = env.sys_path(in_system);
+    let rd = fs::read_dir(env.sys_path(Path::new("/proc"))).ok()?;
+    rd.flatten()
+        .filter_map(|e| {
+            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+            let cwd = fs::read_link(e.path().join("cwd")).ok()?;
+            if !(cwd.starts_with(in_system) || cwd.starts_with(&real)) {
+                return None;
+            }
+            let comm = fs::read_to_string(e.path().join("comm")).unwrap_or_default();
+            let comm = comm.trim();
+            let comm = if comm.is_empty() { "a process" } else { comm };
+            Some((pid, comm.to_string()))
+        })
+        .min()
+}
 
 /// PIDs (sorted) of processes that look like `app`: the basename of the
 /// `exe` link (without the kernel's ` (deleted)` suffix), of `comm` or of

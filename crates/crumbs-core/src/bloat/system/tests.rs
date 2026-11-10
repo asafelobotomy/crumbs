@@ -87,7 +87,7 @@ fn pkg_cache_parses_dry_run() {
     assert_eq!(i.action, priv_action("paccache", &["-rk2"]));
     assert_eq!(i.scope, Scope::System);
     assert!(i.path.is_none() && i.preselected && i.fingerprint.is_none());
-    assert_eq!(runner.calls(), ["paccache -dk2"]);
+    assert_eq!(runner.calls(), ["paccache -dk2", "paccache -duk0"]);
 
     // The configured keep count is used.
     let cfg = Config {
@@ -111,6 +111,38 @@ fn pkg_cache_parses_dry_run() {
     let runner = FakeRunner::new().on("paccache", &["-dk2"], out(1, "", "boom\n"));
     let rep = scan(&t, &runner, Category::PkgCache);
     assert!(rep.error.as_deref().unwrap().contains("boom"));
+}
+
+#[test]
+fn pkg_cache_offers_packages_no_longer_installed() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/pacman", b"#!/bin/sh\n");
+    t.write_exec("usr/bin/paccache", b"#!/bin/sh\n");
+    let none = "==> no candidate packages found for pruning\n";
+    let runner = FakeRunner::new()
+        .on("paccache", &["-dk2"], out(0, none, ""))
+        .on("paccache", &["-duk0"], out(0, PACCACHE_DRY, ""));
+    let rep = scan(&t, &runner, Category::PkgCache);
+    assert_eq!(rep.items.len(), 1, "{rep:?}");
+    let i = &rep.items[0];
+    assert_eq!(i.label, "cached packages no longer installed");
+    assert_eq!(i.size, Some(90_355_794));
+    assert_eq!(i.action, priv_action("paccache", &["-ruk0"]));
+    assert!(i.preselected && i.rebuildable);
+    // Both: two items, the uninstalled ones first.
+    let runner = FakeRunner::new()
+        .on("paccache", &["-dk2"], out(0, PACCACHE_DRY, ""))
+        .on("paccache", &["-duk0"], out(0, PACCACHE_DRY, ""));
+    let rep = scan(&t, &runner, Category::PkgCache);
+    assert_eq!(rep.items.len(), 2);
+    // A failing uninstalled dry run only drops that item.
+    let runner = FakeRunner::new()
+        .on("paccache", &["-dk2"], out(0, PACCACHE_DRY, ""))
+        .on("paccache", &["-duk0"], out(1, "", "boom\n"));
+    let rep = scan(&t, &runner, Category::PkgCache);
+    assert!(rep.error.is_none(), "{rep:?}");
+    assert_eq!(rep.items.len(), 1);
+    assert_eq!(rep.items[0].action, priv_action("paccache", &["-rk2"]));
 }
 
 #[test]
@@ -591,4 +623,139 @@ fn flatpak_unused_system_follows_flatpak() {
     assert_eq!(items[0].label, "1 unused Flatpak runtime (system)");
     assert_eq!(items[0].note.as_deref(), Some("org.gnome.Platform//45"));
     assert!(!items[0].preselected);
+}
+
+#[test]
+fn snapshots_offers_timeshift_pruning() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/timeshift", b"#!/bin/sh\n");
+    t.write_exec("usr/bin/sh", b"#!/bin/sh\n");
+    t.write(
+        "etc/timeshift/timeshift.json",
+        b"{\"btrfs_mode\" : \"true\"}",
+    );
+    let rep = scan(&t, &FakeRunner::new(), Category::Snapshots);
+    assert!(rep.error.is_none() && rep.unavailable.is_none(), "{rep:?}");
+    assert_eq!(rep.items.len(), 1);
+    let i = &rep.items[0];
+    assert_eq!(
+        i.label,
+        "Timeshift snapshots beyond the newest 3, oldest first (counted when cleaned)"
+    );
+    assert_eq!(i.size, None);
+    assert!(!i.preselected, "opt-in");
+    assert_eq!(i.scope, Scope::System);
+    assert_eq!(
+        i.action,
+        ItemAction::Privileged {
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                super::snapshots::PRUNE_TIMESHIFT.into(),
+                "crumbs-snapshots".into(),
+                "3".into()
+            ],
+        }
+    );
+    // The keep count comes from the config.
+    let cfg = Config {
+        snapshots_keep: 5,
+        ..Config::default()
+    };
+    let rep = scan_cfg(&t, &FakeRunner::new(), &cfg, Category::Snapshots);
+    assert!(
+        rep.items[0]
+            .label
+            .starts_with("Timeshift snapshots beyond the newest 5,")
+    );
+}
+
+#[test]
+fn snapshots_unavailable_without_timeshift_setup() {
+    let t = FixtureTree::new();
+    let rep = scan(&t, &FakeRunner::new(), Category::Snapshots);
+    assert_eq!(rep.unavailable.as_deref(), Some("timeshift not installed"));
+    // Installed but never set up: nothing to prune.
+    t.write_exec("usr/bin/timeshift", b"#!/bin/sh\n");
+    let rep = scan(&t, &FakeRunner::new(), Category::Snapshots);
+    assert!(rep.unavailable.is_none() && rep.items.is_empty(), "{rep:?}");
+}
+
+/// Runs the root step's script against a fake `timeshift` that lists
+/// `listing` and logs every delete; returns the deleted names.
+fn run_prune(listing: &str, keep: &str) -> (bool, Vec<String>) {
+    run_prune_in(listing, keep, None)
+}
+
+/// [`run_prune`] with the root shell's working directory holding `file`.
+fn run_prune_in(listing: &str, keep: &str, file: Option<&str>) -> (bool, Vec<String>) {
+    let t = FixtureTree::new();
+    let cwd = t.dir.path().join("cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    if let Some(f) = file {
+        std::fs::write(cwd.join(f), "").unwrap();
+    }
+    let bin = t.dir.path().join("bin");
+    let log = t.dir.path().join("deleted");
+    let fake = format!(
+        "#!/bin/sh\ncase \"$1\" in\n--list) printf '%s' '{listing}' ;;\n--delete) echo \"$3\" >> '{}' ;;\nesac\n",
+        log.display()
+    );
+    std::fs::create_dir_all(&bin).unwrap();
+    let tool = bin.join("timeshift");
+    std::fs::write(&tool, fake).unwrap();
+    std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let status = std::process::Command::new("/bin/sh")
+        .current_dir(&cwd)
+        .args([
+            "-c",
+            super::snapshots::PRUNE_TIMESHIFT,
+            "crumbs-snapshots",
+            keep,
+        ])
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .status()
+        .unwrap();
+    let deleted = std::fs::read_to_string(&log).unwrap_or_default();
+    (
+        status.success(),
+        deleted.lines().map(String::from).collect(),
+    )
+}
+
+const LISTING: &str = "Mounted /dev/x at /run/timeshift/1/backup\nDevice : /dev/x\n\nNum     Name                 Tags  Description\n------------------------------------------------\n0    >  2026-11-08_14-00-06  D\n1    >  2026-10-24_12-00-00  O     {before upgrade}\n2    >  2026-11-10_08-18-24  O\n3    >  2026-11-09_13-11-59  D\n";
+
+#[test]
+fn prune_script_deletes_all_but_the_newest() {
+    let (ok, deleted) = run_prune(LISTING, "2");
+    assert!(ok);
+    assert_eq!(deleted, ["2026-10-24_12-00-00", "2026-11-08_14-00-06"]);
+    let (ok, deleted) = run_prune(LISTING, "4");
+    assert!(ok && deleted.is_empty(), "{deleted:?}");
+    // Nothing listed: nothing deleted.
+    let (ok, deleted) = run_prune("No snapshots found\n", "1");
+    assert!(ok && deleted.is_empty());
+}
+
+#[test]
+fn prune_script_refuses_unexpected_names_and_counts() {
+    let odd =
+        "0    >  2026-11-08_14-00-06  D\n1    >  ../../etc  O\n2    >  2026-11-10_08-18-24  O\n";
+    let (ok, deleted) = run_prune(odd, "1");
+    assert!(!ok, "an unexpected name stops the step");
+    assert!(deleted.is_empty(), "{deleted:?}");
+    for bad in ["0", "-1", "x", ""] {
+        let (ok, deleted) = run_prune(LISTING, bad);
+        assert!(!ok && deleted.is_empty(), "keep {bad:?}");
+    }
+}
+
+#[test]
+fn prune_script_never_globs_a_listed_name() {
+    // `2026-1*` must not become a file of root's working directory that
+    // looks like a snapshot name and is then deleted.
+    let odd = "0    >  2026-1*  D\n1    >  2026-11-10_08-18-24  O\n";
+    let (ok, deleted) = run_prune_in(odd, "1", Some("2026-11-09_00-00-00"));
+    assert!(!ok, "the literal name is not a snapshot name");
+    assert!(deleted.is_empty(), "{deleted:?}");
 }

@@ -1474,7 +1474,11 @@ fn scan_json_shape() {
             "dev-cache",
             "flatpak-unused",
             "appimage-old",
-            "logs"
+            "logs",
+            "aur-build",
+            "app-cache",
+            "containers",
+            "build-output"
         ]
     );
     let cache = &cats[0];
@@ -2755,6 +2759,7 @@ fn scan_system_table() {
         "coredumps",
         "system-temp",
         "flatpak-unused-system",
+        "snapshots",
     ] {
         assert!(stdout.lines().any(|l| l.starts_with(c)), "{c}: {stdout}");
     }
@@ -2764,7 +2769,7 @@ fn scan_system_table() {
     );
     assert!(!stdout.lines().any(|l| l.starts_with("trash")), "{stdout}");
     let v = stdout_json(crumbs(&t).args(["scan", "--system", "--json"]));
-    assert_eq!(v["data"]["categories"].as_array().unwrap().len(), 6, "{v}");
+    assert_eq!(v["data"]["categories"].as_array().unwrap().len(), 7, "{v}");
     // A scan changes nothing and needs no privileges.
     for f in [
         "paccache-args",
@@ -2884,6 +2889,25 @@ fn clean_system_runs_one_batch() {
     assert!(recorded(&t, "/flatpak-args").is_none());
     let h = history_json(&t).to_string();
     assert!(h.contains("privileged-command"), "{h}");
+}
+
+#[test]
+fn clean_snapshots_only_when_named() {
+    let t = system_fixture("");
+    t.write_exec("/usr/bin/timeshift", b"#!/bin/sh\n");
+    t.write("/etc/timeshift/timeshift.json", b"{}");
+    // Not in a plain system clean.
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["clean", "--system", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!stdout.contains("Timeshift"), "{stdout}");
+    // Named: planned, as a root step that keeps the newest 3.
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["clean", "snapshots", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("Timeshift snapshots beyond the newest 3"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("will run 1 command"), "{stdout}");
 }
 
 #[test]

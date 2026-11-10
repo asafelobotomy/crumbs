@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **`build-output`** (off by default): build folders git ignores in your projects: Cargo's `target`, `node_modules` and web bundler caches, Gradle's and CMake's `build`, a project's `.gradle`, Python `.venv`s. Recent ones and any in a repository a process works in are not preselected. New config keys `project_dirs` and `build_age_days`.
+- **`containers`:** podman's and Docker's untagged images (pruned by the engine) and unused volumes (never preselected).
+- **`aur-build`:** pamac's build trees in `/var/tmp` (or its `BuildDirectory`), deleted permanently while no process works in them.
+- **`app-cache`:** the Chromium caches of Electron apps in `~/.config` (Discord, VS Code, Cursor, Claude, ...), held back while the app runs.
+- **`pkg-cache`:** also every cached version of packages no longer installed (`paccache -ruk0`).
+- **`snapshots`** (system, opt-in): Timeshift snapshots beyond the newest `snapshots_keep` (3), deleted by Timeshift in the root step.
+
 ## 0.3.0
 
 - **uQ:** never offers uQ's, scdr's, noti-fi's or appOFholding's own files as leftovers or orphans. A package that is part of the uQ desktop (uq, uq-hyprland-pin, scdr, noti-fi, crum-bs) is removed only when asked twice: a second question at a terminal, `--desktop` otherwise (`desktop: true` over MCP). `apps show` and the JSON `part_of` field say which packages those are.

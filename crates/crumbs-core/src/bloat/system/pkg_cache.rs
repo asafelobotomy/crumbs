@@ -39,39 +39,66 @@ impl Scanner for PkgCacheScanner {
             return Ok(vec![item]);
         };
         let keep = cx.cfg.pkg_cache_keep;
-        let out = cx.runner.run(&paccache, &[&format!("-dk{keep}")])?;
-        if out.status != 0 {
-            return Err(command_failed("paccache", &out));
+        let pruned = paccache_saved(cx, &paccache, &format!("-dk{keep}"))?;
+        // Packages no longer installed: every cached version can go. A
+        // failing dry run only drops this item.
+        let uninstalled = paccache_saved(cx, &paccache, "-duk0").ok().flatten();
+        let mut items = Vec::new();
+        for (size, label, args) in [
+            (
+                uninstalled,
+                "cached packages no longer installed".to_string(),
+                "-ruk0".to_string(),
+            ),
+            (
+                pruned,
+                format!("package cache (keep {keep} versions)"),
+                format!("-rk{keep}"),
+            ),
+        ] {
+            let Some(size) = size else { continue };
+            let mut item = privileged_item(
+                Category::PkgCache,
+                label,
+                Some(size),
+                None,
+                "paccache",
+                vec![args],
+            );
+            item.rebuildable = true;
+            items.push(item);
         }
-        if out.stdout.contains("no candidate packages found") {
-            return Ok(Vec::new());
-        }
-        let size = out
-            .stdout
-            .lines()
-            .rev()
-            .find_map(|l| {
-                let rest = l.split_once("disk space saved:")?.1;
-                parse_size(rest.trim().trim_end_matches(')'))
-            })
-            .ok_or_else(|| CoreError::Parse {
-                what: "paccache output".into(),
-                message: "no `disk space saved` line".into(),
-            })?;
-        if size == 0 {
-            return Ok(Vec::new());
-        }
-        let mut item = privileged_item(
-            Category::PkgCache,
-            format!("package cache (keep {keep} versions)"),
-            Some(size),
-            None,
-            "paccache",
-            vec![format!("-rk{keep}")],
-        );
-        item.rebuildable = true;
-        Ok(vec![item])
+        Ok(items)
     }
+}
+
+/// What a `paccache` dry run (`-d...`) would free; `None` when there is
+/// nothing to prune.
+fn paccache_saved(
+    cx: &ScanContext,
+    paccache: &std::path::Path,
+    flags: &str,
+) -> Result<Option<u64>, CoreError> {
+    let out = cx.runner.run(paccache, &[flags])?;
+    if out.status != 0 {
+        return Err(command_failed("paccache", &out));
+    }
+    if out.stdout.contains("no candidate packages found") {
+        return Ok(None);
+    }
+    let size = out
+        .stdout
+        .lines()
+        .rev()
+        .find_map(|l| {
+            let rest = l.split_once("disk space saved:")?.1;
+            parse_size(rest.trim().trim_end_matches(')'))
+        })
+        .ok_or_else(|| CoreError::Parse {
+            what: "paccache output".into(),
+            message: "no `disk space saved` line".into(),
+        })?;
+    Ok((size > 0).then_some(size))
 }
 
 /// Debian/Ubuntu: the downloaded `.deb` files `apt-get clean` removes.

@@ -111,7 +111,7 @@ pub(crate) fn build(env: &Env, args: &CleanArgs, pick: Pick<String>) -> Result<D
             if named {
                 args.categories.contains(c)
             } else {
-                c.system() == args.system && !setup.cfg.categories_off.contains(c)
+                c.system() == args.system && setup.cfg.enabled(*c)
             }
         })
         .collect();
@@ -269,8 +269,10 @@ fn cli_command(args: &CleanArgs, which: &[Category], pick: Pick<String>) -> Vec<
 }
 
 /// Categories whose items are never ticked unless the category is named:
-/// the Flatpak commands, emptying the trash (it cannot be undone) and
-/// removing orphaned packages (often optional dependencies people want).
+/// the Flatpak commands, emptying the trash (it cannot be undone),
+/// removing orphaned packages (often optional dependencies people want) and
+/// deleting system snapshots (a way back). Container volumes are not here:
+/// even a named `containers` leaves them unticked.
 fn opt_in(category: Category) -> bool {
     matches!(
         category,
@@ -278,6 +280,7 @@ fn opt_in(category: Category) -> bool {
             | Category::Trash
             | Category::OrphanPkgs
             | Category::FlatpakUnusedSystem
+            | Category::Snapshots
     )
 }
 

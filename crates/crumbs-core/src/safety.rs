@@ -27,8 +27,8 @@ pub enum Scope {
     /// Strictly under the home directory.
     #[default]
     Home,
-    /// A direct child of `/tmp`: owned by the user, a regular file or a
-    /// directory, not a symlink; `/tmp` itself root-owned and sticky.
+    /// A direct child of `/tmp` or `/var/tmp`: owned by the user, a regular
+    /// file or a directory, not a symlink; its parent root-owned and sticky.
     UserTemp,
     /// A direct child of `{data_home}/Trash/files` or `{data_home}/Trash/info`,
     /// with `Trash`, `files` and `info` private to the user.
@@ -317,7 +317,7 @@ pub fn is_allowed_target(env: &Env, cfg: &Config, scope: Scope, in_system: &Path
 fn scope_roots(env: &Env, scope: Scope) -> Vec<PathBuf> {
     match scope {
         Scope::Home => Vec::new(),
-        Scope::UserTemp => vec![PathBuf::from("/tmp")],
+        Scope::UserTemp => vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")],
         Scope::HomeTrash => {
             let trash = env.unsys(&env.data_home).join("Trash");
             // A `data_home` outside home must not make the trash a way to
@@ -990,7 +990,9 @@ mod tests {
         t.symlink("tmp/link", "/tmp/x");
         mkfifo(&t, "tmp/fifo");
         let ut = Scope::UserTemp;
-        for s in ["/tmp/x", "/tmp/d"] {
+        // A build tree directly in /var/tmp follows the same rules.
+        t.write("var/tmp/build/x", b"x");
+        for s in ["/tmp/x", "/tmp/d", "/var/tmp/build"] {
             let target = p(s);
             assert!(is_allowed_target(&env, &cfg, ut, &target), "{s}");
             let fp = fingerprint(&env, &target).unwrap();
@@ -1003,7 +1005,9 @@ mod tests {
             "/tmp",
             "/tmp/d/y",
             "/home/user/.cache/z",
-            "/var/tmp/x",
+            "/var/tmp",
+            "/var/tmp/build/x",
+            "/var/x",
             "tmp/x",
         ] {
             assert!(!is_allowed_target(&env, &cfg, ut, &p(s)), "{s}");

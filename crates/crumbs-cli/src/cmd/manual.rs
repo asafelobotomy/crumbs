@@ -57,9 +57,35 @@ pub fn root_command(env: &Env, pa: &PlannedAction) -> Option<String> {
         resolve_trusted(env, program).map_or_else(|| PathBuf::from(program), |p| env.unsys(&p));
     let words: Vec<String> = std::iter::once(program.as_os_str())
         .chain(args)
-        .map(|w| String::from_utf8_lossy(&sh_quote(w)).into_owned())
+        .map(|w| {
+            let text = String::from_utf8_lossy(w.as_encoded_bytes());
+            if text.chars().any(|c| c != '\t' && c.is_control()) {
+                ansi_c_quote(&text)
+            } else {
+                String::from_utf8_lossy(&sh_quote(w)).into_owned()
+            }
+        })
         .collect();
     Some(sanitise(&words.join(" ")))
+}
+
+/// `$'...'` quoting (bash, zsh, ksh) for a word with control characters,
+/// such as a script: one readable line that the shell turns back into the
+/// exact word, where `'...'` would carry raw newlines.
+fn ansi_c_quote(word: &str) -> String {
+    let mut out = String::from("$'");
+    for c in word.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\x{:02x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// `sudo <root command>` for each privileged action, in order.
@@ -79,6 +105,44 @@ mod tests {
     use super::*;
     use crumbs_core::safety::Fingerprint;
     use crumbs_core::testing::FixtureTree;
+
+    #[test]
+    fn a_script_argument_is_written_so_bash_reads_it_back() {
+        // A multi-line argument (the snapshots step) is shown as $'...':
+        // one line, readable, and pasted into bash or zsh it is the script.
+        let t = FixtureTree::new();
+        let script = "a='x'\nprintf '%s\\n' \"$a\"\t# tab\n";
+        let pa = planned(
+            Action::PrivilegedCommand {
+                program: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    script.into(),
+                    "crumbs-snapshots".into(),
+                    "3".into(),
+                ],
+            },
+            Scope::System,
+        );
+        let line = root_command(&t.env(), &pa).unwrap();
+        assert!(!line.contains('\u{FFFD}'), "{line}");
+        assert!(line.starts_with("'sh' '-c' $'a=\\'x\\'\\nprintf"), "{line}");
+        assert!(line.ends_with(" 'crumbs-snapshots' '3'"), "{line}");
+        let Ok(bash) = std::process::Command::new("bash").arg("--version").output() else {
+            eprintln!("skipped round trip: no bash");
+            return;
+        };
+        assert!(bash.status.success());
+        let quoted = line
+            .strip_prefix("'sh' '-c' ")
+            .and_then(|l| l.strip_suffix(" 'crumbs-snapshots' '3'"))
+            .unwrap();
+        let back = std::process::Command::new("bash")
+            .args(["-c", &format!("printf %s {quoted}")])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8(back.stdout).unwrap(), script);
+    }
 
     fn planned(action: Action, scope: Scope) -> PlannedAction {
         PlannedAction {
