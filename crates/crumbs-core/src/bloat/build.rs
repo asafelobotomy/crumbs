@@ -17,7 +17,7 @@ use super::cache::new_item;
 use super::{BloatItem, Category, ScanContext, Scanner};
 use crate::command::resolve_trusted;
 use crate::error::CoreError;
-use crate::executor::process_working_in;
+use crate::executor::{process_using, process_working_in};
 
 /// Project folders looked in when `project_dirs` is not set (below home).
 const DEFAULT_ROOTS: [&str; 8] = [
@@ -227,17 +227,29 @@ fn repo_items(
         ) else {
             continue;
         };
+        let days = last_changed_days(&repo.join(rel), cx.now);
+        let changed = match days {
+            0 => "last changed today".to_string(),
+            1 => "last changed 1 day ago".to_string(),
+            d => format!("last changed {d} days ago"),
+        };
         if let Some((pid, comm)) = &busy {
             item.preselected = false;
             item.note = Some(format!("{repo_label} is in use by {comm} (pid {pid})"));
+        } else if let Some((pid, comm)) = process_using(cx.env, &in_system_repo.join(rel)) {
+            item.preselected = false;
+            item.note = Some(format!("in use by {comm} (pid {pid})"));
+        } else if is_venv(rel) {
+            // Something outside the project may run from it, and it may
+            // have no requirements file to be rebuilt from.
+            item.preselected = false;
+            item.rebuildable = false;
+            item.note = Some(format!(
+                "a virtual environment can be in use from outside the project; {changed}"
+            ));
         } else {
-            let days = last_used_days(&repo.join(rel), cx.now);
             item.preselected = days >= cx.cfg.build_age_days;
-            item.note = Some(match days {
-                0 => "last used today".into(),
-                1 => "last used 1 day ago".into(),
-                d => format!("last used {d} days ago"),
-            });
+            item.note = Some(changed);
         }
         out.push(item);
     }
@@ -285,8 +297,16 @@ pub(super) fn ignored_by_git(
     }
 }
 
+fn is_venv(rel: &str) -> bool {
+    Path::new(rel)
+        .file_name()
+        .is_some_and(|n| n == ".venv" || n == "venv")
+}
+
 /// Whole days since the folder (or anything directly in it) last changed.
-fn last_used_days(dir: &Path, now: SystemTime) -> u64 {
+/// Running what it holds changes nothing, so this is not when it was last
+/// used; [`process_using`] covers what runs from it now.
+fn last_changed_days(dir: &Path, now: SystemTime) -> u64 {
     let mtime = |p: &Path| fs::symlink_metadata(p).and_then(|m| m.modified()).ok();
     let mut newest = mtime(dir);
     if let Ok(rd) = fs::read_dir(dir) {

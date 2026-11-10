@@ -140,9 +140,12 @@ fn lists_ignored_build_output_beside_its_project_file() {
         assert_eq!(i.category, Category::BuildOutput);
         assert_eq!(i.scope, Scope::Home);
         assert_eq!(i.action, ItemAction::Trash);
+        if i.label.ends_with(".venv") {
+            continue;
+        }
         assert!(i.rebuildable && i.preselected, "{i:?}");
         assert!(
-            i.note.as_deref().unwrap().starts_with("last used "),
+            i.note.as_deref().unwrap().starts_with("last changed "),
             "{i:?}"
         );
         verify(
@@ -168,7 +171,7 @@ fn recent_or_busy_build_output_is_not_preselected() {
     assert!(!item("app/target").preselected);
     assert_eq!(
         item("app/target").note.as_deref(),
-        Some("last used 1 day ago")
+        Some("last changed 1 day ago")
     );
     assert!(item("app/web/node_modules").preselected);
 
@@ -324,4 +327,55 @@ fn a_hostile_git_config_runs_nothing() {
         !pwned.exists(),
         "git ran the repository's fsmonitor command"
     );
+}
+
+#[test]
+fn virtual_environments_are_never_preselected() {
+    // Something outside the project (a service, a script) may run from a
+    // venv, and it may have no requirements file to rebuild it from.
+    let t = projects();
+    let args = ignore_args(&t, "/home/user/Projects/app", &rels());
+    let runner = on_git(FakeRunner::new(), &args, &["tools/.venv"]);
+    let items = scan_cfg(&t, &runner, &Config::default());
+    assert_eq!(items.len(), 1);
+    let v = &items[0];
+    assert!(!v.preselected && !v.rebuildable, "{v:?}");
+    assert_eq!(
+        v.note.as_deref(),
+        Some(
+            "a virtual environment can be in use from outside the project; last changed 100 days ago"
+        )
+    );
+}
+
+#[test]
+fn a_running_program_or_open_file_inside_holds_it_back() {
+    let t = projects();
+    // A program built into target/ runs; a file in node_modules is open.
+    t.symlink("proc/91/exe", "/home/user/Projects/app/target/debug/app");
+    t.write("proc/91/comm", b"app\n");
+    t.symlink(
+        "proc/92/fd/4",
+        "/home/user/Projects/app/web/node_modules/x/index.js",
+    );
+    t.write("proc/92/comm", b"node\n");
+    let args = ignore_args(&t, "/home/user/Projects/app", &rels());
+    let runner = on_git(
+        FakeRunner::new(),
+        &args,
+        &["target", "web/node_modules", "android/app/build"],
+    );
+    let items = scan_cfg(&t, &runner, &Config::default());
+    let item = |l: &str| items.iter().find(|i| i.label == l).unwrap();
+    assert!(!item("app/target").preselected);
+    assert_eq!(
+        item("app/target").note.as_deref(),
+        Some("in use by app (pid 91)")
+    );
+    assert!(!item("app/web/node_modules").preselected);
+    assert_eq!(
+        item("app/web/node_modules").note.as_deref(),
+        Some("in use by node (pid 92)")
+    );
+    assert!(item("app/android/app/build").preselected);
 }

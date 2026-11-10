@@ -1334,6 +1334,34 @@ const COMM_LEN: usize = 15;
 /// root-joined `location`; or `environ` holds `APPIMAGE=<location>`. Names
 /// in [`GENERIC_BASENAMES`] never match by basename. Unreadable entries
 /// are skipped.
+/// A running process that runs a program from `in_system` (its executable
+/// is there) or has a file open there, as `(pid, command name)`; the
+/// lowest pid when there are several.
+pub fn process_using(env: &Env, in_system: &Path) -> Option<(u32, String)> {
+    let real = env.sys_path(in_system);
+    let inside = |p: &Path| p.starts_with(in_system) || p.starts_with(&real);
+    let rd = fs::read_dir(env.sys_path(Path::new("/proc"))).ok()?;
+    rd.flatten()
+        .filter_map(|e| {
+            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+            let dir = e.path();
+            let exe = fs::read_link(dir.join("exe")).is_ok_and(|t| inside(&strip_deleted(&t)));
+            let open = exe
+                || fs::read_dir(dir.join("fd")).is_ok_and(|fds| {
+                    fds.flatten()
+                        .any(|f| fs::read_link(f.path()).is_ok_and(|t| inside(&t)))
+                });
+            if !open {
+                return None;
+            }
+            let comm = fs::read_to_string(dir.join("comm")).unwrap_or_default();
+            let comm = comm.trim();
+            let comm = if comm.is_empty() { "a process" } else { comm };
+            Some((pid, comm.to_string()))
+        })
+        .min()
+}
+
 /// A running process whose current directory is `in_system` or below it
 /// (a build or a shell working there), as `(pid, command name)`; the
 /// lowest pid when there are several.
