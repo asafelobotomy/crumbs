@@ -6,6 +6,7 @@ mod appimage;
 mod aur;
 mod browser;
 mod cache;
+mod containers;
 mod dev;
 mod flatpak;
 mod logs;
@@ -47,6 +48,7 @@ pub enum Category {
     Logs,
     AurBuild,
     AppCache,
+    Containers,
     PkgCache,
     OrphanPkgs,
     Journal,
@@ -56,7 +58,7 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 17] = [
+    pub const ALL: [Category; 18] = [
         Category::Cache,
         Category::Thumbnails,
         Category::Trash,
@@ -68,6 +70,7 @@ impl Category {
         Category::Logs,
         Category::AurBuild,
         Category::AppCache,
+        Category::Containers,
         Category::PkgCache,
         Category::OrphanPkgs,
         Category::Journal,
@@ -89,6 +92,7 @@ impl Category {
             Category::Logs => "logs",
             Category::AurBuild => "aur-build",
             Category::AppCache => "app-cache",
+            Category::Containers => "containers",
             Category::PkgCache => "pkg-cache",
             Category::OrphanPkgs => "orphan-pkgs",
             Category::Journal => "journal",
@@ -228,6 +232,7 @@ pub fn scanners() -> Vec<Box<dyn Scanner>> {
         Box::new(logs::LogsScanner),
         Box::new(aur::AurBuildScanner),
         Box::new(app::AppCacheScanner),
+        Box::new(containers::ContainersScanner),
         Box::new(system::PkgCacheScanner),
         Box::new(system::OrphanPkgsScanner),
         Box::new(system::JournalScanner),
@@ -325,6 +330,7 @@ mod tests {
             "logs",
             "aur-build",
             "app-cache",
+            "containers",
             "pkg-cache",
             "orphan-pkgs",
             "journal",
@@ -332,7 +338,7 @@ mod tests {
             "system-temp",
             "flatpak-unused-system",
         ];
-        assert_eq!(Category::ALL.len(), 17);
+        assert_eq!(Category::ALL.len(), 18);
         for (c, n) in Category::ALL.iter().zip(names) {
             assert_eq!(c.as_str(), n);
             assert_eq!(Category::from_str(n).unwrap(), *c);

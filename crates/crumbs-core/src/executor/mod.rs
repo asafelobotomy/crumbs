@@ -378,8 +378,9 @@ impl Attempt {
 /// The in-system folders a known cleanup command shrinks, so the executor
 /// can measure what it freed: the package caches (`paccache`, `pacman
 /// -Sc`, `apt-get clean`, `dnf clean`), the journal (`journalctl
-/// --vacuum-*`), `systemd-tmpfiles --clean --prefix=...` and `flatpak
-/// uninstall --unused`. Empty for any other command.
+/// --vacuum-*`), `systemd-tmpfiles --clean --prefix=...`, `flatpak
+/// uninstall --unused` and the `containers` commands of podman and Docker.
+/// Empty for any other command.
 pub fn measured_dirs(env: &Env, action: &Action) -> Vec<PathBuf> {
     let (Action::UserCommand { program, args } | Action::PrivilegedCommand { program, args }) =
         action
@@ -404,6 +405,13 @@ pub fn measured_dirs(env: &Env, action: &Action) -> Vec<PathBuf> {
             .filter_map(|a| a.strip_prefix("--prefix="))
             .map(PathBuf::from)
             .collect(),
+        // What `containers` runs: rootless podman keeps everything here.
+        "podman" if (has("image") && has("prune")) || (has("volume") && has("rm")) => {
+            vec![env.unsys(&env.data_home).join("containers/storage")]
+        }
+        "docker" if (has("image") && has("prune")) || (has("volume") && has("rm")) => {
+            vec!["/var/lib/docker".into()]
+        }
         "flatpak" if has("uninstall") && has("--unused") => {
             if has("--user") {
                 vec![env.unsys(&env.data_home).join("flatpak")]
