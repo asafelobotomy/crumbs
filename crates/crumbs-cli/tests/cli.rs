@@ -1477,7 +1477,8 @@ fn scan_json_shape() {
             "logs",
             "aur-build",
             "app-cache",
-            "containers"
+            "containers",
+            "build-output"
         ]
     );
     let cache = &cats[0];

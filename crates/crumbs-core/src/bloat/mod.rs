@@ -5,6 +5,7 @@ mod app;
 mod appimage;
 mod aur;
 mod browser;
+mod build;
 mod cache;
 mod containers;
 mod dev;
@@ -49,6 +50,7 @@ pub enum Category {
     AurBuild,
     AppCache,
     Containers,
+    BuildOutput,
     PkgCache,
     OrphanPkgs,
     Journal,
@@ -58,7 +60,7 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 18] = [
+    pub const ALL: [Category; 19] = [
         Category::Cache,
         Category::Thumbnails,
         Category::Trash,
@@ -71,6 +73,7 @@ impl Category {
         Category::AurBuild,
         Category::AppCache,
         Category::Containers,
+        Category::BuildOutput,
         Category::PkgCache,
         Category::OrphanPkgs,
         Category::Journal,
@@ -93,6 +96,7 @@ impl Category {
             Category::AurBuild => "aur-build",
             Category::AppCache => "app-cache",
             Category::Containers => "containers",
+            Category::BuildOutput => "build-output",
             Category::PkgCache => "pkg-cache",
             Category::OrphanPkgs => "orphan-pkgs",
             Category::Journal => "journal",
@@ -117,7 +121,7 @@ impl Category {
 
     /// Whether the category is enabled when the config doesn't say.
     pub fn default_on(self) -> bool {
-        self != Category::DevCache
+        !matches!(self, Category::DevCache | Category::BuildOutput)
     }
 }
 
@@ -233,6 +237,7 @@ pub fn scanners() -> Vec<Box<dyn Scanner>> {
         Box::new(aur::AurBuildScanner),
         Box::new(app::AppCacheScanner),
         Box::new(containers::ContainersScanner),
+        Box::new(build::BuildOutputScanner),
         Box::new(system::PkgCacheScanner),
         Box::new(system::OrphanPkgsScanner),
         Box::new(system::JournalScanner),
@@ -331,6 +336,7 @@ mod tests {
             "aur-build",
             "app-cache",
             "containers",
+            "build-output",
             "pkg-cache",
             "orphan-pkgs",
             "journal",
@@ -338,7 +344,7 @@ mod tests {
             "system-temp",
             "flatpak-unused-system",
         ];
-        assert_eq!(Category::ALL.len(), 18);
+        assert_eq!(Category::ALL.len(), 19);
         for (c, n) in Category::ALL.iter().zip(names) {
             assert_eq!(c.as_str(), n);
             assert_eq!(Category::from_str(n).unwrap(), *c);
@@ -347,7 +353,10 @@ mod tests {
                 serde_json::from_str::<Category>(&format!("\"{n}\"")).unwrap(),
                 *c
             );
-            assert_eq!(c.default_on(), *c != Category::DevCache);
+            assert_eq!(
+                c.default_on(),
+                !matches!(c, Category::DevCache | Category::BuildOutput)
+            );
             // The system categories come last, from `pkg-cache` on.
             let first_system = names.iter().position(|x| *x == "pkg-cache").unwrap();
             assert_eq!(

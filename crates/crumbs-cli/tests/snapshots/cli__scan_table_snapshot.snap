@@ -19,5 +19,6 @@ logs            0      0 B
 aur-build       0      0 B
 app-cache       0      0 B
 containers      0      0 B
+build-output    -      -        off (enable with --category or config)
 
 reclaimable: 16.0 KiB+ across 4 items
