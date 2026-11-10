@@ -795,9 +795,9 @@ Two further refusal texts, both with `ok` false and the entry's own `entry_id`:
 
 `crumbs scan [--category <name>]... [--details] [--user] [--json]` is strictly read-only: it never changes a file and never writes history. `--system` scans the system categories instead (also read-only, no administrator rights needed; naming a system category with `--category` implies it). `--user --system` exits 2 with `use either --user or --system`, and so does a named category of the other kind (`category 'cache' is a user category and cannot be used with --system`); under `--json` that is an envelope with `data: null` and a `cli` error. Under `--json` a category that cannot run here has an `unavailable` reason; the human table shows `unavailable (<reason>)` in its note column.
 
-`data`: `categories`, an array of **CategoryReport**, one per listed category in this fixed order. The nine user categories: `cache`, `thumbnails`, `trash`, `temp`, `browser-cache`, `dev-cache`, `flatpak-unused`, `appimage-old`, `logs`. The six system categories, after them: `pkg-cache`, `orphan-pkgs`, `journal`, `coredumps`, `system-temp`, `flatpak-unused-system`.
+`data`: `categories`, an array of **CategoryReport**, one per listed category in this fixed order. The thirteen user categories: `cache`, `thumbnails`, `trash`, `temp`, `browser-cache`, `dev-cache`, `flatpak-unused`, `appimage-old`, `logs`, `aur-build`, `app-cache`, `containers`, `build-output`. The seven system categories, after them: `pkg-cache`, `orphan-pkgs`, `journal`, `coredumps`, `system-temp`, `flatpak-unused-system`, `snapshots`.
 
-- With no `--category`, the nine user categories are listed; with `--system`, the six system ones. Categories switched off in `categories_off` (default: `dev-cache`) are listed with `skipped: true`, an empty `items` and `total` 0, and are not scanned.
+- With no `--category`, the thirteen user categories are listed; with `--system`, the seven system ones. Categories switched off in `categories_off` (default: `dev-cache` and `build-output`) are listed with `skipped: true`, an empty `items` and `total` 0, and are not scanned.
 - With `--category`, exactly the named categories are listed and scanned, even ones switched off in the config.
 
 | Field | Type | Meaning |
@@ -826,18 +826,28 @@ Two further refusal texts, both with `ok` false and the entry's own `entry_id`:
 | `extra_paths` | array of string | Further paths removed together with the item, for example the `.trashinfo` file of a trashed entry. Paths only: the safety fingerprints are internal and not shown. |
 | `app_id` | string or null | The app the item belongs to, when exactly one installed app matches. |
 
+**User categories added after 0.3.** Their items have the fields above.
+
+| Category | Item | Action | Notes |
+|---|---|---|---|
+| `aur-build` | one item per `pamac-build-*` folder you own in pamac's `BuildDirectory` (`/etc/pamac.conf`, default `/var/tmp`; only `/tmp` or `/var/tmp`), labelled `pamac build trees (N packages)` | `delete` with `scope` `user-temp` | Preselected unless a process works in it (`in use by makepkg (pid 77)`); right before deleting, a process working in it refuses the action (`refusing: <path> is in use by <name> (pid <n>)`). |
+| `app-cache` | one item per cache folder (`Cache`, `Code Cache`, `GPUCache`, `DawnCache`, `DawnGraphiteCache`, `DawnWebGPUCache`, `GrShaderCache`, `ShaderCache`, `CachedData`) of each folder in `~/.config` that has Chromium's `Local State`, labelled `<app> <folder>` | `trash` | `<app> is running` and not preselected when a process has `--user-data-dir=<that folder>` on its command line or a file open in it. |
+| `containers` | `N untagged <engine> images` (one item per engine, sized by the images' sizes) and `<engine> volume <name>` (one per unused volume, sized by its mount point when readable) | `command`: `<engine> image prune -f`; `<engine> volume rm <name>` | Engines `podman` and `docker`, from the trusted directories; one that fails to answer lists nothing. Volumes are never preselected (`used by no container, but a volume can hold data you want`), and only names matching `[a-zA-Z0-9][a-zA-Z0-9_.-]*` are listed. |
+| `build-output` | one item per build folder, labelled `<repository>/<folder>` relative to its project folder | `trash` | Off by default. See the README for the kinds and the search. Only folders `git -C <repo> check-ignore` reports; none when git fails. `note` is `last used N days ago`, or `<repository> is in use by <name> (pid <n>)`; preselected only when unused for `build_age_days` and nothing works in the repository. `unavailable` (`git not installed`) without a trusted git. |
+
 The internal fingerprint of an item is never serialized.
 
 **System categories.** `scan --system` reads only: the scanners run as the user and nothing is escalated.
 
 | Category | Item | Action | Notes |
 |---|---|---|---|
-| `pkg-cache` | one item, `package cache (keep N versions)` | `privileged`: `paccache -rkN`, `apt-get clean` or `dnf clean packages` | Uses the first of pacman, apt-get and dnf. pacman: `N` is `pkg_cache_keep` (default 2); the size is `paccache -dkN`'s; without `paccache` (pacman-contrib), `pacman -Sc --noconfirm` with an unknown size and a note. apt: the `.deb` files in `/var/cache/apt/archives`. dnf: the `.rpm` files under `/var/cache/libdnf5` (or `/var/cache/dnf`). `unavailable` without any of them. |
+| `pkg-cache` | `cached packages no longer installed` (pacman with `paccache` only), then one item `package cache (keep N versions)` | `privileged`: `paccache -ruk0` for the first; `paccache -rkN`, `apt-get clean` or `dnf clean packages` | Uses the first of pacman, apt-get and dnf. pacman: `N` is `pkg_cache_keep` (default 2); the sizes are `paccache -duk0`'s and `paccache -dkN`'s (a failing `-duk0` only drops its item); each is left out when there is nothing to prune; without `paccache` (pacman-contrib), `pacman -Sc --noconfirm` with an unknown size and a note. apt: the `.deb` files in `/var/cache/apt/archives`. dnf: the `.rpm` files under `/var/cache/libdnf5` (or `/var/cache/dnf`). `unavailable` without any of them. |
 | `orphan-pkgs` | one item, `N orphaned packages`, the names in `note` | `privileged`: `pacman -Rn --noconfirm <names>`, `dpkg --purge <names>` or `rpm -e <names>` | Opt-in. The names are exactly what the simulation listed: the closure of `pacman -Rs --print` over `pacman -Qdtq`, `apt-get -s autoremove --purge`, or `dnf autoremove --assumeno` (size unknown on dnf). |
 | `journal` | one item, `systemd journal` | `privileged`: `journalctl --vacuum-size=<journal_max>` | Listed only when the journal is larger than `journal_max` (default `500M`); the size is the excess. |
 | `coredumps` | one item per `core.*` file in `/var/lib/systemd/coredump` | `delete` with `scope` `system` (run as `rm -f -- <path>` in the batch) | Regular files only, with every directory from `/` root-owned and not writable by others. `unavailable` without the directory. |
 | `system-temp` | one item, `stale system temporary files` | `privileged`: `systemd-tmpfiles --clean --prefix=/tmp --prefix=/var/tmp` | Size unknown: systemd decides by its age rules. |
 | `flatpak-unused-system` | one item, `N unused Flatpak runtimes (system)` with the refs (`id//branch`) in `note`, or none when Flatpak finds nothing unused | `privileged`: `flatpak uninstall --system --unused -y --noninteractive` | Opt-in. Size unknown. crumbs asks Flatpak first with `flatpak uninstall --system --unused` (no `-y`: Flatpak lists its plan and declines on its own, since its output is not a terminal; nothing is removed and no rights are needed). When Flatpak's answer is not understood, the item is `unused Flatpak runtimes (system)` with `decided by flatpak`, as before. The same holds for `flatpak-unused` with `--user`. |
+| `snapshots` | one item, `Timeshift snapshots beyond the newest N, oldest first (counted when cleaned)` | `privileged`: `sh -c <script> crumbs-snapshots N` | Opt-in. `N` is `snapshots_keep` (default 3). Size unknown: Timeshift lists snapshots only to root. The script runs `timeshift --list --scripted`, takes the names of its `>` rows, refuses (exit 1, nothing deleted) unless every one is `YYYY-MM-DD_HH-MM-SS`, refuses a keep count below 1 (exit 2), and deletes all but the newest N with `timeshift --delete --snapshot <name> --scripted`. `unavailable` (`timeshift not installed`) without a trusted timeshift; no item when `/etc/timeshift/timeshift.json` does not exist. |
 
 `errors` has one entry per failed scanner (`source` is the category name), then one per failed app source, then config notes. Exit 0, or 3 when a scanner failed (a failed app source alone does not change the exit code). Example (the fixture has a user Flatpak runtime, an old log, an old file in `/tmp` and two AppImage versions):
 
@@ -1125,14 +1135,14 @@ with these envelope `errors`:
 - `--exclude <pattern>` leaves out what the pattern matches, as `exclude` in the config; a pattern that does not start with `/` or `~/` exits 2 with `--exclude '<pattern>' must start with / or ~/`.
 - `--user --system`, or a named category of the other kind, exits 2 with the same message as `scan` (`use either --user or --system`, `category 'cache' is a user category and cannot be used with --system`) and an error envelope whose `data` is `{ "plans": [], "report": null }`.
 - System items become `privileged-command` actions, or (`coredumps`) `delete` actions with `scope` `system`; `package-remove` is planned only by `uninstall`. They run in the one privileged batch described under Plan, so a run asks once. A system `clean` also records `kind` `clean` in the history.
-- The system items preselected are those of `pkg-cache`, `journal`, `coredumps` and `system-temp`. `orphan-pkgs` and `flatpak-unused-system` are opt-in and are planned only when named (or ticked with `-i`).
+- The system items preselected are those of `pkg-cache`, `journal`, `coredumps` and `system-temp`. `orphan-pkgs`, `flatpak-unused-system` and `snapshots` are opt-in and are planned only when named (or ticked with `-i`).
 - If the escalation fails, the run exits 5 with `data.manual_commands`, as for `uninstall`.
 
 Which items are planned:
 
 - With no category, every enabled category is scanned (all but those in `categories_off`). Naming categories scans exactly those, even ones switched off in the config.
 - The items cleaned are the ones with `preselected` true. An item held back (its app is running) is left out and listed nowhere in the JSON. With `-i` you pick from all items instead.
-- `flatpak-unused` and `trash` are opt-in: their items are never preselected, so they are planned only when the category is named (or ticked with `-i`). A plain `crumbs clean` never empties the trash. The same holds for `orphan-pkgs` and `flatpak-unused-system`.
+- `flatpak-unused` and `trash` are opt-in: their items are never preselected, so they are planned only when the category is named (or ticked with `-i`). A plain `crumbs clean` never empties the trash. The same holds for `orphan-pkgs`, `flatpak-unused-system` and `snapshots`. `containers` volumes are never preselected, even when the category is named: tick them with `-i` (or `select` them over MCP).
 - `trash` and `temp` items are always permanent deletes (`delete` actions with `scope` `home-trash` and `user-temp`, and the plan's `notes` say so). With `--permanent`, trash items of the other categories become `delete` too.
 - When any action is a `trash`, the plan's `notes` include `space is freed when the trash is emptied (or use --permanent)`.
 
