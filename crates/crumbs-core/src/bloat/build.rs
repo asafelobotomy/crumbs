@@ -256,15 +256,16 @@ fn repo_items(
     (out, nested)
 }
 
-/// The candidates git ignores, as `git -C <repo> check-ignore` reports
-/// them; none when git fails (not a repository, or any other error).
+/// The candidates git ignores: those `git ls-files --others --ignored
+/// --exclude-standard --directory` lists, or that lie in a folder it lists
+/// (git lists a folder whole only when nothing in it is tracked, so a
+/// build folder holding a tracked file never matches). None when git fails
+/// (not a repository, or any other error).
 ///
-/// A repository's own config can name commands git runs (`core.fsmonitor`,
-/// a hook-like setting), and a scan must stay read-only: those are switched
-/// off on the command line, which overrides the repository's config.
-/// `core.quotePath=false` keeps non-ASCII paths unquoted; a path git still
-/// quotes (a `"` or a control character in it) never matches and is left
-/// out.
+/// A repository's own config can name commands git runs (`core.fsmonitor`),
+/// and a scan must stay read-only: those are switched off on the command
+/// line, which overrides the repository's config. `-z` gives every path
+/// exactly, unquoted.
 pub(super) fn ignored_by_git(
     cx: &ScanContext,
     git: &Path,
@@ -272,29 +273,36 @@ pub(super) fn ignored_by_git(
     rels: &[String],
 ) -> Vec<String> {
     let repo_arg = repo.to_string_lossy();
-    let mut args: Vec<&str> = vec![
+    let args = [
         "-C",
         &repo_arg,
         "-c",
         "core.fsmonitor=false",
         "-c",
         "core.untrackedCache=false",
-        "-c",
-        "core.quotePath=false",
-        "check-ignore",
-        "--",
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+        "-z",
     ];
-    args.extend(rels.iter().map(String::as_str));
-    match cx.runner.run(git, &args) {
-        // 0: some are ignored; 1: none are.
-        Ok(o) if (o.status == 0 || o.status == 1) && !o.timed_out => o
+    let listed: Vec<String> = match cx.runner.run(git, &args) {
+        Ok(o) if o.status == 0 && !o.timed_out => o
             .stdout
-            .lines()
+            .split('\0')
+            .filter(|e| e.ends_with('/'))
             .map(str::to_string)
-            .filter(|l| rels.contains(l))
             .collect(),
-        _ => Vec::new(),
-    }
+        _ => return Vec::new(),
+    };
+    rels.iter()
+        .filter(|rel| {
+            let dir = format!("{rel}/");
+            listed.iter().any(|e| dir.starts_with(e.as_str()))
+        })
+        .cloned()
+        .collect()
 }
 
 fn is_venv(rel: &str) -> bool {

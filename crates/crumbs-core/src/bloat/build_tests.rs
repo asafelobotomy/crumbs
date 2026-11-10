@@ -41,9 +41,9 @@ fn scan_cfg(t: &FixtureTree, runner: &FakeRunner, cfg: &Config) -> Vec<BloatItem
     BuildOutputScanner.scan(&cx).unwrap()
 }
 
-/// `git -C <repo> check-ignore -- <rels>` as the scanner asks it.
-fn ignore_args(t: &FixtureTree, repo: &str, rels: &[&str]) -> Vec<String> {
-    let mut v = vec![
+/// `git -C <repo> ... ls-files --others --ignored ...` as the scanner asks it.
+fn ignore_args(t: &FixtureTree, repo: &str) -> Vec<String> {
+    vec![
         "-C".to_string(),
         t.dir
             .path()
@@ -54,23 +54,29 @@ fn ignore_args(t: &FixtureTree, repo: &str, rels: &[&str]) -> Vec<String> {
         "core.fsmonitor=false".into(),
         "-c".into(),
         "core.untrackedCache=false".into(),
-        "-c".into(),
-        "core.quotePath=false".into(),
-        "check-ignore".into(),
-        "--".into(),
-    ];
-    v.extend(rels.iter().map(|r| (*r).to_string()));
-    v
+        "ls-files".into(),
+        "--others".into(),
+        "--ignored".into(),
+        "--exclude-standard".into(),
+        "--directory".into(),
+        "-z".into(),
+    ]
 }
 
+/// git answers with these ignored folders (`/` appended) and files.
 fn on_git(runner: FakeRunner, args: &[String], ignored: &[&str]) -> FakeRunner {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let stdout: String = ignored.iter().map(|r| format!("{r}\n")).collect();
-    runner.on(
-        "git",
-        &args,
-        out(if ignored.is_empty() { 1 } else { 0 }, &stdout),
-    )
+    let stdout: String = ignored
+        .iter()
+        .map(|r| {
+            if r.ends_with(".txt") || r.ends_with('/') {
+                format!("{r}\0")
+            } else {
+                format!("{r}/\0")
+            }
+        })
+        .collect();
+    runner.on("git", &args, out(0, &stdout))
 }
 
 fn touch(p: &Path, days_before_now: u64) {
@@ -111,7 +117,7 @@ fn rels() -> [&'static str; 5] {
 #[test]
 fn lists_ignored_build_output_beside_its_project_file() {
     let t = projects();
-    let args = ignore_args(&t, "/home/user/Projects/app", &rels());
+    let args = ignore_args(&t, "/home/user/Projects/app");
     let runner = on_git(
         FakeRunner::new(),
         &args,
@@ -164,7 +170,7 @@ fn recent_or_busy_build_output_is_not_preselected() {
     let t = projects();
     let target = t.dir.path().join("home/user/Projects/app/target");
     touch(&target, 1);
-    let args = ignore_args(&t, "/home/user/Projects/app", &rels());
+    let args = ignore_args(&t, "/home/user/Projects/app");
     let runner = on_git(FakeRunner::new(), &args, &["target", "web/node_modules"]);
     let items = scan_cfg(&t, &runner, &Config::default());
     let item = |l: &str| items.iter().find(|i| i.label == l).unwrap();
@@ -190,7 +196,7 @@ fn recent_or_busy_build_output_is_not_preselected() {
 fn no_git_or_git_error_lists_nothing() {
     let t = projects();
     // git says it is not a repository (exit 128): nothing is trusted.
-    let args = ignore_args(&t, "/home/user/Projects/app", &rels());
+    let args = ignore_args(&t, "/home/user/Projects/app");
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let runner = FakeRunner::new().on("git", &a, out(128, ""));
     assert!(scan_cfg(&t, &runner, &Config::default()).is_empty());
@@ -216,7 +222,7 @@ fn project_dirs_from_config() {
         project_dirs: vec![PathBuf::from("/home/user/work")],
         ..Config::default()
     };
-    let args = ignore_args(&t, "/home/user/work/deep/lib", &["target"]);
+    let args = ignore_args(&t, "/home/user/work/deep/lib");
     let runner = on_git(FakeRunner::new(), &args, &["target"]);
     let items = scan_cfg(&t, &runner, &cfg);
     let labels: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
@@ -242,13 +248,13 @@ fn nested_repositories_answer_for_themselves() {
     t.write(&format!("{inner}/build/keep"), b"tracked");
     let runner = on_git(
         FakeRunner::new(),
-        &ignore_args(&t, "/home/user/Projects/outer", &["target"]),
+        &ignore_args(&t, "/home/user/Projects/outer"),
         &["target"],
     );
     // The inner repository tracks its build folder: git ignores nothing.
     let runner = on_git(
         runner,
-        &ignore_args(&t, "/home/user/Projects/outer/vendor/inner", &["build"]),
+        &ignore_args(&t, "/home/user/Projects/outer/vendor/inner"),
         &[],
     );
     let items = scan_cfg(&t, &runner, &Config::default());
@@ -268,7 +274,7 @@ fn non_ascii_paths_are_read_unquoted() {
     let rel = "\u{fc}n\u{ef}/build";
     let runner = on_git(
         FakeRunner::new(),
-        &ignore_args(&t, "/home/user/Projects/app", &[rel]),
+        &ignore_args(&t, "/home/user/Projects/app"),
         &[rel],
     );
     let items = scan_cfg(&t, &runner, &Config::default());
@@ -334,7 +340,7 @@ fn virtual_environments_are_never_preselected() {
     // Something outside the project (a service, a script) may run from a
     // venv, and it may have no requirements file to rebuild it from.
     let t = projects();
-    let args = ignore_args(&t, "/home/user/Projects/app", &rels());
+    let args = ignore_args(&t, "/home/user/Projects/app");
     let runner = on_git(FakeRunner::new(), &args, &["tools/.venv"]);
     let items = scan_cfg(&t, &runner, &Config::default());
     assert_eq!(items.len(), 1);
@@ -359,7 +365,7 @@ fn a_running_program_or_open_file_inside_holds_it_back() {
         "/home/user/Projects/app/web/node_modules/x/index.js",
     );
     t.write("proc/92/comm", b"node\n");
-    let args = ignore_args(&t, "/home/user/Projects/app", &rels());
+    let args = ignore_args(&t, "/home/user/Projects/app");
     let runner = on_git(
         FakeRunner::new(),
         &args,
@@ -378,4 +384,71 @@ fn a_running_program_or_open_file_inside_holds_it_back() {
         Some("in use by node (pid 92)")
     );
     assert!(item("app/android/app/build").preselected);
+}
+
+#[test]
+fn a_partly_tracked_folder_is_not_offered_and_a_wholly_ignored_parent_counts() {
+    // git lists a folder whole only when nothing in it is tracked; one with
+    // a tracked file shows only its ignored files. A folder listed whole
+    // covers the candidates below it.
+    let t = projects();
+    let args = ignore_args(&t, "/home/user/Projects/app");
+    let runner = on_git(
+        FakeRunner::new(),
+        &args,
+        &["android/", "target/out.txt", "web/node_modules/"],
+    );
+    let items = scan_cfg(&t, &runner, &Config::default());
+    let mut got: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
+    got.sort();
+    assert_eq!(got, ["app/android/app/build", "app/web/node_modules"]);
+}
+
+#[test]
+fn real_git_reports_exact_paths() {
+    // With the real git: a path with a quote comes back as it is, and a
+    // build folder holding a tracked file is not reported.
+    let Some(git) = ["/usr/bin/git", "/bin/git"]
+        .into_iter()
+        .map(Path::new)
+        .find(|p| p.exists())
+    else {
+        eprintln!("skipped: no git");
+        return;
+    };
+    let t = FixtureTree::new();
+    let repo = t.dir.path().join("home/user/Projects/app");
+    for d in ["q\"x/build", "part/build"] {
+        std::fs::create_dir_all(repo.join(d)).unwrap();
+        std::fs::write(repo.join(d).join("f"), "").unwrap();
+    }
+    let git_in = |args: &[&str]| {
+        let ok = std::process::Command::new(git)
+            .args(args)
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(ok.success(), "{args:?}");
+    };
+    git_in(&["init", "-q"]);
+    std::fs::write(repo.join(".gitignore"), "build/\n").unwrap();
+    git_in(&["add", "-f", "part/build/f"]);
+    let env = t.env();
+    let cfg = Config::default();
+    let inv = Inventory {
+        apps: vec![],
+        statuses: vec![],
+        errors: vec![],
+        owned: Default::default(),
+    };
+    let runner = crate::command::SystemRunner::new();
+    let cx = ScanContext {
+        env: &env,
+        cfg: &cfg,
+        inv: &inv,
+        runner: &runner,
+        now: now(),
+    };
+    let rels = ["part/build".to_string(), "q\"x/build".to_string()];
+    assert_eq!(ignored_by_git(&cx, git, &repo, &rels), ["q\"x/build"]);
 }
