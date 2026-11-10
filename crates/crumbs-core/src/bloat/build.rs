@@ -55,6 +55,7 @@ impl Scanner for BuildOutputScanner {
             return Ok(Vec::new());
         };
         let home = cx.env.unsys(&cx.env.home);
+        let real_home = fs::canonicalize(&cx.env.home).ok();
         let roots: Vec<PathBuf> = if cx.cfg.project_dirs.is_empty() {
             DEFAULT_ROOTS.iter().map(|r| home.join(r)).collect()
         } else {
@@ -63,13 +64,28 @@ impl Scanner for BuildOutputScanner {
         let mut out = Vec::new();
         let mut seen_repos: Vec<PathBuf> = Vec::new();
         for root in roots {
-            let mut queue = repositories(&cx.env.sys_path(&root));
+            // A project folder may be a link (to another disk, say): use
+            // where it is, so items carry the paths the safety checks see.
+            let Ok(real_root) = fs::canonicalize(cx.env.sys_path(&root)) else {
+                continue;
+            };
+            // In-system, under home as the safety checks see it: a linked
+            // parent of home (`/home` -> `/data/home`) is not followed, so
+            // the resolved path is rebased onto home. Outside home: skipped.
+            let Some(root) = real_home
+                .as_ref()
+                .and_then(|h| real_root.strip_prefix(h).ok())
+                .map(|rel| home.join(rel))
+            else {
+                continue;
+            };
+            let mut queue = repositories(&real_root);
             while let Some(repo) = queue.pop() {
                 if seen_repos.contains(&repo) {
                     continue;
                 }
                 seen_repos.push(repo.clone());
-                let (items, nested) = repo_items(cx, &git, &root, &repo);
+                let (items, nested) = repo_items(cx, &git, &root, &real_root, &repo);
                 out.extend(items);
                 // A repository inside this one answers for itself.
                 queue.extend(nested);
@@ -164,13 +180,14 @@ fn is_output_name(name: &str) -> bool {
 }
 
 /// The build output in one repository (real path `repo`), found below its
-/// project folder `root` (in-system), and the repositories nested in it
+/// project folder `root` (in-system; `real_root` resolved), and the repositories nested in it
 /// (a `.git` directory or file below it: a submodule, a worktree, a
 /// clone), which are not searched here: their own git decides for them.
 fn repo_items(
     cx: &ScanContext,
     git: &Path,
     root: &Path,
+    real_root: &Path,
     repo: &Path,
 ) -> (Vec<BloatItem>, Vec<PathBuf>) {
     // Candidates, relative to the repository.
@@ -206,7 +223,10 @@ fn repo_items(
     }
     rels.sort();
     let ignored = ignored_by_git(cx, git, repo, &rels);
-    let in_system_repo = cx.env.unsys(repo);
+    let in_system_repo = match repo.strip_prefix(real_root) {
+        Ok(rel) => root.join(rel),
+        Err(_) => return (Vec::new(), nested),
+    };
     let repo_label = in_system_repo
         .strip_prefix(root)
         .ok()
@@ -256,15 +276,16 @@ fn repo_items(
     (out, nested)
 }
 
-/// The candidates git ignores, as `git -C <repo> check-ignore` reports
-/// them; none when git fails (not a repository, or any other error).
+/// The candidates git ignores: those `git ls-files --others --ignored
+/// --exclude-standard --directory` lists, or that lie in a folder it lists
+/// (git lists a folder whole only when nothing in it is tracked, so a
+/// build folder holding a tracked file never matches). None when git fails
+/// (not a repository, or any other error).
 ///
-/// A repository's own config can name commands git runs (`core.fsmonitor`,
-/// a hook-like setting), and a scan must stay read-only: those are switched
-/// off on the command line, which overrides the repository's config.
-/// `core.quotePath=false` keeps non-ASCII paths unquoted; a path git still
-/// quotes (a `"` or a control character in it) never matches and is left
-/// out.
+/// A repository's own config can name commands git runs (`core.fsmonitor`),
+/// and a scan must stay read-only: those are switched off on the command
+/// line, which overrides the repository's config. `-z` gives every path
+/// exactly, unquoted.
 pub(super) fn ignored_by_git(
     cx: &ScanContext,
     git: &Path,
@@ -272,29 +293,44 @@ pub(super) fn ignored_by_git(
     rels: &[String],
 ) -> Vec<String> {
     let repo_arg = repo.to_string_lossy();
+    let work_tree = format!("--work-tree={repo_arg}");
     let mut args: Vec<&str> = vec![
         "-C",
         &repo_arg,
+        // Names such as `we*rd` are names, not patterns.
+        "--literal-pathspecs",
+        // The repository's own core.worktree must not send git elsewhere.
+        &work_tree,
         "-c",
         "core.fsmonitor=false",
         "-c",
         "core.untrackedCache=false",
-        "-c",
-        "core.quotePath=false",
-        "check-ignore",
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+        "-z",
+        // Only the candidates are walked, not every untracked folder.
         "--",
     ];
     args.extend(rels.iter().map(String::as_str));
-    match cx.runner.run(git, &args) {
-        // 0: some are ignored; 1: none are.
-        Ok(o) if (o.status == 0 || o.status == 1) && !o.timed_out => o
+    let listed: Vec<String> = match cx.runner.run(git, &args) {
+        Ok(o) if o.status == 0 && !o.timed_out => o
             .stdout
-            .lines()
+            .split('\0')
+            .filter(|e| e.ends_with('/'))
             .map(str::to_string)
-            .filter(|l| rels.contains(l))
             .collect(),
-        _ => Vec::new(),
-    }
+        _ => return Vec::new(),
+    };
+    rels.iter()
+        .filter(|rel| {
+            let dir = format!("{rel}/");
+            listed.iter().any(|e| dir.starts_with(e.as_str()))
+        })
+        .cloned()
+        .collect()
 }
 
 fn is_venv(rel: &str) -> bool {

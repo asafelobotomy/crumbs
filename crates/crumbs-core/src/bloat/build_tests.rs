@@ -41,36 +41,59 @@ fn scan_cfg(t: &FixtureTree, runner: &FakeRunner, cfg: &Config) -> Vec<BloatItem
     BuildOutputScanner.scan(&cx).unwrap()
 }
 
-/// `git -C <repo> check-ignore -- <rels>` as the scanner asks it.
+/// `git -C <repo> ... ls-files --others --ignored ... -- <rels>` as the
+/// scanner asks it.
 fn ignore_args(t: &FixtureTree, repo: &str, rels: &[&str]) -> Vec<String> {
+    let real = t
+        .dir
+        .path()
+        .join(repo.trim_start_matches('/'))
+        .display()
+        .to_string();
     let mut v = vec![
         "-C".to_string(),
-        t.dir
-            .path()
-            .join(repo.trim_start_matches('/'))
-            .display()
-            .to_string(),
+        real.clone(),
+        "--literal-pathspecs".into(),
+        format!("--work-tree={real}"),
         "-c".into(),
         "core.fsmonitor=false".into(),
         "-c".into(),
         "core.untrackedCache=false".into(),
-        "-c".into(),
-        "core.quotePath=false".into(),
-        "check-ignore".into(),
+        "ls-files".into(),
+        "--others".into(),
+        "--ignored".into(),
+        "--exclude-standard".into(),
+        "--directory".into(),
+        "-z".into(),
         "--".into(),
     ];
     v.extend(rels.iter().map(|r| (*r).to_string()));
     v
 }
 
+/// The candidates in [`projects`]' repository, sorted.
+const APP_RELS: [&str; 5] = [
+    "android/app/build",
+    "kept/node_modules",
+    "target",
+    "tools/.venv",
+    "web/node_modules",
+];
+
+/// git answers with these ignored folders (`/` appended) and files.
 fn on_git(runner: FakeRunner, args: &[String], ignored: &[&str]) -> FakeRunner {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let stdout: String = ignored.iter().map(|r| format!("{r}\n")).collect();
-    runner.on(
-        "git",
-        &args,
-        out(if ignored.is_empty() { 1 } else { 0 }, &stdout),
-    )
+    let stdout: String = ignored
+        .iter()
+        .map(|r| {
+            if r.ends_with(".txt") || r.ends_with('/') {
+                format!("{r}\0")
+            } else {
+                format!("{r}/\0")
+            }
+        })
+        .collect();
+    runner.on("git", &args, out(0, &stdout))
 }
 
 fn touch(p: &Path, days_before_now: u64) {
@@ -98,20 +121,10 @@ fn projects() -> FixtureTree {
     t
 }
 
-fn rels() -> [&'static str; 5] {
-    [
-        "android/app/build",
-        "kept/node_modules",
-        "target",
-        "tools/.venv",
-        "web/node_modules",
-    ]
-}
-
 #[test]
 fn lists_ignored_build_output_beside_its_project_file() {
     let t = projects();
-    let args = ignore_args(&t, "/home/user/Projects/app", &rels());
+    let args = ignore_args(&t, "/home/user/Projects/app", &APP_RELS);
     let runner = on_git(
         FakeRunner::new(),
         &args,
@@ -164,7 +177,7 @@ fn recent_or_busy_build_output_is_not_preselected() {
     let t = projects();
     let target = t.dir.path().join("home/user/Projects/app/target");
     touch(&target, 1);
-    let args = ignore_args(&t, "/home/user/Projects/app", &rels());
+    let args = ignore_args(&t, "/home/user/Projects/app", &APP_RELS);
     let runner = on_git(FakeRunner::new(), &args, &["target", "web/node_modules"]);
     let items = scan_cfg(&t, &runner, &Config::default());
     let item = |l: &str| items.iter().find(|i| i.label == l).unwrap();
@@ -190,7 +203,7 @@ fn recent_or_busy_build_output_is_not_preselected() {
 fn no_git_or_git_error_lists_nothing() {
     let t = projects();
     // git says it is not a repository (exit 128): nothing is trusted.
-    let args = ignore_args(&t, "/home/user/Projects/app", &rels());
+    let args = ignore_args(&t, "/home/user/Projects/app", &APP_RELS);
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let runner = FakeRunner::new().on("git", &a, out(128, ""));
     assert!(scan_cfg(&t, &runner, &Config::default()).is_empty());
@@ -290,12 +303,7 @@ fn a_hostile_git_config_runs_nothing() {
     let t = FixtureTree::new();
     let repo = t.dir.path().join("home/user/Projects/app");
     std::fs::create_dir_all(&repo).unwrap();
-    let ok = std::process::Command::new(git)
-        .args(["init", "-q"])
-        .current_dir(&repo)
-        .status()
-        .unwrap();
-    assert!(ok.success());
+    git_cmd(git, &repo, &["init", "-q"]);
     let pwned = t.dir.path().join("PWNED");
     std::fs::write(
         repo.join(".git/config"),
@@ -334,7 +342,7 @@ fn virtual_environments_are_never_preselected() {
     // Something outside the project (a service, a script) may run from a
     // venv, and it may have no requirements file to rebuild it from.
     let t = projects();
-    let args = ignore_args(&t, "/home/user/Projects/app", &rels());
+    let args = ignore_args(&t, "/home/user/Projects/app", &APP_RELS);
     let runner = on_git(FakeRunner::new(), &args, &["tools/.venv"]);
     let items = scan_cfg(&t, &runner, &Config::default());
     assert_eq!(items.len(), 1);
@@ -359,7 +367,7 @@ fn a_running_program_or_open_file_inside_holds_it_back() {
         "/home/user/Projects/app/web/node_modules/x/index.js",
     );
     t.write("proc/92/comm", b"node\n");
-    let args = ignore_args(&t, "/home/user/Projects/app", &rels());
+    let args = ignore_args(&t, "/home/user/Projects/app", &APP_RELS);
     let runner = on_git(
         FakeRunner::new(),
         &args,
@@ -378,4 +386,203 @@ fn a_running_program_or_open_file_inside_holds_it_back() {
         Some("in use by node (pid 92)")
     );
     assert!(item("app/android/app/build").preselected);
+}
+
+#[test]
+fn a_partly_tracked_folder_is_not_offered_and_a_wholly_ignored_parent_counts() {
+    // git lists a folder whole only when nothing in it is tracked; one with
+    // a tracked file shows only its ignored files. A folder listed whole
+    // covers the candidates below it.
+    let t = projects();
+    let args = ignore_args(&t, "/home/user/Projects/app", &APP_RELS);
+    let runner = on_git(
+        FakeRunner::new(),
+        &args,
+        &["android/", "target/out.txt", "web/node_modules/"],
+    );
+    let items = scan_cfg(&t, &runner, &Config::default());
+    let mut got: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
+    got.sort();
+    assert_eq!(got, ["app/android/app/build", "app/web/node_modules"]);
+}
+
+#[test]
+fn real_git_reports_exact_paths() {
+    // With the real git: a path with a quote comes back as it is, and a
+    // build folder holding a tracked file is not reported.
+    let Some(git) = ["/usr/bin/git", "/bin/git"]
+        .into_iter()
+        .map(Path::new)
+        .find(|p| p.exists())
+    else {
+        eprintln!("skipped: no git");
+        return;
+    };
+    let t = FixtureTree::new();
+    let repo = t.dir.path().join("home/user/Projects/app");
+    for d in ["q\"x/build", "part/build"] {
+        std::fs::create_dir_all(repo.join(d)).unwrap();
+        std::fs::write(repo.join(d).join("f"), "").unwrap();
+    }
+    // An untracked file beside the tracked one: git lists it, not the
+    // folder, and that must not make the folder count.
+    std::fs::write(repo.join("part/build/o"), "").unwrap();
+    let git_in = |args: &[&str]| git_cmd(git, &repo, args);
+    git_in(&["init", "-q"]);
+    std::fs::write(repo.join(".gitignore"), "build/\n").unwrap();
+    git_in(&["add", "-f", "part/build/f"]);
+    let env = t.env();
+    let cfg = Config::default();
+    let inv = Inventory {
+        apps: vec![],
+        statuses: vec![],
+        errors: vec![],
+        owned: Default::default(),
+    };
+    let runner = crate::command::SystemRunner::new();
+    let cx = ScanContext {
+        env: &env,
+        cfg: &cfg,
+        inv: &inv,
+        runner: &runner,
+        now: now(),
+    };
+    let rels = ["part/build".to_string(), "q\"x/build".to_string()];
+    assert_eq!(ignored_by_git(&cx, git, &repo, &rels), ["q\"x/build"]);
+}
+
+#[test]
+fn a_symlinked_project_folder_is_followed_to_where_it_is() {
+    // ~/Projects is a link to ~/data/Projects: items carry the real path,
+    // which the safety checks accept (a path through the link would be
+    // refused at clean time).
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/git", b"#!/bin/sh\n");
+    t.mkdir("home/user/data/Projects/app/.git");
+    t.write("home/user/data/Projects/app/Cargo.toml", b"");
+    t.write("home/user/data/Projects/app/target/x", b"x");
+    t.symlink("home/user/Projects", "data/Projects");
+    let args = ignore_args(&t, "/home/user/data/Projects/app", &["target"]);
+    let runner = on_git(FakeRunner::new(), &args, &["target"]);
+    let cfg = Config::default();
+    let items = scan_cfg(&t, &runner, &cfg);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].label, "app/target");
+    let p = items[0].path.clone().unwrap();
+    assert_eq!(p, PathBuf::from("/home/user/data/Projects/app/target"));
+    verify(
+        &t.env(),
+        &cfg,
+        Scope::Home,
+        &p,
+        items[0].fingerprint.as_ref().unwrap(),
+    )
+    .unwrap();
+}
+
+/// Runs the real git in `dir` without the caller's `GIT_*` variables (a
+/// git hook running the tests could point them at another repository).
+fn git_cmd(git: &Path, dir: &Path, args: &[&str]) {
+    let mut cmd = std::process::Command::new(git);
+    cmd.args(args).current_dir(dir);
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with("GIT_") {
+            cmd.env_remove(k);
+        }
+    }
+    let ok = cmd.status().unwrap();
+    assert!(ok.success(), "{args:?}");
+}
+
+#[test]
+fn a_repository_cannot_point_git_at_another_work_tree() {
+    // core.worktree in the repository's own config would make git judge
+    // its folders by another folder's ignore rules.
+    let Some(git) = ["/usr/bin/git", "/bin/git"]
+        .into_iter()
+        .map(Path::new)
+        .find(|p| p.exists())
+    else {
+        eprintln!("skipped: no git");
+        return;
+    };
+    let t = FixtureTree::new();
+    let repo = t.dir.path().join("home/user/Projects/app");
+    let elsewhere = t.dir.path().join("elsewhere");
+    std::fs::create_dir_all(repo.join("target")).unwrap();
+    std::fs::write(repo.join("target/work"), "").unwrap();
+    std::fs::create_dir_all(elsewhere.join("target")).unwrap();
+    std::fs::write(elsewhere.join(".gitignore"), "target/\n").unwrap();
+    git_cmd(git, &repo, &["init", "-q"]);
+    git_cmd(
+        git,
+        &repo,
+        &["config", "core.worktree", &elsewhere.display().to_string()],
+    );
+    let env = t.env();
+    let cfg = Config::default();
+    let inv = Inventory {
+        apps: vec![],
+        statuses: vec![],
+        errors: vec![],
+        owned: Default::default(),
+    };
+    let runner = crate::command::SystemRunner::new();
+    let cx = ScanContext {
+        env: &env,
+        cfg: &cfg,
+        inv: &inv,
+        runner: &runner,
+        now: now(),
+    };
+    assert!(ignored_by_git(&cx, git, &repo, &["target".to_string()]).is_empty());
+}
+
+#[test]
+fn a_linked_parent_of_home_keeps_items_under_home() {
+    // /home is a link to /data/home: resolving ~/Projects must not move
+    // items out of home as the safety checks see it.
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/git", b"#!/bin/sh\n");
+    t.mkdir("data/home/user/Projects/app/.git");
+    t.write("data/home/user/Projects/app/Cargo.toml", b"");
+    t.write("data/home/user/Projects/app/target/x", b"x");
+    t.symlink("home", "data/home");
+    let args = ignore_args(&t, "/data/home/user/Projects/app", &["target"]);
+    let runner = on_git(FakeRunner::new(), &args, &["target"]);
+    let cfg = Config::default();
+    let items = scan_cfg(&t, &runner, &cfg);
+    assert_eq!(items.len(), 1, "{items:?}");
+    let p = items[0].path.clone().unwrap();
+    assert_eq!(p, PathBuf::from("/home/user/Projects/app/target"));
+    verify(
+        &t.env(),
+        &cfg,
+        Scope::Home,
+        &p,
+        items[0].fingerprint.as_ref().unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_process_seen_through_the_linked_parent_still_holds_it_back() {
+    // /proc shows the resolved path of a process working in the repository.
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/git", b"#!/bin/sh\n");
+    t.mkdir("data/home/user/Projects/app/.git");
+    t.write("data/home/user/Projects/app/Cargo.toml", b"");
+    t.write("data/home/user/Projects/app/target/x", b"x");
+    t.symlink("home", "data/home");
+    let real_repo = t.dir.path().join("data/home/user/Projects/app");
+    t.symlink("proc/5/cwd", real_repo.to_str().unwrap());
+    t.write("proc/5/comm", b"cargo\n");
+    let args = ignore_args(&t, "/data/home/user/Projects/app", &["target"]);
+    let runner = on_git(FakeRunner::new(), &args, &["target"]);
+    let items = scan_cfg(&t, &runner, &Config::default());
+    assert!(!items[0].preselected, "{:?}", items[0]);
+    assert_eq!(
+        items[0].note.as_deref(),
+        Some("app is in use by cargo (pid 5)")
+    );
 }

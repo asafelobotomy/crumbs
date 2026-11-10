@@ -53,7 +53,9 @@ fn podman_untagged_images_and_unused_volumes() {
         "home/user/.local/share/containers/storage/volumes/cache/_data/f",
         &[1u8; 8192],
     );
-    let images = r#"[{"Id":"aaa","Size":3000000000},{"Id":"bbb","Size":100}]"#;
+    // Layers shared with other images stay: what goes is Size - SharedSize.
+    let images =
+        r#"[{"Id":"aaa","Size":3000000000,"SharedSize":2900000000},{"Id":"bbb","Size":100}]"#;
     let volumes = r#"[{"Name":"cache","Mountpoint":"/home/user/.local/share/containers/storage/volumes/cache/_data"}]"#;
     let runner = FakeRunner::new().on("podman", &IMAGES, out(0, images)).on(
         "podman",
@@ -65,7 +67,7 @@ fn podman_untagged_images_and_unused_volumes() {
     let img = &items[0];
     assert_eq!(img.category, Category::Containers);
     assert_eq!(img.label, "2 untagged podman images");
-    assert_eq!(img.size, Some(3_000_000_100));
+    assert_eq!(img.size, Some(100_000_100));
     assert!(img.preselected && img.rebuildable);
     assert_eq!(
         img.action,

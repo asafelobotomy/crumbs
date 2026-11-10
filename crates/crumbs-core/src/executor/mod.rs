@@ -396,8 +396,8 @@ impl Attempt {
 /// can measure what it freed: the package caches (`paccache`, `pacman
 /// -Sc`, `apt-get clean`, `dnf clean`), the journal (`journalctl
 /// --vacuum-*`), `systemd-tmpfiles --clean --prefix=...`, `flatpak
-/// uninstall --unused` and the `containers` commands of podman and Docker.
-/// Empty for any other command.
+/// uninstall --unused`. Empty for any other command (container storage is
+/// not walked: it is large, and the images' own sizes say what goes).
 pub fn measured_dirs(env: &Env, action: &Action) -> Vec<PathBuf> {
     let (Action::UserCommand { program, args } | Action::PrivilegedCommand { program, args }) =
         action
@@ -422,13 +422,6 @@ pub fn measured_dirs(env: &Env, action: &Action) -> Vec<PathBuf> {
             .filter_map(|a| a.strip_prefix("--prefix="))
             .map(PathBuf::from)
             .collect(),
-        // What `containers` runs: rootless podman keeps everything here.
-        "podman" if (has("image") && has("prune")) || (has("volume") && has("rm")) => {
-            vec![env.unsys(&env.data_home).join("containers/storage")]
-        }
-        "docker" if (has("image") && has("prune")) || (has("volume") && has("rm")) => {
-            vec!["/var/lib/docker".into()]
-        }
         "flatpak" if has("uninstall") && has("--unused") => {
             if has("--user") {
                 vec![env.unsys(&env.data_home).join("flatpak")]
@@ -1136,14 +1129,17 @@ fn recheck_scope(
     path: &Path,
 ) -> Result<(), String> {
     match scope {
-        // A build tree (`aur-build`): kept while a process works in it.
-        Scope::UserTemp if is_build_tree(path) => match process_working_in(env, path) {
-            Some((pid, comm)) => Err(format!(
-                "refusing: {} is in use by {comm} (pid {pid})",
-                display_path(env, path)
-            )),
-            None => Ok(()),
-        },
+        // A build tree (`aur-build`): kept while a process works in it,
+        // runs a program from it or has a file open in it.
+        Scope::UserTemp if is_build_tree(path) => {
+            match process_working_in(env, path).or_else(|| process_using(env, path)) {
+                Some((pid, comm)) => Err(format!(
+                    "refusing: {} is in use by {comm} (pid {pid})",
+                    display_path(env, path)
+                )),
+                None => Ok(()),
+            }
+        }
         Scope::UserTemp => crate::bloat::temp::still_stale(env, cfg, path, env.now())
             .map_err(|reason| format!("refusing: {} {reason}", display_path(env, path))),
         // Unreachable in practice: a SystemTree `Delete` is privileged and
@@ -1274,7 +1270,17 @@ fn delete_with(
             ));
         }
     }
-    fs::remove_dir_all(&real).map_err(|e| {
+    let mut removed = fs::remove_dir_all(&real);
+    if removed
+        .as_ref()
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+    {
+        // Read-only folders (Go's module cache): make the ones you own
+        // writable again, as `go clean -modcache` does, and try once more.
+        make_owned_dirs_writable(&real, env.uid);
+        removed = fs::remove_dir_all(&real);
+    }
+    removed.map_err(|e| {
         let msg = io_msg(env, path, &e);
         // Part of the tree may already be gone; say so.
         if fs::symlink_metadata(&real).is_ok() {
@@ -1283,6 +1289,65 @@ fn delete_with(
             msg
         }
     })
+}
+
+/// Gives every real directory in the tree at `real` that `uid` owns its
+/// owner's read, write and search bits, so what is in it can be removed.
+/// Nothing is made writable for anyone else.
+///
+/// Walked by file descriptor, never by name: each directory is opened
+/// `O_PATH|O_NOFOLLOW`, checked with `fstat`, changed through its
+/// `/proc/self/fd` link (the inode that was opened) and read through a
+/// descriptor of that same inode, so a name swapped for a symlink
+/// mid-walk leads nowhere.
+fn make_owned_dirs_writable(real: &Path, uid: u32) {
+    use rustix::fs::{CWD, Dir, FileType, Mode, OFlags, chmod, fstat, open, openat};
+    use std::os::fd::{AsRawFd, OwnedFd};
+
+    fn walk(dir: OwnedFd, uid: u32) {
+        let Ok(st) = fstat(&dir) else { return };
+        if FileType::from_raw_mode(st.st_mode) != FileType::Directory || st.st_uid != uid {
+            return;
+        }
+        let magic = format!("/proc/self/fd/{}", dir.as_raw_fd());
+        let mode = st.st_mode & 0o7777;
+        if mode & 0o700 != 0o700 {
+            let _ = chmod(magic.as_str(), Mode::from_raw_mode(mode | 0o700));
+        }
+        let Ok(readable) = open(
+            magic.as_str(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) else {
+            return;
+        };
+        let Ok(entries) = Dir::read_from(&readable) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_bytes() == b"." || name.to_bytes() == b".." {
+                continue;
+            }
+            if let Ok(child) = openat(
+                &readable,
+                name,
+                OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                walk(child, uid);
+            }
+        }
+    }
+
+    if let Ok(root) = openat(
+        CWD,
+        real,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        walk(root, uid);
+    }
 }
 
 /// Filters `path` in place. Returns the in-system backup path, or `None`
@@ -1355,7 +1420,14 @@ const COMM_LEN: usize = 15;
 /// lowest pid when there are several.
 pub fn process_using(env: &Env, in_system: &Path) -> Option<(u32, String)> {
     let real = env.sys_path(in_system);
-    let inside = |p: &Path| p.starts_with(in_system) || p.starts_with(&real);
+    // /proc shows resolved paths: a linked parent (`/home` -> `/data/home`)
+    // would otherwise hide the process.
+    let canon = fs::canonicalize(&real).ok();
+    let inside = |p: &Path| {
+        p.starts_with(in_system)
+            || p.starts_with(&real)
+            || canon.as_ref().is_some_and(|c| p.starts_with(c))
+    };
     let rd = fs::read_dir(env.sys_path(Path::new("/proc"))).ok()?;
     rd.flatten()
         .filter_map(|e| {
@@ -1383,12 +1455,18 @@ pub fn process_using(env: &Env, in_system: &Path) -> Option<(u32, String)> {
 /// lowest pid when there are several.
 pub fn process_working_in(env: &Env, in_system: &Path) -> Option<(u32, String)> {
     let real = env.sys_path(in_system);
+    // /proc shows resolved paths: a linked parent (`/home` -> `/data/home`)
+    // would otherwise hide the process.
+    let canon = fs::canonicalize(&real).ok();
     let rd = fs::read_dir(env.sys_path(Path::new("/proc"))).ok()?;
     rd.flatten()
         .filter_map(|e| {
             let pid: u32 = e.file_name().to_str()?.parse().ok()?;
             let cwd = fs::read_link(e.path().join("cwd")).ok()?;
-            if !(cwd.starts_with(in_system) || cwd.starts_with(&real)) {
+            if !(cwd.starts_with(in_system)
+                || cwd.starts_with(&real)
+                || canon.as_ref().is_some_and(|c| cwd.starts_with(c)))
+            {
                 return None;
             }
             let comm = fs::read_to_string(e.path().join("comm")).unwrap_or_default();

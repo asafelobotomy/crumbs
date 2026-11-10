@@ -45,9 +45,14 @@ impl Scanner for ContainersScanner {
                 query(&["images", "--filter", "dangling=true", "--format", "json"])
                 && !images.is_empty()
             {
+                // Layers shared with other images stay: what goes is each
+                // image's own part (podman's SharedSize; Docker has none).
                 let size = images
                     .iter()
-                    .map(|i| size_of(&i["Size"]))
+                    .map(|i| {
+                        let shared = i["SharedSize"].as_u64().unwrap_or(0);
+                        size_of(&i["Size"]).map(|s| s.saturating_sub(shared))
+                    })
                     .sum::<Option<u64>>();
                 let n = images.len();
                 let what = if n == 1 { "image" } else { "images" };
@@ -55,7 +60,7 @@ impl Scanner for ContainersScanner {
                     format!("{n} untagged {engine} {what}"),
                     size,
                     true,
-                    Some("layers shared with other images stay; what is freed is measured".into()),
+                    Some("the size counts only what no other image shares".into()),
                     engine,
                     &["image", "prune", "-f"],
                 ));
