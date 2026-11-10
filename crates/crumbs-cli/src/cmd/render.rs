@@ -61,14 +61,20 @@ pub fn shown_path(env: &Env, in_system: &std::path::Path) -> String {
 }
 
 /// What a row shows for the action's target: the path, or for a command
-/// its whole command line.
+/// its command line, with a multi-line argument (a script) as a placeholder.
 fn target(env: &Env, a: &Action) -> String {
     match a {
         Action::UserCommand { program, args } | Action::PrivilegedCommand { program, args } => {
             let mut line = program.clone();
             for arg in args {
                 line.push(' ');
-                line.push_str(arg);
+                // A script is shown in full on the `as root:` line below.
+                let lines = arg.trim_end_matches('\n').lines().count();
+                if lines > 1 {
+                    line.push_str(&format!("<script, {lines} lines>"));
+                } else {
+                    line.push_str(arg);
+                }
             }
             sanitise(&line)
         }
@@ -481,6 +487,24 @@ mod tests {
             text.trim_end()
                 .ends_with("freed 1.0 MiB · plus space freed by journalctl"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn a_script_argument_shows_as_a_placeholder() {
+        let t = crumbs_core::testing::FixtureTree::new();
+        let a = Action::PrivilegedCommand {
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "a=1\nb=2\necho $a\n".into(),
+                "crumbs-snapshots".into(),
+                "3".into(),
+            ],
+        };
+        assert_eq!(
+            target(&t.env(), &a),
+            "sh -c <script, 3 lines> crumbs-snapshots 3"
         );
     }
 

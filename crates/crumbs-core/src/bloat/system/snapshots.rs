@@ -56,13 +56,13 @@ impl Scanner for SnapshotsScanner {
         let keep = cx.cfg.snapshots_keep.max(1);
         let mut item = privileged_item(
             Category::Snapshots,
-            format!("Timeshift snapshots beyond the newest {keep}"),
-            None,
-            Some(
-                "Timeshift lists them only with administrator rights: which and how many show \
-                 when cleaned; oldest first"
-                    .into(),
+            // Timeshift lists them only to root: which and how many show
+            // when the root step runs.
+            format!(
+                "Timeshift snapshots beyond the newest {keep}, oldest first (counted when cleaned)"
             ),
+            None,
+            None,
             "sh",
             vec![
                 "-c".into(),

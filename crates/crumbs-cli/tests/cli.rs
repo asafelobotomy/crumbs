@@ -2892,6 +2892,25 @@ fn clean_system_runs_one_batch() {
 }
 
 #[test]
+fn clean_snapshots_only_when_named() {
+    let t = system_fixture("");
+    t.write_exec("/usr/bin/timeshift", b"#!/bin/sh\n");
+    t.write("/etc/timeshift/timeshift.json", b"{}");
+    // Not in a plain system clean.
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["clean", "--system", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!stdout.contains("Timeshift"), "{stdout}");
+    // Named: planned, as a root step that keeps the newest 3.
+    let (code, stdout, stderr) = run_out(crumbs(&t).args(["clean", "snapshots", "--dry-run"]));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains("Timeshift snapshots beyond the newest 3"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("will run 1 command"), "{stdout}");
+}
+
+#[test]
 fn clean_system_orphan_pkgs_opt_in() {
     let t = system_fixture("");
     // Naming the category implies --system, and opts in.

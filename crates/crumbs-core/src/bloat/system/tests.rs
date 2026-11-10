@@ -638,7 +638,10 @@ fn snapshots_offers_timeshift_pruning() {
     assert!(rep.error.is_none() && rep.unavailable.is_none(), "{rep:?}");
     assert_eq!(rep.items.len(), 1);
     let i = &rep.items[0];
-    assert_eq!(i.label, "Timeshift snapshots beyond the newest 3");
+    assert_eq!(
+        i.label,
+        "Timeshift snapshots beyond the newest 3, oldest first (counted when cleaned)"
+    );
     assert_eq!(i.size, None);
     assert!(!i.preselected, "opt-in");
     assert_eq!(i.scope, Scope::System);
@@ -660,9 +663,10 @@ fn snapshots_offers_timeshift_pruning() {
         ..Config::default()
     };
     let rep = scan_cfg(&t, &FakeRunner::new(), &cfg, Category::Snapshots);
-    assert_eq!(
-        rep.items[0].label,
-        "Timeshift snapshots beyond the newest 5"
+    assert!(
+        rep.items[0]
+            .label
+            .starts_with("Timeshift snapshots beyond the newest 5,")
     );
 }
 
