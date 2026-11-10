@@ -1136,14 +1136,17 @@ fn recheck_scope(
     path: &Path,
 ) -> Result<(), String> {
     match scope {
-        // A build tree (`aur-build`): kept while a process works in it.
-        Scope::UserTemp if is_build_tree(path) => match process_working_in(env, path) {
-            Some((pid, comm)) => Err(format!(
-                "refusing: {} is in use by {comm} (pid {pid})",
-                display_path(env, path)
-            )),
-            None => Ok(()),
-        },
+        // A build tree (`aur-build`): kept while a process works in it,
+        // runs a program from it or has a file open in it.
+        Scope::UserTemp if is_build_tree(path) => {
+            match process_working_in(env, path).or_else(|| process_using(env, path)) {
+                Some((pid, comm)) => Err(format!(
+                    "refusing: {} is in use by {comm} (pid {pid})",
+                    display_path(env, path)
+                )),
+                None => Ok(()),
+            }
+        }
         Scope::UserTemp => crate::bloat::temp::still_stale(env, cfg, path, env.now())
             .map_err(|reason| format!("refusing: {} {reason}", display_path(env, path))),
         // Unreachable in practice: a SystemTree `Delete` is privileged and

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use super::{BloatItem, Category, ItemAction, ScanContext, Scanner};
 use crate::error::CoreError;
-use crate::executor::process_working_in;
+use crate::executor::{process_using, process_working_in};
 use crate::safety::{Scope, fingerprint, is_allowed_target};
 
 /// pamac's default `BuildDirectory`.
@@ -75,7 +75,9 @@ impl Scanner for AurBuildScanner {
                 extra_paths: Vec::new(),
                 app_id: None,
             };
-            if let Some((pid, comm)) = process_working_in(cx.env, &path) {
+            if let Some((pid, comm)) =
+                process_working_in(cx.env, &path).or_else(|| process_using(cx.env, &path))
+            {
                 item.preselected = false;
                 item.note = Some(format!("in use by {comm} (pid {pid})"));
             }

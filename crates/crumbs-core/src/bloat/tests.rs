@@ -324,6 +324,18 @@ fn app_cache_running_app_not_preselected() {
 }
 
 #[test]
+fn aur_build_with_a_file_open_inside_not_preselected() {
+    // pamac writing into the tree from elsewhere: an open file counts.
+    let t = FixtureTree::new();
+    t.write("var/tmp/pamac-build-user/brave/src/x", b"x");
+    t.symlink("proc/66/fd/3", "/var/tmp/pamac-build-user/brave/src/x");
+    t.write("proc/66/comm", b"pamac\n");
+    let items = run(&t, &Config::default(), &inv(vec![]), Category::AurBuild);
+    assert!(!items[0].preselected);
+    assert_eq!(items[0].note.as_deref(), Some("in use by pamac (pid 66)"));
+}
+
+#[test]
 fn cache_dir_in_use_not_preselected() {
     // A running process works inside it (its current directory), as a
     // build does: never preselected, and the note names the process.

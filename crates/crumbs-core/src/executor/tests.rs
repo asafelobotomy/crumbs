@@ -2946,3 +2946,20 @@ fn a_build_tree_in_tmp_keeps_the_temp_rechecks() {
         Some("refusing: /tmp/pamac-build-user is no longer an old temporary file")
     );
 }
+
+#[test]
+fn execute_refuses_a_build_tree_with_a_file_open() {
+    let t = FixtureTree::new();
+    t.write("var/tmp/pamac-build-user/brave/src/x", b"x");
+    t.symlink("proc/66/fd/3", "/var/tmp/pamac-build-user/brave/src/x");
+    t.write("proc/66/comm", b"pamac\n");
+    let env = t.env();
+    let mut busy = planned(&env, delete("/var/tmp/pamac-build-user"));
+    busy.scope = Scope::UserTemp;
+    let report = execute(&env, &Config::default(), &plan_of(vec![busy]));
+    assert_eq!(
+        report.results[0].error.as_deref(),
+        Some("refusing: /var/tmp/pamac-build-user is in use by pamac (pid 66)")
+    );
+    assert!(env.sys("/var/tmp/pamac-build-user/brave/src/x").exists());
+}
