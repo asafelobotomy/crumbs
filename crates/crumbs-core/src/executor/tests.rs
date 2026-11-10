@@ -2696,14 +2696,11 @@ fn measured_dirs_of_known_cleanup_commands() {
             },
         )
     };
-    let storage = p("/home/user/.local/share/containers/storage");
-    assert_eq!(engine("podman", &["image", "prune", "-f"]), storage);
-    assert_eq!(engine("podman", &["volume", "rm", "cache"]), storage);
-    assert_eq!(
-        engine("docker", &["image", "prune", "-f"]),
-        p("/var/lib/docker")
-    );
-    assert!(engine("podman", &["run", "x"]).is_empty());
+    // Container storage is not measured: walking it is slow, and the
+    // images' own sizes say what goes.
+    assert!(engine("podman", &["image", "prune", "-f"]).is_empty());
+    assert!(engine("podman", &["volume", "rm", "cache"]).is_empty());
+    assert!(engine("docker", &["image", "prune", "-f"]).is_empty());
     // Anything else is not measured: an app's uninstall, an unknown tool.
     assert!(dirs("flatpak", &["uninstall", "--system", "-y", "org.app"]).is_empty());
     assert!(dirs("snap", &["remove", "--purge", "x"]).is_empty());
