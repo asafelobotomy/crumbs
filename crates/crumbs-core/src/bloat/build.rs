@@ -63,7 +63,13 @@ impl Scanner for BuildOutputScanner {
         let mut out = Vec::new();
         let mut seen_repos: Vec<PathBuf> = Vec::new();
         for root in roots {
-            let mut queue = repositories(&cx.env.sys_path(&root));
+            // A project folder may be a link (to another disk, say): use
+            // where it is, so items carry the paths the safety checks see.
+            let Ok(real_root) = fs::canonicalize(cx.env.sys_path(&root)) else {
+                continue;
+            };
+            let root = cx.env.unsys(&real_root);
+            let mut queue = repositories(&real_root);
             while let Some(repo) = queue.pop() {
                 if seen_repos.contains(&repo) {
                     continue;

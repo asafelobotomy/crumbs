@@ -452,3 +452,32 @@ fn real_git_reports_exact_paths() {
     let rels = ["part/build".to_string(), "q\"x/build".to_string()];
     assert_eq!(ignored_by_git(&cx, git, &repo, &rels), ["q\"x/build"]);
 }
+
+#[test]
+fn a_symlinked_project_folder_is_followed_to_where_it_is() {
+    // ~/Projects is a link to ~/data/Projects: items carry the real path,
+    // which the safety checks accept (a path through the link would be
+    // refused at clean time).
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/git", b"#!/bin/sh\n");
+    t.mkdir("home/user/data/Projects/app/.git");
+    t.write("home/user/data/Projects/app/Cargo.toml", b"");
+    t.write("home/user/data/Projects/app/target/x", b"x");
+    t.symlink("home/user/Projects", "data/Projects");
+    let args = ignore_args(&t, "/home/user/data/Projects/app");
+    let runner = on_git(FakeRunner::new(), &args, &["target"]);
+    let cfg = Config::default();
+    let items = scan_cfg(&t, &runner, &cfg);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].label, "app/target");
+    let p = items[0].path.clone().unwrap();
+    assert_eq!(p, PathBuf::from("/home/user/data/Projects/app/target"));
+    verify(
+        &t.env(),
+        &cfg,
+        Scope::Home,
+        &p,
+        items[0].fingerprint.as_ref().unwrap(),
+    )
+    .unwrap();
+}
