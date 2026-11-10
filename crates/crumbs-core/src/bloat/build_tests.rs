@@ -50,6 +50,12 @@ fn ignore_args(t: &FixtureTree, repo: &str, rels: &[&str]) -> Vec<String> {
             .join(repo.trim_start_matches('/'))
             .display()
             .to_string(),
+        "-c".into(),
+        "core.fsmonitor=false".into(),
+        "-c".into(),
+        "core.untrackedCache=false".into(),
+        "-c".into(),
+        "core.quotePath=false".into(),
         "check-ignore".into(),
         "--".into(),
     ];
@@ -212,4 +218,110 @@ fn project_dirs_from_config() {
     let items = scan_cfg(&t, &runner, &cfg);
     let labels: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
     assert_eq!(labels, ["deep/lib/target"]);
+}
+
+#[test]
+fn nested_repositories_answer_for_themselves() {
+    // vendor/inner is its own repository inside an ignored folder of the
+    // outer one: its folders are judged by its own git, not the outer's.
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/git", b"#!/bin/sh\n");
+    let outer = "home/user/Projects/outer";
+    t.mkdir(&format!("{outer}/.git"));
+    t.write(&format!("{outer}/Cargo.toml"), b"");
+    t.write(&format!("{outer}/target/x"), b"x");
+    let inner = format!("{outer}/vendor/inner");
+    t.write(
+        &format!("{inner}/.git"),
+        b"gitdir: ../../.git/modules/inner",
+    );
+    t.write(&format!("{inner}/CMakeLists.txt"), b"");
+    t.write(&format!("{inner}/build/keep"), b"tracked");
+    let runner = on_git(
+        FakeRunner::new(),
+        &ignore_args(&t, "/home/user/Projects/outer", &["target"]),
+        &["target"],
+    );
+    // The inner repository tracks its build folder: git ignores nothing.
+    let runner = on_git(
+        runner,
+        &ignore_args(&t, "/home/user/Projects/outer/vendor/inner", &["build"]),
+        &[],
+    );
+    let items = scan_cfg(&t, &runner, &Config::default());
+    let labels: Vec<_> = items.iter().map(|i| i.label.clone()).collect();
+    assert_eq!(labels, ["outer/target"]);
+}
+
+#[test]
+fn non_ascii_paths_are_read_unquoted() {
+    // git quotes non-ASCII paths unless told not to; they would never match.
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/git", b"#!/bin/sh\n");
+    let r = "home/user/Projects/app";
+    t.mkdir(&format!("{r}/.git"));
+    t.write(&format!("{r}/\u{fc}n\u{ef}/build.gradle"), b"");
+    t.write(&format!("{r}/\u{fc}n\u{ef}/build/x"), b"x");
+    let rel = "\u{fc}n\u{ef}/build";
+    let runner = on_git(
+        FakeRunner::new(),
+        &ignore_args(&t, "/home/user/Projects/app", &[rel]),
+        &[rel],
+    );
+    let items = scan_cfg(&t, &runner, &Config::default());
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn a_hostile_git_config_runs_nothing() {
+    // A repository's config can name commands git runs (core.fsmonitor);
+    // a scan must never run them. Uses the real git, when there is one.
+    let Some(git) = ["/usr/bin/git", "/bin/git"]
+        .into_iter()
+        .map(Path::new)
+        .find(|p| p.exists())
+    else {
+        eprintln!("skipped: no git");
+        return;
+    };
+    let t = FixtureTree::new();
+    let repo = t.dir.path().join("home/user/Projects/app");
+    std::fs::create_dir_all(&repo).unwrap();
+    let ok = std::process::Command::new(git)
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    assert!(ok.success());
+    let pwned = t.dir.path().join("PWNED");
+    std::fs::write(
+        repo.join(".git/config"),
+        format!("[core]\n\tfsmonitor = touch {}\n", pwned.display()),
+    )
+    .unwrap();
+    std::fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+    std::fs::write(repo.join("Cargo.toml"), "").unwrap();
+    std::fs::create_dir_all(repo.join("target")).unwrap();
+    let env = t.env();
+    let cfg = Config::default();
+    let inv = Inventory {
+        apps: vec![],
+        statuses: vec![],
+        errors: vec![],
+        owned: Default::default(),
+    };
+    let runner = crate::command::SystemRunner::new();
+    let cx = ScanContext {
+        env: &env,
+        cfg: &cfg,
+        inv: &inv,
+        runner: &runner,
+        now: now(),
+    };
+    let ignored = ignored_by_git(&cx, git, &repo, &["target".to_string()]);
+    assert_eq!(ignored, ["target"]);
+    assert!(
+        !pwned.exists(),
+        "git ran the repository's fsmonitor command"
+    );
 }

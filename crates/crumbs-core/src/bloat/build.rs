@@ -63,12 +63,16 @@ impl Scanner for BuildOutputScanner {
         let mut out = Vec::new();
         let mut seen_repos: Vec<PathBuf> = Vec::new();
         for root in roots {
-            for repo in repositories(&cx.env.sys_path(&root)) {
+            let mut queue = repositories(&cx.env.sys_path(&root));
+            while let Some(repo) = queue.pop() {
                 if seen_repos.contains(&repo) {
                     continue;
                 }
                 seen_repos.push(repo.clone());
-                out.extend(repo_items(cx, &git, &root, &repo));
+                let (items, nested) = repo_items(cx, &git, &root, &repo);
+                out.extend(items);
+                // A repository inside this one answers for itself.
+                queue.extend(nested);
             }
         }
         Ok(out)
@@ -160,16 +164,28 @@ fn is_output_name(name: &str) -> bool {
 }
 
 /// The build output in one repository (real path `repo`), found below its
-/// project folder `root` (in-system).
-fn repo_items(cx: &ScanContext, git: &Path, root: &Path, repo: &Path) -> Vec<BloatItem> {
+/// project folder `root` (in-system), and the repositories nested in it
+/// (a `.git` directory or file below it: a submodule, a worktree, a
+/// clone), which are not searched here: their own git decides for them.
+fn repo_items(
+    cx: &ScanContext,
+    git: &Path,
+    root: &Path,
+    repo: &Path,
+) -> (Vec<BloatItem>, Vec<PathBuf>) {
     // Candidates, relative to the repository.
     let mut rels: Vec<String> = Vec::new();
+    let mut nested: Vec<PathBuf> = Vec::new();
     let mut level = vec![repo.to_path_buf()];
     for depth in 0..OUTPUT_DEPTH {
         let mut next = Vec::new();
         for dir in level {
             for sub in real_subdirs(&dir) {
                 let name = sub.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                if name != ".git" && fs::symlink_metadata(sub.join(".git")).is_ok() {
+                    nested.push(sub);
+                    continue;
+                }
                 if is_output_name(name) {
                     if name != ".git"
                         && is_build_output(&sub)
@@ -186,7 +202,7 @@ fn repo_items(cx: &ScanContext, git: &Path, root: &Path, repo: &Path) -> Vec<Blo
         level = next;
     }
     if rels.is_empty() {
-        return Vec::new();
+        return (Vec::new(), nested);
     }
     rels.sort();
     let ignored = ignored_by_git(cx, git, repo, &rels);
@@ -225,21 +241,44 @@ fn repo_items(cx: &ScanContext, git: &Path, root: &Path, repo: &Path) -> Vec<Blo
         }
         out.push(item);
     }
-    out
+    (out, nested)
 }
 
 /// The candidates git ignores, as `git -C <repo> check-ignore` reports
 /// them; none when git fails (not a repository, or any other error).
-fn ignored_by_git(cx: &ScanContext, git: &Path, repo: &Path, rels: &[String]) -> Vec<String> {
+///
+/// A repository's own config can name commands git runs (`core.fsmonitor`,
+/// a hook-like setting), and a scan must stay read-only: those are switched
+/// off on the command line, which overrides the repository's config.
+/// `core.quotePath=false` keeps non-ASCII paths unquoted; a path git still
+/// quotes (a `"` or a control character in it) never matches and is left
+/// out.
+pub(super) fn ignored_by_git(
+    cx: &ScanContext,
+    git: &Path,
+    repo: &Path,
+    rels: &[String],
+) -> Vec<String> {
     let repo_arg = repo.to_string_lossy();
-    let mut args: Vec<&str> = vec!["-C", &repo_arg, "check-ignore", "--"];
+    let mut args: Vec<&str> = vec![
+        "-C",
+        &repo_arg,
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "-c",
+        "core.quotePath=false",
+        "check-ignore",
+        "--",
+    ];
     args.extend(rels.iter().map(String::as_str));
     match cx.runner.run(git, &args) {
         // 0: some are ignored; 1: none are.
         Ok(o) if (o.status == 0 || o.status == 1) && !o.timed_out => o
             .stdout
             .lines()
-            .map(|l| l.trim().to_string())
+            .map(str::to_string)
             .filter(|l| rels.contains(l))
             .collect(),
         _ => Vec::new(),
