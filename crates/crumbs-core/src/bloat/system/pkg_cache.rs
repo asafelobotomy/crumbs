@@ -44,7 +44,6 @@ impl Scanner for PkgCacheScanner {
         // failing dry run only drops this item.
         let uninstalled = paccache_saved(cx, &paccache, "-duk0").ok().flatten();
         let mut items = Vec::new();
-        // The uninstalled packages first: they run before the prune.
         for (size, label, args) in [
             (
                 uninstalled,

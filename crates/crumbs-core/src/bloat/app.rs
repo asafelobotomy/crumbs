@@ -67,7 +67,7 @@ impl Scanner for AppCacheScanner {
                     cx,
                     Category::AppCache,
                     app_dir.join(leaf),
-                    format!("{name} {leaf}"),
+                    format!("{name}: {leaf}"),
                     true,
                 ) else {
                     continue;

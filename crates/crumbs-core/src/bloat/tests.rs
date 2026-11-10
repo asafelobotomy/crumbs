@@ -278,7 +278,7 @@ fn app_cache_lists_electron_app_caches() {
             PathBuf::from("/home/user/.config/Slacky/GPUCache"),
         ]
     );
-    let i = items.iter().find(|i| i.label == "Slacky Cache").unwrap();
+    let i = items.iter().find(|i| i.label == "Slacky: Cache").unwrap();
     assert!(i.preselected && i.rebuildable && i.note.is_none());
     assert_eq!(i.category, Category::AppCache);
     for i in &items {
@@ -313,14 +313,14 @@ fn app_cache_running_app_not_preselected() {
     let items = run(&t, &Config::default(), &inv(vec![]), Category::AppCache);
     let item = |l: &str| items.iter().find(|i| i.label == l).unwrap();
     for app in ["ByFlag", "ByFd"] {
-        let i = item(&format!("{app} Cache"));
+        let i = item(&format!("{app}: Cache"));
         assert!(!i.preselected, "{app}");
         assert_eq!(
             i.note.as_deref(),
             Some(format!("{app} is running").as_str())
         );
     }
-    assert!(item("Idle Cache").preselected);
+    assert!(item("Idle: Cache").preselected);
 }
 
 #[test]

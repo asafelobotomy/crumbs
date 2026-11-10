@@ -249,7 +249,19 @@ fn run_plans(
 ) -> Vec<ExecReport> {
     let batches = batch_ids(env, plans.len());
     let checks = Rechecks::new(runner);
-    // The batch's cleanup commands, measured before it runs.
+    // The batch's cleanup commands, measured before it runs. They all run
+    // between the two measurements, so a folder two of them shrink cannot
+    // be credited to either: those are not measured.
+    let batch_dirs: Vec<PathBuf> = plans
+        .iter()
+        .flat_map(|p| &p.actions)
+        .filter(|pa| matches!(pa.action, Action::PrivilegedCommand { .. }))
+        .flat_map(|pa| measured_dirs(env, &pa.action))
+        .collect();
+    let shared = |dirs: &[PathBuf]| {
+        dirs.iter()
+            .any(|d| batch_dirs.iter().filter(|b| *b == d).count() > 1)
+    };
     let before: Vec<Vec<Option<Snapshot>>> = plans
         .iter()
         .map(|p| {
@@ -257,7 +269,12 @@ fn run_plans(
                 .iter()
                 .map(|pa| match pa.action {
                     Action::PrivilegedCommand { .. } => {
-                        measure(env, &measured_dirs(env, &pa.action))
+                        let dirs = measured_dirs(env, &pa.action);
+                        if shared(&dirs) {
+                            None
+                        } else {
+                            measure(env, &dirs)
+                        }
                     }
                     _ => None,
                 })
@@ -428,10 +445,18 @@ pub fn measured_dirs(env: &Env, action: &Action) -> Vec<PathBuf> {
 /// the bytes read and how many parts could not be read.
 type Snapshot = Vec<(bool, u64, u64)>;
 
-/// Measures `dirs`; `None` when there are none.
+/// Measures `dirs`; `None` when there are none, or when one exists but
+/// cannot be listed at all (Docker's root-only `/var/lib/docker`): an
+/// empty measurement before and after would claim nothing was freed.
 fn measure(env: &Env, dirs: &[PathBuf]) -> Option<Snapshot> {
     if dirs.is_empty() {
         return None;
+    }
+    for d in dirs {
+        let real = env.sys_path(d);
+        if fs::symlink_metadata(&real).is_ok() && fs::read_dir(&real).is_err() {
+            return None;
+        }
     }
     let exists: Vec<bool> = dirs
         .iter()
@@ -1093,13 +1118,11 @@ fn run_command(
 }
 
 /// A `UserTemp` target that is a package manager's build tree rather
-/// than a temporary file: anything directly in `/var/tmp`, and pamac's
-/// `pamac-build-<user>` in `/tmp`.
+/// than a temporary file: a direct child of `/var/tmp` (only `aur-build`
+/// plans those). In `/tmp`, even a `pamac-build-*` entry keeps temp's
+/// staleness re-check.
 fn is_build_tree(path: &Path) -> bool {
     path.parent() == Some(Path::new("/var/tmp"))
-        || path
-            .file_name()
-            .is_some_and(|n| n.as_bytes().starts_with(b"pamac-build-"))
 }
 
 /// Scope rules beyond `verify` that are re-run right before acting: a
