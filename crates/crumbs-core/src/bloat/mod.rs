@@ -57,10 +57,11 @@ pub enum Category {
     Coredumps,
     SystemTemp,
     FlatpakUnusedSystem,
+    Snapshots,
 }
 
 impl Category {
-    pub const ALL: [Category; 19] = [
+    pub const ALL: [Category; 20] = [
         Category::Cache,
         Category::Thumbnails,
         Category::Trash,
@@ -80,6 +81,7 @@ impl Category {
         Category::Coredumps,
         Category::SystemTemp,
         Category::FlatpakUnusedSystem,
+        Category::Snapshots,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -103,6 +105,7 @@ impl Category {
             Category::Coredumps => "coredumps",
             Category::SystemTemp => "system-temp",
             Category::FlatpakUnusedSystem => "flatpak-unused-system",
+            Category::Snapshots => "snapshots",
         }
     }
 
@@ -116,6 +119,7 @@ impl Category {
                 | Category::Coredumps
                 | Category::SystemTemp
                 | Category::FlatpakUnusedSystem
+                | Category::Snapshots
         )
     }
 
@@ -244,6 +248,7 @@ pub fn scanners() -> Vec<Box<dyn Scanner>> {
         Box::new(system::CoredumpsScanner),
         Box::new(system::SystemTempScanner),
         Box::new(system::FlatpakUnusedSystemScanner),
+        Box::new(system::SnapshotsScanner),
     ]
 }
 
@@ -343,8 +348,9 @@ mod tests {
             "coredumps",
             "system-temp",
             "flatpak-unused-system",
+            "snapshots",
         ];
-        assert_eq!(Category::ALL.len(), 19);
+        assert_eq!(Category::ALL.len(), 20);
         for (c, n) in Category::ALL.iter().zip(names) {
             assert_eq!(c.as_str(), n);
             assert_eq!(Category::from_str(n).unwrap(), *c);

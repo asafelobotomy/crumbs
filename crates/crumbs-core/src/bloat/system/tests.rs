@@ -624,3 +624,113 @@ fn flatpak_unused_system_follows_flatpak() {
     assert_eq!(items[0].note.as_deref(), Some("org.gnome.Platform//45"));
     assert!(!items[0].preselected);
 }
+
+#[test]
+fn snapshots_offers_timeshift_pruning() {
+    let t = FixtureTree::new();
+    t.write_exec("usr/bin/timeshift", b"#!/bin/sh\n");
+    t.write_exec("usr/bin/sh", b"#!/bin/sh\n");
+    t.write(
+        "etc/timeshift/timeshift.json",
+        b"{\"btrfs_mode\" : \"true\"}",
+    );
+    let rep = scan(&t, &FakeRunner::new(), Category::Snapshots);
+    assert!(rep.error.is_none() && rep.unavailable.is_none(), "{rep:?}");
+    assert_eq!(rep.items.len(), 1);
+    let i = &rep.items[0];
+    assert_eq!(i.label, "Timeshift snapshots beyond the newest 3");
+    assert_eq!(i.size, None);
+    assert!(!i.preselected, "opt-in");
+    assert_eq!(i.scope, Scope::System);
+    assert_eq!(
+        i.action,
+        ItemAction::Privileged {
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                super::snapshots::PRUNE_TIMESHIFT.into(),
+                "crumbs-snapshots".into(),
+                "3".into()
+            ],
+        }
+    );
+    // The keep count comes from the config.
+    let cfg = Config {
+        snapshots_keep: 5,
+        ..Config::default()
+    };
+    let rep = scan_cfg(&t, &FakeRunner::new(), &cfg, Category::Snapshots);
+    assert_eq!(
+        rep.items[0].label,
+        "Timeshift snapshots beyond the newest 5"
+    );
+}
+
+#[test]
+fn snapshots_unavailable_without_timeshift_setup() {
+    let t = FixtureTree::new();
+    let rep = scan(&t, &FakeRunner::new(), Category::Snapshots);
+    assert_eq!(rep.unavailable.as_deref(), Some("timeshift not installed"));
+    // Installed but never set up: nothing to prune.
+    t.write_exec("usr/bin/timeshift", b"#!/bin/sh\n");
+    let rep = scan(&t, &FakeRunner::new(), Category::Snapshots);
+    assert!(rep.unavailable.is_none() && rep.items.is_empty(), "{rep:?}");
+}
+
+/// Runs the root step's script against a fake `timeshift` that lists
+/// `listing` and logs every delete; returns the deleted names.
+fn run_prune(listing: &str, keep: &str) -> (bool, Vec<String>) {
+    let t = FixtureTree::new();
+    let bin = t.dir.path().join("bin");
+    let log = t.dir.path().join("deleted");
+    let fake = format!(
+        "#!/bin/sh\ncase \"$1\" in\n--list) printf '%s' '{listing}' ;;\n--delete) echo \"$3\" >> '{}' ;;\nesac\n",
+        log.display()
+    );
+    std::fs::create_dir_all(&bin).unwrap();
+    let tool = bin.join("timeshift");
+    std::fs::write(&tool, fake).unwrap();
+    std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let status = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            super::snapshots::PRUNE_TIMESHIFT,
+            "crumbs-snapshots",
+            keep,
+        ])
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .status()
+        .unwrap();
+    let deleted = std::fs::read_to_string(&log).unwrap_or_default();
+    (
+        status.success(),
+        deleted.lines().map(String::from).collect(),
+    )
+}
+
+const LISTING: &str = "Mounted /dev/x at /run/timeshift/1/backup\nDevice : /dev/x\n\nNum     Name                 Tags  Description\n------------------------------------------------\n0    >  2026-11-08_14-00-06  D\n1    >  2026-10-24_12-00-00  O     {before upgrade}\n2    >  2026-11-10_08-18-24  O\n3    >  2026-11-09_13-11-59  D\n";
+
+#[test]
+fn prune_script_deletes_all_but_the_newest() {
+    let (ok, deleted) = run_prune(LISTING, "2");
+    assert!(ok);
+    assert_eq!(deleted, ["2026-10-24_12-00-00", "2026-11-08_14-00-06"]);
+    let (ok, deleted) = run_prune(LISTING, "4");
+    assert!(ok && deleted.is_empty(), "{deleted:?}");
+    // Nothing listed: nothing deleted.
+    let (ok, deleted) = run_prune("No snapshots found\n", "1");
+    assert!(ok && deleted.is_empty());
+}
+
+#[test]
+fn prune_script_refuses_unexpected_names_and_counts() {
+    let odd =
+        "0    >  2026-11-08_14-00-06  D\n1    >  ../../etc  O\n2    >  2026-11-10_08-18-24  O\n";
+    let (ok, deleted) = run_prune(odd, "1");
+    assert!(!ok, "an unexpected name stops the step");
+    assert!(deleted.is_empty(), "{deleted:?}");
+    for bad in ["0", "-1", "x", ""] {
+        let (ok, deleted) = run_prune(LISTING, bad);
+        assert!(!ok && deleted.is_empty(), "keep {bad:?}");
+    }
+}

@@ -2759,6 +2759,7 @@ fn scan_system_table() {
         "coredumps",
         "system-temp",
         "flatpak-unused-system",
+        "snapshots",
     ] {
         assert!(stdout.lines().any(|l| l.starts_with(c)), "{c}: {stdout}");
     }
@@ -2768,7 +2769,7 @@ fn scan_system_table() {
     );
     assert!(!stdout.lines().any(|l| l.starts_with("trash")), "{stdout}");
     let v = stdout_json(crumbs(&t).args(["scan", "--system", "--json"]));
-    assert_eq!(v["data"]["categories"].as_array().unwrap().len(), 6, "{v}");
+    assert_eq!(v["data"]["categories"].as_array().unwrap().len(), 7, "{v}");
     // A scan changes nothing and needs no privileges.
     for f in [
         "paccache-args",

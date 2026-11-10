@@ -7,6 +7,7 @@ mod flatpak;
 mod journal;
 mod orphans;
 mod pkg_cache;
+pub(crate) mod snapshots;
 #[cfg(test)]
 mod tests;
 mod tmpfiles;
@@ -16,6 +17,7 @@ pub use flatpak::FlatpakUnusedSystemScanner;
 pub use journal::JournalScanner;
 pub use orphans::OrphanPkgsScanner;
 pub use pkg_cache::PkgCacheScanner;
+pub use snapshots::SnapshotsScanner;
 pub use tmpfiles::SystemTempScanner;
 
 use super::{BloatItem, Category, ItemAction};
