@@ -1277,7 +1277,17 @@ fn delete_with(
             ));
         }
     }
-    fs::remove_dir_all(&real).map_err(|e| {
+    let mut removed = fs::remove_dir_all(&real);
+    if removed
+        .as_ref()
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+    {
+        // Read-only folders (Go's module cache): make the ones you own
+        // writable again, as `go clean -modcache` does, and try once more.
+        make_owned_dirs_writable(&real, env.uid);
+        removed = fs::remove_dir_all(&real);
+    }
+    removed.map_err(|e| {
         let msg = io_msg(env, path, &e);
         // Part of the tree may already be gone; say so.
         if fs::symlink_metadata(&real).is_ok() {
@@ -1286,6 +1296,29 @@ fn delete_with(
             msg
         }
     })
+}
+
+/// Gives every real directory in the tree at `real` that `uid` owns its
+/// owner's read, write and search bits, so what is in it can be removed.
+/// Symlinks are not followed, and nothing is made writable for anyone else.
+fn make_owned_dirs_writable(real: &Path, uid: u32) {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let mut stack = vec![real.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(meta) = fs::symlink_metadata(&dir) else {
+            continue;
+        };
+        if !meta.file_type().is_dir() || meta.uid() != uid {
+            continue;
+        }
+        let mode = meta.permissions().mode();
+        if mode & 0o700 != 0o700 {
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(mode | 0o700));
+        }
+        if let Ok(rd) = fs::read_dir(&dir) {
+            stack.extend(rd.flatten().map(|e| e.path()));
+        }
+    }
 }
 
 /// Filters `path` in place. Returns the in-system backup path, or `None`

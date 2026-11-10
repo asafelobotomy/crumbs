@@ -283,7 +283,10 @@ fn edit_file_refuses_symlink() {
 }
 
 #[test]
-fn delete_reports_partial_removal() {
+fn delete_makes_your_read_only_folders_writable() {
+    // A folder of yours without write permission used to leave a partial
+    // delete; its permission is restored and the delete completes. (A
+    // folder owned by someone else still ends in `partially deleted: ...`.)
     if rustix::process::getuid().is_root() {
         return; // root ignores directory permissions
     }
@@ -295,12 +298,9 @@ fn delete_reports_partial_removal() {
     let env = t.env();
     let plan = plan_of(vec![planned(&env, delete("/home/user/.config/foo"))]);
     let report = execute(&env, &Config::default(), &plan);
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
     let r = &report.results[0];
-    assert!(!r.ok);
-    let err = r.error.as_deref().unwrap();
-    assert!(err.starts_with("partially deleted: "), "{err}");
-    assert!(env.sys("/home/user/.config/foo/locked/inner").exists());
+    assert!(r.ok, "{r:?}");
+    assert!(!env.sys("/home/user/.config/foo").exists());
 }
 
 #[test]
@@ -2962,4 +2962,23 @@ fn execute_refuses_a_build_tree_with_a_file_open() {
         Some("refusing: /var/tmp/pamac-build-user is in use by pamac (pid 66)")
     );
     assert!(env.sys("/var/tmp/pamac-build-user/brave/src/x").exists());
+}
+
+#[test]
+fn a_tree_with_read_only_folders_is_deleted() {
+    // Go's module cache makes its folders read-only (0555): what is in
+    // them cannot be removed until they are writable again.
+    use std::os::unix::fs::PermissionsExt;
+    let t = FixtureTree::new();
+    t.write("var/tmp/pamac-build-user/yay/go/pkg/mod/m@v1/a.go", b"x");
+    let env = t.env();
+    for d in ["go/pkg/mod/m@v1", "go/pkg/mod"] {
+        let p = env.sys(&format!("/var/tmp/pamac-build-user/yay/{d}"));
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    let mut item = planned(&env, delete("/var/tmp/pamac-build-user"));
+    item.scope = Scope::UserTemp;
+    let report = execute(&env, &Config::default(), &plan_of(vec![item]));
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    assert!(!env.sys("/var/tmp/pamac-build-user").exists());
 }
