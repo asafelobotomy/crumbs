@@ -1293,24 +1293,60 @@ fn delete_with(
 
 /// Gives every real directory in the tree at `real` that `uid` owns its
 /// owner's read, write and search bits, so what is in it can be removed.
-/// Symlinks are not followed, and nothing is made writable for anyone else.
+/// Nothing is made writable for anyone else.
+///
+/// Walked by file descriptor, never by name: each directory is opened
+/// `O_PATH|O_NOFOLLOW`, checked with `fstat`, changed through its
+/// `/proc/self/fd` link (the inode that was opened) and read through a
+/// descriptor of that same inode, so a name swapped for a symlink
+/// mid-walk leads nowhere.
 fn make_owned_dirs_writable(real: &Path, uid: u32) {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let mut stack = vec![real.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(meta) = fs::symlink_metadata(&dir) else {
-            continue;
-        };
-        if !meta.file_type().is_dir() || meta.uid() != uid {
-            continue;
+    use rustix::fs::{CWD, Dir, FileType, Mode, OFlags, chmod, fstat, open, openat};
+    use std::os::fd::{AsRawFd, OwnedFd};
+
+    fn walk(dir: OwnedFd, uid: u32) {
+        let Ok(st) = fstat(&dir) else { return };
+        if FileType::from_raw_mode(st.st_mode) != FileType::Directory || st.st_uid != uid {
+            return;
         }
-        let mode = meta.permissions().mode();
+        let magic = format!("/proc/self/fd/{}", dir.as_raw_fd());
+        let mode = st.st_mode & 0o7777;
         if mode & 0o700 != 0o700 {
-            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(mode | 0o700));
+            let _ = chmod(magic.as_str(), Mode::from_raw_mode(mode | 0o700));
         }
-        if let Ok(rd) = fs::read_dir(&dir) {
-            stack.extend(rd.flatten().map(|e| e.path()));
+        let Ok(readable) = open(
+            magic.as_str(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) else {
+            return;
+        };
+        let Ok(entries) = Dir::read_from(&readable) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_bytes() == b"." || name.to_bytes() == b".." {
+                continue;
+            }
+            if let Ok(child) = openat(
+                &readable,
+                name,
+                OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                walk(child, uid);
+            }
         }
+    }
+
+    if let Ok(root) = openat(
+        CWD,
+        real,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        walk(root, uid);
     }
 }
 

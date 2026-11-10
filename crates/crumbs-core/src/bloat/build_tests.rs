@@ -581,5 +581,8 @@ fn a_process_seen_through_the_linked_parent_still_holds_it_back() {
     let runner = on_git(FakeRunner::new(), &args, &["target"]);
     let items = scan_cfg(&t, &runner, &Config::default());
     assert!(!items[0].preselected, "{:?}", items[0]);
-    assert_eq!(items[0].note.as_deref(), Some("app is in use by cargo (pid 5)"));
+    assert_eq!(
+        items[0].note.as_deref(),
+        Some("app is in use by cargo (pid 5)")
+    );
 }

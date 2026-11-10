@@ -2979,3 +2979,33 @@ fn a_tree_with_read_only_folders_is_deleted() {
     assert!(report.results[0].ok, "{:?}", report.results[0]);
     assert!(!env.sys("/var/tmp/pamac-build-user").exists());
 }
+
+#[test]
+fn making_folders_writable_never_leaves_the_tree() {
+    // A link in the tree to a read-only folder of yours elsewhere: the
+    // retry after a permission error leaves that folder as it was.
+    use std::os::unix::fs::PermissionsExt;
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: root ignores directory permissions");
+        return;
+    }
+    let t = FixtureTree::new();
+    t.write("home/user/keep/readonly/file", b"k");
+    let outside = t.dir.path().join("home/user/keep/readonly");
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o555)).unwrap();
+    t.write("var/tmp/pamac-build-user/go/mod/x/a", b"a");
+    t.symlink(
+        "var/tmp/pamac-build-user/go/link",
+        "../../../../home/user/keep/readonly",
+    );
+    let env = t.env();
+    let ro = env.sys("/var/tmp/pamac-build-user/go/mod/x");
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let mut item = planned(&env, delete("/var/tmp/pamac-build-user"));
+    item.scope = Scope::UserTemp;
+    let report = execute(&env, &Config::default(), &plan_of(vec![item]));
+    assert!(report.results[0].ok, "{:?}", report.results[0]);
+    let mode = std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(mode, 0o555, "a folder outside the tree was made writable");
+}
