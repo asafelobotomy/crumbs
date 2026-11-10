@@ -189,7 +189,34 @@ fn cache_symlink_item_is_not_searched_for_git() {
 }
 
 #[test]
+fn aur_build_not_available_as_root() {
+    // As root, the safety checks refuse every user-temp target, so the
+    // trees are not offered at all (as for `temp`).
+    let t = FixtureTree::new();
+    t.write("var/tmp/pamac-build-user/brave/src/x", b"x");
+    let mut env = t.env();
+    env.uid = 0;
+    let cfg = Config::default();
+    let i = inv(vec![]);
+    let runner = FakeRunner::new();
+    let cx = ScanContext {
+        env: &env,
+        cfg: &cfg,
+        inv: &i,
+        runner: &runner,
+        now: SystemTime::now(),
+    };
+    let s = super::aur::AurBuildScanner;
+    assert_eq!(s.unavailable(&cx).as_deref(), Some("not available as root"));
+    assert!(s.scan(&cx).unwrap().is_empty());
+}
+
+#[test]
 fn aur_build_lists_pamac_build_trees() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: aur-build is not offered as root");
+        return;
+    }
     let t = FixtureTree::new();
     t.write(
         "etc/pamac.conf",
@@ -224,6 +251,10 @@ fn aur_build_lists_pamac_build_trees() {
 
 #[test]
 fn aur_build_follows_pamac_build_directory() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: aur-build is not offered as root");
+        return;
+    }
     // No pamac.conf: pamac's default, /var/tmp. A BuildDirectory of /tmp.
     let t = FixtureTree::new();
     t.write("var/tmp/pamac-build-user/a/x", b"x");
@@ -243,6 +274,10 @@ fn aur_build_follows_pamac_build_directory() {
 
 #[test]
 fn aur_build_in_use_not_preselected() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: aur-build is not offered as root");
+        return;
+    }
     let t = FixtureTree::new();
     t.write("var/tmp/pamac-build-user/brave/src/x", b"x");
     t.symlink("proc/77/cwd", "/var/tmp/pamac-build-user/brave/src");
@@ -325,6 +360,10 @@ fn app_cache_running_app_not_preselected() {
 
 #[test]
 fn aur_build_with_a_file_open_inside_not_preselected() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: aur-build is not offered as root");
+        return;
+    }
     // pamac writing into the tree from elsewhere: an open file counts.
     let t = FixtureTree::new();
     t.write("var/tmp/pamac-build-user/brave/src/x", b"x");

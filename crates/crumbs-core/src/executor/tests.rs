@@ -2845,6 +2845,10 @@ fn measurement_counts_a_folder_missing_both_times_as_empty() {
 
 #[test]
 fn execute_refuses_a_build_tree_in_use() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: user-temp targets are refused as root");
+        return;
+    }
     // A /var/tmp build tree is deleted only while no process works in it.
     let t = FixtureTree::new();
     t.write("var/tmp/pamac-build-user/brave/src/x", b"x");
@@ -2946,6 +2950,10 @@ fn a_build_tree_in_tmp_keeps_the_temp_rechecks() {
 
 #[test]
 fn execute_refuses_a_build_tree_with_a_file_open() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: user-temp targets are refused as root");
+        return;
+    }
     let t = FixtureTree::new();
     t.write("var/tmp/pamac-build-user/brave/src/x", b"x");
     t.symlink("proc/66/fd/3", "/var/tmp/pamac-build-user/brave/src/x");
@@ -2963,6 +2971,10 @@ fn execute_refuses_a_build_tree_with_a_file_open() {
 
 #[test]
 fn a_tree_with_read_only_folders_is_deleted() {
+    if crate::testing::running_as_root() {
+        eprintln!("skipped: user-temp targets are refused as root");
+        return;
+    }
     // Go's module cache makes its folders read-only (0555): what is in
     // them cannot be removed until they are writable again.
     use std::os::unix::fs::PermissionsExt;

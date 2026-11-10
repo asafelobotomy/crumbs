@@ -25,7 +25,16 @@ impl Scanner for AurBuildScanner {
         Category::AurBuild
     }
 
+    /// As root the safety checks refuse every user-temp target, and a build
+    /// tree belongs to the user who built it: not offered, not an error.
+    fn unavailable(&self, cx: &ScanContext) -> Option<String> {
+        (cx.env.uid == 0).then(|| "not available as root".to_string())
+    }
+
     fn scan(&self, cx: &ScanContext) -> Result<Vec<BloatItem>, CoreError> {
+        if cx.env.uid == 0 {
+            return Ok(Vec::new());
+        }
         let build_dir = build_directory(cx);
         // Only where the safety scopes allow a user's own tree.
         if !matches!(build_dir.to_str(), Some("/tmp" | "/var/tmp")) {
