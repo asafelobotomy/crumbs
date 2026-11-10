@@ -11,14 +11,14 @@ Lists installed apps across pacman, dpkg, rpm, Flatpak, Snap, AppImages and unma
 - Release artifacts: `scripts/release.sh <version>`; see README, "Releasing". Never tag, push a tag, publish a release or push to the AUR unless the user asks.
 
 ## Layout
-- `crates/crumbs-core`: inventory (`sources/`), rules (`rules.rs`, `data/rules/apps.toml`), leftovers and orphans (`leftovers/`), bloat scanners (`bloat/`), planning (`plan.rs`, `removal/`), safety checks (`safety.rs`), execution (`executor/`), privilege batch (`privilege/`), history and restore.
+- `crates/crumbs-core`: inventory (`sources/`), rules (`rules/`, `data/rules/apps.toml`), leftovers and orphans (`leftovers/`), bloat scanners (`bloat/`), planning (`plan/`, `removal/`), safety checks (`safety/`), execution (`executor/`), privilege batch (`privilege/`), history and restore.
 - `crates/crumbs-cli`: commands in `src/cmd/` (shared confirm-and-execute flow in `cmd/act/`), MCP server in `src/mcp/`, integration tests in `tests/cli.rs` and `tests/mcp.rs` with insta snapshots in `tests/snapshots/`.
 - `packaging/`: AppImage, AUR (`crum-bs`, `crum-bs-bin`), deb, rpm. `scripts/`: build and release.
 
 ## Conventions
 - Minimum Rust is `rust-version` in `Cargo.toml` (1.99); CI pins the same toolchain.
 - JSON output is versioned: within `schema_version` 1 fields may be added, never removed or renamed. Document every new field and exit-code case in `docs/json-schema.md`, and user-facing behaviour in `README.md` and `CHANGELOG.md` (`## Unreleased`).
-- Every change to the filesystem goes through a plan, the safety checks and the history. Never add a path that deletes outside `safety.rs`'s scopes, and never weaken a protected path.
+- Every change to the filesystem goes through a plan, the safety checks and the history. Never add a path that deletes outside `safety/`'s scopes, and never weaken a protected path.
 - Root steps run in one batch through run0, pkexec or sudo; the MCP server never uses sudo.
 - Pin GitHub Actions by commit SHA with the version in a comment.
 
