@@ -1,6 +1,7 @@
 //! The bloat model: categories of reclaimable space, the scanner registry
 //! and the parallel scan driver.
 
+mod app;
 mod appimage;
 mod aur;
 mod browser;
@@ -45,6 +46,7 @@ pub enum Category {
     AppimageOld,
     Logs,
     AurBuild,
+    AppCache,
     PkgCache,
     OrphanPkgs,
     Journal,
@@ -54,7 +56,7 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 16] = [
+    pub const ALL: [Category; 17] = [
         Category::Cache,
         Category::Thumbnails,
         Category::Trash,
@@ -65,6 +67,7 @@ impl Category {
         Category::AppimageOld,
         Category::Logs,
         Category::AurBuild,
+        Category::AppCache,
         Category::PkgCache,
         Category::OrphanPkgs,
         Category::Journal,
@@ -85,6 +88,7 @@ impl Category {
             Category::AppimageOld => "appimage-old",
             Category::Logs => "logs",
             Category::AurBuild => "aur-build",
+            Category::AppCache => "app-cache",
             Category::PkgCache => "pkg-cache",
             Category::OrphanPkgs => "orphan-pkgs",
             Category::Journal => "journal",
@@ -223,6 +227,7 @@ pub fn scanners() -> Vec<Box<dyn Scanner>> {
         Box::new(appimage::AppimageOldScanner),
         Box::new(logs::LogsScanner),
         Box::new(aur::AurBuildScanner),
+        Box::new(app::AppCacheScanner),
         Box::new(system::PkgCacheScanner),
         Box::new(system::OrphanPkgsScanner),
         Box::new(system::JournalScanner),
@@ -319,6 +324,7 @@ mod tests {
             "appimage-old",
             "logs",
             "aur-build",
+            "app-cache",
             "pkg-cache",
             "orphan-pkgs",
             "journal",
@@ -326,7 +332,7 @@ mod tests {
             "system-temp",
             "flatpak-unused-system",
         ];
-        assert_eq!(Category::ALL.len(), 16);
+        assert_eq!(Category::ALL.len(), 17);
         for (c, n) in Category::ALL.iter().zip(names) {
             assert_eq!(c.as_str(), n);
             assert_eq!(Category::from_str(n).unwrap(), *c);

@@ -17,5 +17,6 @@ flatpak-unused  1      ?
 appimage-old    0      0 B
 logs            0      0 B
 aur-build       0      0 B
+app-cache       0      0 B
 
 reclaimable: 16.0 KiB+ across 4 items

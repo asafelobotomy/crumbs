@@ -253,6 +253,77 @@ fn aur_build_in_use_not_preselected() {
 }
 
 #[test]
+fn app_cache_lists_electron_app_caches() {
+    let t = FixtureTree::new();
+    t.write("home/user/.config/Slacky/Local State", b"{}");
+    t.write("home/user/.config/Slacky/Cache/Cache_Data/a", &[1u8; 4000]);
+    t.write("home/user/.config/Slacky/Code Cache/js/b", &[1u8; 4000]);
+    t.write("home/user/.config/Slacky/GPUCache/c", b"c");
+    t.write("home/user/.config/Slacky/DawnWebGPUCache/d", b"d");
+    // Site data and settings are not caches.
+    t.write("home/user/.config/Slacky/IndexedDB/e", b"e");
+    t.write("home/user/.config/Slacky/Local Storage/f", b"f");
+    // Not a Chromium app: no `Local State`.
+    t.write("home/user/.config/plain/Cache/g", b"g");
+    let cfg = Config::default();
+    let items = run(&t, &cfg, &inv(vec![]), Category::AppCache);
+    let mut got = paths(&items);
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            PathBuf::from("/home/user/.config/Slacky/Cache"),
+            PathBuf::from("/home/user/.config/Slacky/Code Cache"),
+            PathBuf::from("/home/user/.config/Slacky/DawnWebGPUCache"),
+            PathBuf::from("/home/user/.config/Slacky/GPUCache"),
+        ]
+    );
+    let i = items.iter().find(|i| i.label == "Slacky Cache").unwrap();
+    assert!(i.preselected && i.rebuildable && i.note.is_none());
+    assert_eq!(i.category, Category::AppCache);
+    for i in &items {
+        assert_eq!(i.scope, Scope::Home);
+        assert_eq!(i.action, ItemAction::Trash);
+        let env = t.env();
+        verify(
+            &env,
+            &cfg,
+            Scope::Home,
+            i.path.as_ref().unwrap(),
+            i.fingerprint.as_ref().unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn app_cache_running_app_not_preselected() {
+    // Running: a process names the dir as its --user-data-dir, or holds a
+    // file open in it.
+    let t = FixtureTree::new();
+    for app in ["ByFlag", "ByFd", "Idle"] {
+        t.write(&format!("home/user/.config/{app}/Local State"), b"{}");
+        t.write(&format!("home/user/.config/{app}/Cache/x"), b"x");
+    }
+    t.write(
+        "proc/50/cmdline",
+        b"/usr/lib/byflag/byflag\0--type=renderer\0--user-data-dir=/home/user/.config/ByFlag\0",
+    );
+    t.symlink("proc/60/fd/7", "/home/user/.config/ByFd/Cookies");
+    let items = run(&t, &Config::default(), &inv(vec![]), Category::AppCache);
+    let item = |l: &str| items.iter().find(|i| i.label == l).unwrap();
+    for app in ["ByFlag", "ByFd"] {
+        let i = item(&format!("{app} Cache"));
+        assert!(!i.preselected, "{app}");
+        assert_eq!(
+            i.note.as_deref(),
+            Some(format!("{app} is running").as_str())
+        );
+    }
+    assert!(item("Idle Cache").preselected);
+}
+
+#[test]
 fn cache_dir_in_use_not_preselected() {
     // A running process works inside it (its current directory), as a
     // build does: never preselected, and the note names the process.
