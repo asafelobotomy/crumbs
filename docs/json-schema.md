@@ -80,7 +80,7 @@ An app ID is unique and stable across runs.
 | appimage | `appimage:<display path>`; `~/...` under the home, absolute elsewhere | `appimage:~/Applications/GutCheck-0.19.0-x86_64.AppImage` |
 | unmanaged | `unmanaged:<desktop id>` | `unmanaged:foo.desktop` |
 
-Commands that take an app accept an ID, a name, a desktop ID or a display name. `uninstall` accepts only exact matches.
+Commands that take an app accept an ID, a name, a desktop ID or a display name. `uninstall` accepts only exact matches. `uninstall --desktop-id <id>` takes, instead of apps, one desktop file id and matches it only against each app's `desktop_ids`: an id that is not `^[A-Za-z0-9._-]{1,200}\.desktop$` (or starts with `-` or `.`), one no app owns, or one several apps own is a usage error (exit 2).
 
 ## Shared types
 

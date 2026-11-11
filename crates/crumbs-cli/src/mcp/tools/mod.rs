@@ -150,6 +150,7 @@ impl Server {
         self.preview(peer, move |env| {
             let args = UninstallArgs {
                 apps: vec![p.app],
+                desktop_id: None,
                 leftovers_only: p.leftovers_only,
                 keep_data: p.keep_data,
                 show_low: p.show_low,

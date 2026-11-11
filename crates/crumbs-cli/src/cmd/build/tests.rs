@@ -28,6 +28,7 @@ fn inky() -> FixtureTree {
 fn leftovers_only(app: &str) -> UninstallArgs {
     UninstallArgs {
         apps: vec![app.into()],
+        desktop_id: None,
         leftovers_only: true,
         keep_data: false,
         show_low: false,

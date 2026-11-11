@@ -83,6 +83,41 @@ pub(super) fn runs_app_file(env: &Env, app: &App, name: &str, path: &Path) -> bo
 }
 
 /// The app for one query (exact matches only), or why not.
+/// Refuses (exit 2) a `--desktop-id` that is not a plain desktop file id,
+/// before anything is read.
+pub(super) fn check_desktop_id(id: &str) -> Result<(), Refusal> {
+    if valid_desktop_id(id) {
+        Ok(())
+    } else {
+        Err(Refusal::new(
+            2,
+            format!(
+                "'{}' is not a desktop file id (like firefox.desktop)",
+                sanitise(id)
+            ),
+        ))
+    }
+}
+
+/// The one installed app that owns the launcher `id`. Several owners are
+/// refused rather than guessed: name the app instead.
+pub(super) fn resolve_desktop_id<'a>(inv: &'a Inventory, id: &str) -> Result<&'a App, Refusal> {
+    check_desktop_id(id)?;
+    Err(match find_app_by_desktop_id(inv, id) {
+        Resolved::Found(app) => return Ok(app),
+        Resolved::Ambiguous(c) => Refusal::new(
+            2,
+            format!("several apps own the launcher '{id}'; name the one to remove:"),
+        )
+        .with_details(
+            c.iter()
+                .map(|a| format!("{}  {}  {}", a.id, a.display_name, a.source.as_str()))
+                .collect(),
+        ),
+        Resolved::NotFound => Refusal::new(2, format!("no installed app owns the launcher '{id}'")),
+    })
+}
+
 pub(super) fn resolve<'a>(inv: &'a Inventory, query: &str) -> Result<&'a App, Refusal> {
     let list = |c: Vec<&App>| -> Vec<String> {
         c.iter()

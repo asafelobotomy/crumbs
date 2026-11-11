@@ -26,5 +26,6 @@ Lists installed apps across pacman, dpkg, rpm, Flatpak, Snap, AppImages and unma
 crumBS ships as part of the uQ desktop (installed by bindle with uq, scdr and noti-fi).
 - uQ's, scdr's, noti-fi's and appOFholding's own state are claimed by rules in `data/rules/apps.toml`, so they are never offered as leftovers or orphans. Keep those rules when the apps move their files.
 - `model::UQ_PACKAGES` are the desktop's own packages: `App::part_of` is `"uQ"` for them and `uninstall` removes them only with a second confirmation or `--desktop` (`desktop: true` over MCP).
+- `uq/` holds what crumBS adds to uQ, installed by its packages: the "Uninstall…" app action (`uq/launcher/actions/`), which runs `crumbs uninstall --desktop-id %d` in a terminal. Keep `--desktop-id` exact (`inventory::find_app_by_desktop_id`) and validated before anything is read. Check the folder with `uqctl integrations check uq/`.
 - appOFholding owns the AppImages in its library (`~/Applications` once its database exists): crumBS does not list, clean or uninstall them (`sources/appimage.rs`, `appofholding_library`).
 - crumBS is GPL-3.0-or-later; uq and noti-fi are MIT and scdr is MPL-2.0. Do not copy crumBS code into them. uQ talks to crumBS through its CLI and JSON (`scan --json`, `clean --json`) and, later, a launcher provider.

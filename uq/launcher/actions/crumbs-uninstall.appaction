@@ -1,0 +1,11 @@
+# uQ app action: "Uninstall…" in the right-click menu of every app row in
+# Spotlight and the app menu. Installed to /usr/share/uq/launcher/actions/.
+# uQ passes the row's desktop id as one validated argument (%d); crumbs looks
+# the app up itself, previews the removal and asks before changing anything,
+# so it runs in a terminal.
+[App Action]
+Name=Uninstall…
+Icon=edit-delete
+Match=*.desktop
+Exec=/usr/bin/crumbs uninstall --desktop-id %d
+Terminal=true

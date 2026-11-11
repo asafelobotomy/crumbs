@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **`uninstall --desktop-id <id>`:** removes the app that owns a launcher, named by its desktop file id (`firefox.desktop`) and nothing else. An id that is not a plain desktop file id, or that no app or several apps own, is refused with exit 2. The usual preview, `Proceed?` and the second question for uQ's own packages still apply.
+- **uQ:** an "Uninstall…" app action (`uq/launcher/actions/crumbs-uninstall.appaction`) on every app row in uQ's launcher, running `crumbs uninstall --desktop-id` in a terminal. The `crum-bs` package and the `.deb` install it to `/usr/share/uq/launcher/actions/`.
+
 ## 0.4.0
 
 - **`build-output`** (off by default): build folders git ignores in your projects: Cargo's `target`, `node_modules` and web bundler caches, Gradle's and CMake's `build`, a project's `.gradle`, Python `.venv`s. Recent ones and any in a repository a process works in are not preselected. New config keys `project_dirs` and `build_age_days`.
