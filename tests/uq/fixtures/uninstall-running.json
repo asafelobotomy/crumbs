@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "command": "uninstall",
+  "data": {
+    "plans": [],
+    "report": null
+  },
+  "errors": [
+    {
+      "source": "cli",
+      "message": "Firefox Web Browser is running (pid 4242); close it first or re-run with --force"
+    }
+  ]
+}

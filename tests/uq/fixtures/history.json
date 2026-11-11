@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "command": "history",
+  "data": {
+    "batches": [
+      {
+        "batch": "1794141806566",
+        "entries": [
+          {
+            "action": "restore",
+            "app_id": null,
+            "backup": null,
+            "batch": "1794141806566",
+            "error": null,
+            "id": "1794141806566-0",
+            "ok": true,
+            "path": "/home/user/.thunderbird",
+            "restores": "1794141800816-0",
+            "size": 12288,
+            "time": "2026-11-08T12:43:20.820096179Z",
+            "trashed": null
+          }
+        ],
+        "items": 1,
+        "label": "restore",
+        "restored": 0,
+        "size": 12288,
+        "time": "2026-11-08T12:43:26.566420307Z"
+      },
+      {
+        "batch": "1794141900000",
+        "entries": [
+          {
+            "action": "package-remove",
+            "app_id": "pacman:oldtool",
+            "backup": null,
+            "batch": "1794141900000",
+            "error": null,
+            "id": "1794141900000-0",
+            "ok": true,
+            "path": "/usr/bin/pacman",
+            "restores": null,
+            "size": 0,
+            "time": "2026-11-08T12:43:20.820096179Z",
+            "trashed": null,
+            "kind": "uninstall"
+          }
+        ],
+        "items": 1,
+        "label": "pacman:oldtool",
+        "restored": 0,
+        "size": 0,
+        "time": "2026-11-08T12:45:00.000000000Z"
+      },
+      {
+        "batch": "1794141850000",
+        "entries": [
+          {
+            "action": "trash",
+            "app_id": null,
+            "backup": null,
+            "batch": "1794141850000",
+            "error": null,
+            "id": "1794141850000-0",
+            "ok": true,
+            "path": "/home/user/.cache/foo",
+            "restores": null,
+            "size": 1400000000,
+            "time": "2026-11-08T12:43:20.820096179Z",
+            "trashed": {
+              "files_path": "/home/user/.local/share/Trash/files/x",
+              "info_path": "/home/user/.local/share/Trash/info/x.trashinfo",
+              "original": "/home/user/.cache/foo"
+            },
+            "kind": "clean"
+          },
+          {
+            "action": "delete",
+            "app_id": null,
+            "backup": null,
+            "batch": "1794141850000",
+            "error": null,
+            "id": "1794141850000-1",
+            "ok": true,
+            "path": "/tmp/old-download.bin",
+            "restores": null,
+            "size": 4096000,
+            "time": "2026-11-08T12:43:20.820096179Z",
+            "trashed": null,
+            "kind": "clean"
+          }
+        ],
+        "items": 2,
+        "label": "clean",
+        "restored": 0,
+        "size": 1404096000,
+        "time": "2026-11-08T12:44:10.100000000Z"
+      },
+      {
+        "batch": "1794141800816",
+        "entries": [
+          {
+            "action": "trash",
+            "app_id": null,
+            "backup": null,
+            "batch": "1794141800816",
+            "error": null,
+            "id": "1794141800816-0",
+            "ok": true,
+            "path": "/home/user/.thunderbird",
+            "restores": null,
+            "size": 12288,
+            "time": "2026-11-08T12:43:20.820096179Z",
+            "trashed": {
+              "files_path": "/home/user/.local/share/Trash/files/x",
+              "info_path": "/home/user/.local/share/Trash/info/x.trashinfo",
+              "original": "/home/user/.thunderbird"
+            },
+            "kind": "orphans"
+          }
+        ],
+        "items": 1,
+        "label": "orphans",
+        "restored": 1,
+        "size": 12288,
+        "time": "2026-11-08T12:43:20.820096179Z"
+      }
+    ]
+  },
+  "errors": []
+}
