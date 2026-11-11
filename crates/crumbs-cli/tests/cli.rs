@@ -3628,3 +3628,104 @@ fn uninstall_uq_package_needs_desktop_flag() {
     let v = stdout_json(crumbs(&t).args(["apps", "show", "firefox", "--json"]));
     assert_eq!(v["data"]["app"]["part_of"], serde_json::Value::Null, "{v}");
 }
+
+// ---- uninstall --desktop-id (uQ's "Uninstall…" app action) ----
+
+#[test]
+fn uninstall_by_desktop_id_resolves_the_launchers_app() {
+    let t = fixture(FLATPAK_OK);
+    t.write("/home/user/.cache/firefox/blob", b"x");
+    let v = stdout_json(crumbs(&t).args([
+        "uninstall",
+        "--desktop-id",
+        "firefox.desktop",
+        "--leftovers-only",
+        "--dry-run",
+        "--json",
+    ]));
+    assert_eq!(v["command"], "uninstall");
+    assert_eq!(v["data"]["plans"][0]["app_id"], "pacman:firefox", "{v}");
+    // Without a terminal and without --yes it asks for nothing and stops,
+    // like any other uninstall.
+    let (code, stdout, stderr) =
+        run_out(crumbs(&t).args(["uninstall", "--desktop-id", "firefox.desktop"]));
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    assert!(real(&t, "/home/user/.cache/firefox").exists());
+    assert!(real(&t, "/usr/bin/firefox").exists());
+}
+
+#[test]
+fn uninstall_by_desktop_id_refuses_bad_and_unknown_ids() {
+    let t = fixture(FLATPAK_OK);
+    for (id, said) in [
+        ("--desktop-id=-rf.desktop", "is not a desktop file id"),
+        (
+            "--desktop-id=../firefox.desktop",
+            "is not a desktop file id",
+        ),
+        ("--desktop-id=firefox", "is not a desktop file id"),
+        (
+            "--desktop-id=Firefox Web Browser",
+            "is not a desktop file id",
+        ),
+        // An app id or name is not a launcher id.
+        ("--desktop-id=pacman:firefox", "is not a desktop file id"),
+        (
+            "--desktop-id=nope.desktop",
+            "no installed app owns the launcher",
+        ),
+    ] {
+        let (code, stdout, stderr) = run_out(crumbs(&t).args(["uninstall", id, "--dry-run"]));
+        assert_eq!(code, 2, "{id}: {stdout}{stderr}");
+        assert!(stderr.contains(said), "{id}: {stderr}");
+    }
+    let v = json_error(
+        &t,
+        &[
+            "uninstall",
+            "--desktop-id=-x.desktop",
+            "--json",
+            "--dry-run",
+        ],
+        2,
+    );
+    assert_eq!(v["command"], "uninstall");
+    // Apps and --desktop-id don't mix; one of them is needed.
+    crumbs(&t)
+        .args(["uninstall", "firefox", "--desktop-id", "firefox.desktop"])
+        .assert()
+        .code(2);
+    crumbs(&t).args(["uninstall"]).assert().code(2);
+}
+
+#[test]
+fn uninstall_by_desktop_id_keeps_uq_protection() {
+    let t = pacman_fixture(PACMAN_OK);
+    t.pacman_pkg(
+        "scdr",
+        "0.2.0-8",
+        Some(1_000),
+        &[
+            "usr/bin/scdrd",
+            "usr/share/applications/",
+            "usr/share/applications/scdr.desktop",
+        ],
+    );
+    t.desktop(
+        "/usr/share/applications/scdr.desktop",
+        "[Desktop Entry]\nType=Application\nName=scdr\nExec=/usr/bin/scdrd\n",
+    );
+    let (code, stdout, stderr) = run_out(crumbs(&t).env("CRUMBS_TEST_PRIV_RUNNER", "sh").args([
+        "uninstall",
+        "--desktop-id",
+        "scdr.desktop",
+        "--yes",
+    ]));
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("pacman:scdr is part of the uQ desktop; re-run with --desktop"),
+        "{stderr}"
+    );
+    assert!(pkg_present(&t, "scdr-0.2.0-8"));
+    assert!(!real(&t, "/pacman-args").exists());
+}

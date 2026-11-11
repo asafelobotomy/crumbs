@@ -193,6 +193,41 @@ pub fn find_app_exact<'a>(inv: &'a Inventory, query: &str) -> Resolved<'a> {
     resolve(inv, query, false)
 }
 
+/// Whether `id` is a desktop file id a launcher may hand over, such as uQ's
+/// "Uninstall…" app action: `^[A-Za-z0-9._-]{1,200}\.desktop$`, not starting
+/// with `-` or `.` (so it never reads as an option or a hidden file).
+pub fn valid_desktop_id(id: &str) -> bool {
+    let Some(stem) = id.strip_suffix(".desktop") else {
+        return false;
+    };
+    (1..=200).contains(&stem.len())
+        && !stem.starts_with(['-', '.'])
+        && stem
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// Finds the installed app whose launchers include the desktop file id `id`
+/// (`firefox.desktop`, or `kde-foo.desktop` for a subdirectory), and nothing
+/// else: no app id, name or display name is tried, so a launcher can only
+/// ever name the app its own entry belongs to. An id that is not
+/// [`valid_desktop_id`] finds nothing.
+pub fn find_app_by_desktop_id<'a>(inv: &'a Inventory, id: &str) -> Resolved<'a> {
+    if !valid_desktop_id(id) {
+        return Resolved::NotFound;
+    }
+    let mut hits: Vec<&App> = inv
+        .apps
+        .iter()
+        .filter(|a| a.desktop_ids.iter().any(|d| d == id))
+        .collect();
+    match hits.len() {
+        0 => Resolved::NotFound,
+        1 => Resolved::Found(hits.remove(0)),
+        _ => Resolved::Ambiguous(hits),
+    }
+}
+
 fn resolve<'a>(inv: &'a Inventory, query: &str, loose: bool) -> Resolved<'a> {
     let with_ext = if query.ends_with(".desktop") {
         query.to_string()

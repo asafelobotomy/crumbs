@@ -68,4 +68,5 @@ assets = [
     ["target/release/crumbs", "usr/bin/crumbs", "755"],
     ["../../README.md", "usr/share/doc/crumbs/README.md", "644"],
     ["../../packaging/deb/copyright", "usr/share/doc/crumbs/copyright", "644"],
+    ["../../uq/launcher/actions/crumbs-uninstall.appaction", "usr/share/uq/launcher/actions/crumbs-uninstall.appaction", "644"],
 ]

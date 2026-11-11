@@ -7,7 +7,9 @@ use std::process::ExitCode;
 use clap::Args;
 use crumbs_core::command::SystemRunner;
 use crumbs_core::desktop::parse_desktop;
-use crumbs_core::inventory::{Inventory, Resolved, find_app, find_app_exact};
+use crumbs_core::inventory::{
+    Inventory, Resolved, find_app, find_app_by_desktop_id, find_app_exact, valid_desktop_id,
+};
 use crumbs_core::leftovers::{Finding, FindingKind, find_leftovers, find_system_leftovers};
 use crumbs_core::plan::{
     NOTE_APP_STAYS, Plan, PlanOptions, PlannedAction, build_plan_unmanaged, is_system_leftover,
@@ -31,8 +33,12 @@ use keep::*;
 #[derive(Args, Debug)]
 pub struct UninstallArgs {
     /// App ids, names, desktop ids or display names (exact matches only)
-    #[arg(required = true)]
+    #[arg(required_unless_present = "desktop_id", conflicts_with = "desktop_id")]
     pub apps: Vec<String>,
+    /// The app that owns this launcher, by its desktop file id
+    /// (`firefox.desktop`), as uQ's "Uninstall…" menu entry passes it
+    #[arg(long, value_name = "ID")]
+    pub desktop_id: Option<String>,
     /// Keep the app itself; remove only its leftovers
     #[arg(long)]
     pub leftovers_only: bool,
@@ -81,8 +87,14 @@ pub fn run(env: &Env, args: &UninstallArgs) -> anyhow::Result<ExitCode> {
 
 /// Plans the removal of `args.apps` and the leftovers `pick` chooses.
 pub(crate) fn build(env: &Env, args: &UninstallArgs, pick: Pick<PathBuf>) -> Result<Draft, Stop> {
+    if let Some(id) = &args.desktop_id {
+        check_desktop_id(id)?;
+    }
     let cx = Context::load(env)?;
     let mut apps: Vec<&App> = Vec::new();
+    if let Some(id) = &args.desktop_id {
+        apps.push(resolve_desktop_id(&cx.inv, id)?);
+    }
     for query in &args.apps {
         let app = resolve(&cx.inv, query)?;
         if !apps.iter().any(|a| a.id == app.id) {
@@ -251,6 +263,9 @@ fn confirm_desktop_removal(app: &App, args: &UninstallArgs) -> Result<(), Stop> 
 /// The CLI command that plans the same: a picked selection is `-i`.
 fn cli_command(args: &UninstallArgs, pick: &Pick<PathBuf>) -> Vec<String> {
     let mut argv = vec!["crumbs".to_string(), "uninstall".to_string()];
+    if let Some(id) = &args.desktop_id {
+        argv.extend(["--desktop-id".to_string(), id.clone()]);
+    }
     argv.extend(args.apps.iter().cloned());
     let flags = [
         (args.leftovers_only, "--leftovers-only"),

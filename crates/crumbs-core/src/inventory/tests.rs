@@ -315,6 +315,100 @@ fn find_app_exact_skips_normalized() {
 }
 
 #[test]
+fn desktop_id_validation() {
+    for good in [
+        "firefox.desktop",
+        "org.mozilla.firefox.desktop",
+        "kde-org.kde.dolphin.desktop",
+        "firefox_firefox.desktop",
+        "x-.desktop",
+        "A9.desktop",
+    ] {
+        assert!(valid_desktop_id(good), "{good:?}");
+    }
+    let long = format!("{}.desktop", "a".repeat(201));
+    for bad in [
+        "",
+        "firefox",
+        ".desktop",
+        "-rf.desktop",
+        "--desktop.desktop",
+        ".hidden.desktop",
+        "a b.desktop",
+        "../x.desktop",
+        "x/y.desktop",
+        "x.desktop\n",
+        "x.desktop.bak",
+        "caf\u{e9}.desktop",
+        "x;rm.desktop",
+        long.as_str(),
+    ] {
+        assert!(!valid_desktop_id(bad), "{bad:?}");
+    }
+    assert!(valid_desktop_id(&format!("{}.desktop", "a".repeat(200))));
+}
+
+#[test]
+fn find_by_desktop_id_matches_only_launchers() {
+    let mut ff = app(SourceKind::Pacman, "firefox", "Firefox Web Browser");
+    ff.desktop_ids = vec!["firefox.desktop".into()];
+    let mut fp = app(SourceKind::Flatpak, "org.mozilla.firefox", "Firefox");
+    fp.desktop_ids = vec!["org.mozilla.firefox.desktop".into()];
+    let mut kde = app(SourceKind::Pacman, "dolphin", "Dolphin");
+    kde.desktop_ids = vec![
+        "kde-org.kde.dolphin.desktop".into(),
+        "dolphin-root.desktop".into(),
+    ];
+    let named = app(SourceKind::Pacman, "named.desktop", "named.desktop");
+    let inv = inv(vec![ff, fp, kde, named]);
+    assert_eq!(
+        found(find_app_by_desktop_id(&inv, "firefox.desktop")).id,
+        "pacman:firefox"
+    );
+    assert_eq!(
+        found(find_app_by_desktop_id(&inv, "org.mozilla.firefox.desktop")).source,
+        SourceKind::Flatpak
+    );
+    assert_eq!(
+        found(find_app_by_desktop_id(&inv, "dolphin-root.desktop")).id,
+        "pacman:dolphin"
+    );
+    // Only the full id of a launcher: no extension added, no app id, name
+    // or display name, no case folding.
+    for miss in [
+        "firefox",
+        "org.mozilla.firefox",
+        "pacman:firefox",
+        "Firefox.desktop",
+        "named.desktop",
+        "nope.desktop",
+    ] {
+        assert!(
+            matches!(find_app_by_desktop_id(&inv, miss), Resolved::NotFound),
+            "{miss:?}"
+        );
+    }
+}
+
+#[test]
+fn find_by_desktop_id_refuses_invalid_ids_and_reports_ambiguity() {
+    let mut a = app(SourceKind::Pacman, "a", "A");
+    a.desktop_ids = vec!["-x.desktop".into(), "shared.desktop".into()];
+    let mut b = app(SourceKind::Flatpak, "b", "B");
+    b.desktop_ids = vec!["shared.desktop".into()];
+    let inv = inv(vec![a, b]);
+    // Even an app that lists it can't be reached through an invalid id.
+    assert!(matches!(
+        find_app_by_desktop_id(&inv, "-x.desktop"),
+        Resolved::NotFound
+    ));
+    match find_app_by_desktop_id(&inv, "shared.desktop") {
+        Resolved::Ambiguous(v) => assert_eq!(v.len(), 2),
+        other => panic!("expected Ambiguous, got {other:?}"),
+    }
+}
+
+#[test]
 fn find_app_ambiguous() {
     let inv = inv(vec![
         app(SourceKind::Pacman, "firefox-a", "Firefox"),
