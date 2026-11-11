@@ -296,14 +296,8 @@ function freedBy(data) {
     var reports = reportsOf(data);
     for (var i = 0; i < reports.length; i++) {
         var freed = number(reports[i].freed);
-        if (freed !== null) {
+        if (freed !== null)
             total += freed;
-            continue;
-        }
-        var results = Array.isArray(reports[i].results) ? reports[i].results : [];
-        for (var j = 0; j < results.length && j < ROW_LIMIT; j++)
-            if (results[j] && results[j].ok === true && number(results[j].size) !== null)
-                total += results[j].size;
     }
     return total;
 }

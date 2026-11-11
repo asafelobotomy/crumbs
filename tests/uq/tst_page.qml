@@ -66,6 +66,10 @@ Item {
         return hits.length > 0 ? hits[0] : null;
     }
 
+    function findLabels(item, text) {
+        return all(item, []).filter(i => i.text === text && !isButton(i));
+    }
+
     function findButton(item, text) {
         const hits = all(item, []).filter(i => isButton(i) && i.text === text);
         return hits.length > 0 ? hits[0] : null;
@@ -73,15 +77,6 @@ Item {
 
     function findButtons(item, text) {
         return all(item, []).filter(i => isButton(i) && i.text === text);
-    }
-
-    // The button that sits in the same row as the label `labelText`.
-    function rowButton(labelText, buttonText) {
-        const label = findLabel(loader.item, labelText);
-        verify(label !== null, "a row labelled " + labelText);
-        const button = findButton(label.parent, buttonText);
-        verify(button !== null, labelText + " has a " + buttonText + " button");
-        return button;
     }
 
     function runs(id) {
@@ -99,6 +94,15 @@ Item {
     TestCase {
         name: "StoragePage"
         when: windowShown
+
+        // The button that sits in the same row as the label `labelText`.
+        function rowButton(labelText, buttonText) {
+            const label = root.findLabel(loader.item, labelText);
+            verify(label !== null, "a row labelled " + labelText);
+            const button = root.findButton(label.parent, buttonText);
+            verify(button !== null, labelText + " has a " + buttonText + " button");
+            return button;
+        }
 
         function init() {
             fake.calls = [];
@@ -132,19 +136,19 @@ Item {
 
         function test_clean_routes_by_category() {
             tryVerify(root.shows("Browser caches"));
-            root.rowButton("Browser caches", "Clean up").clicked();
+            rowButton("Browser caches", "Clean up").clicked();
             tryVerify(root.shows("Freed 1.2 GB"));
             tryVerify(root.idle);
             compare(root.runs("clean"), [["run", "clean", ["browser-cache"]]]);
 
             tryVerify(root.shows("Trash"));
-            root.rowButton("Trash", "Clean up").clicked();
+            rowButton("Trash", "Clean up").clicked();
             tryVerify(root.idle);
             compare(root.runs("clean-for-good"), [["run", "clean-for-good", ["trash"]]]);
 
             root.findButton(loader.item, "Check system space").clicked();
             tryVerify(root.shows("System logs"));
-            root.rowButton("System logs", "Clean up…").clicked();
+            rowButton("System logs", "Clean up…").clicked();
             tryVerify(root.idle);
             compare(root.runs("clean-system"), [["run", "clean-system", ["journal"]]]);
             // the system scan ran once to look, and again after the cleanup
@@ -157,12 +161,15 @@ Item {
             fake.commands = c;
             root.findButton(loader.item, "Check system space").clicked();
             tryVerify(root.shows("System logs"));
-            root.rowButton("System logs", "Clean up…").clicked();
+            rowButton("System logs", "Clean up…").clicked();
             tryVerify(root.shows("Couldn't get administrator rights"));
             const manual = "sudo '/usr/bin/journalctl' '--vacuum-size=500M'";
             verify(root.findLabel(loader.item, manual) !== null);
             compare(root.findLabel(loader.item, manual).visible, false, "the commands are under Advanced details");
-            root.findButton(loader.item, "Advanced details").clicked();
+            // the System logs row's own button (every row has a hidden one)
+            const details = root.findButton(root.findLabel(loader.item, "System logs").parent.parent, "Advanced details");
+            verify(details !== null);
+            details.clicked();
             compare(root.findLabel(loader.item, manual).visible, true);
         }
 
@@ -172,10 +179,32 @@ Item {
             fake.commands = c;
             root.findButton(loader.item, "List apps").clicked();
             tryVerify(root.shows("Firefox Web Browser"));
-            root.rowButton("Firefox Web Browser", "Uninstall…").clicked();
+            rowButton("Firefox Web Browser", "Uninstall…").clicked();
             tryVerify(root.shows("Firefox Web Browser is running (pid 4242); close it first or re-run with --force"));
             compare(root.runs("uninstall"), [["run", "uninstall", ["pacman:firefox"]]]);
             tryVerify(root.idle);
+        }
+
+        function test_partial_uninstall_keeps_its_message() {
+            let listed = 0;
+            const c = root.defaults();
+            c["apps"] = () => {
+                listed++;
+                const r = root.answer("apps");
+                if (listed > 1)
+                    r.output.data.apps = r.output.data.apps.filter(a => a.id !== "pacman:firefox");
+                return r;
+            };
+            const partial = root.fixture("clean-ok");
+            partial.data.report[0].results.push({ action: { path: "/home/user/.mozilla", type: "trash" }, error: "busy", history_id: "1-2", ok: false });
+            c["uninstall"] = { code: 3, error: "exit 3: some failed", output: partial };
+            fake.commands = c;
+            root.findButton(loader.item, "List apps").clicked();
+            tryVerify(root.shows("Firefox Web Browser"));
+            rowButton("Firefox Web Browser", "Uninstall…").clicked();
+            tryVerify(() => root.findLabel(loader.item, "Firefox Web Browser") === null);
+            tryVerify(() => root.findLabels(loader.item, "Some items couldn't be removed").length > 0);
+            verify(root.findLabels(loader.item, "Some items couldn't be removed").some(l => l.visible), "the message is still shown");
         }
 
         function test_part_of_uq_has_no_button() {
@@ -199,7 +228,7 @@ Item {
         function test_cancel_is_silent() {
             tryVerify(root.shows("App caches"));
             fake.confirms = false;
-            const button = root.rowButton("App caches", "Clean up");
+            const button = rowButton("App caches", "Clean up");
             button.clicked();
             tryVerify(() => root.runs("clean").length === 1);
             tryVerify(root.idle);
@@ -207,7 +236,7 @@ Item {
             const texts = root.all(loader.item, []).filter(i => typeof i.text === "string" && !root.isButton(i)).map(i => i.text);
             compare(texts.filter(t => /Cancel|Freed|wrong|administrator|Working/.test(t)), []);
             compare(root.runs("scan").length, 1, "nothing was read again");
-            verify(root.rowButton("App caches", "Clean up").enabled);
+            verify(rowButton("App caches", "Clean up").enabled);
         }
 
         function test_failed_write_shows_why() {
@@ -215,7 +244,7 @@ Item {
             c["clean"] = { code: 1, error: "exit 1: refusing", output: { schema_version: 1, command: "clean", data: { plans: [], report: null }, errors: [{ source: "cli", message: "refusing: some sources failed" }] } };
             fake.commands = c;
             tryVerify(root.shows("App caches"));
-            root.rowButton("App caches", "Clean up").clicked();
+            rowButton("App caches", "Clean up").clicked();
             tryVerify(root.shows("refusing: some sources failed"));
         }
 
@@ -240,7 +269,7 @@ Item {
             tryVerify(root.shows(path));
             compare(root.findLabel(loader.item, path).textFormat, Text.PlainText);
             verify(root.findLabel(loader.item, "<b>not</b> installed") !== null);
-            root.rowButton(path, "Move to trash").clicked();
+            rowButton(path, "Move to trash").clicked();
             tryVerify(root.idle);
             compare(root.runs("orphan-trash"), [["run", "orphan-trash", [path]]]);
         }
@@ -266,7 +295,7 @@ Item {
                 dbus: real.dbus,
                 openApp: real.openApp
             };
-            root.rowButton("App caches", "Clean up").clicked();
+            rowButton("App caches", "Clean up").clicked();
             verify(held !== null, "the cleanup is running");
             verify(root.findLabel(loader.item, "Working…") !== null);
             const buttons = root.findButtons(loader.item, "Clean up");
@@ -274,19 +303,19 @@ Item {
             for (const b of buttons)
                 compare(b.enabled, false);
             // a second click, if it got through, must not start a second write
-            root.rowButton("Thumbnails", "Clean up").clicked();
+            rowButton("Thumbnails", "Clean up").clicked();
             compare(root.runs("clean").length, 1);
             held(root.answer("clean-ok"));
             tryVerify(root.idle);
             tryVerify(root.shows("Freed 1.2 GB"));
-            verify(root.rowButton("Thumbnails", "Clean up").enabled);
+            verify(rowButton("Thumbnails", "Clean up").enabled);
         }
 
         function test_history_put_back() {
             tryVerify(root.shows("Cleanup"));
-            compare(root.rowButton("Cleanup", "Put back").visible, true);
+            compare(rowButton("Cleanup", "Put back").visible, true);
             compare(root.findButton(root.findLabel(loader.item, "Removed oldtool").parent, "Put back").visible, false);
-            root.rowButton("Cleanup", "Put back").clicked();
+            rowButton("Cleanup", "Put back").clicked();
             tryVerify(root.shows("Put back 1 item"));
             tryVerify(root.idle);
             compare(root.runs("restore"), [["run", "restore", ["1794141850000"]]]);

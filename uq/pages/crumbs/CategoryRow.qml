@@ -16,13 +16,14 @@ ColumnLayout {
     property string cleanText: "Clean up"
     readonly property string key: "category:" + (row.item ? row.item.category : "")
 
-    /// A cleanup finished (not cancelled): the section reads its space again.
-    signal cleaned()
+    /// Called when a cleanup finished (not cancelled): the section reads its space again. It is
+    /// the section's own function, so it still works if a re-read has replaced this row.
+    property var after
 
     function clean() {
         if (!row.host || !row.item || row.item.command === null)
             return;
-        row.host.write(row.key, row.item.command, [row.item.category], () => row.cleaned());
+        row.host.write(row.key, row.item.command, [row.item.category], row.after);
     }
 
     spacing: 2

@@ -56,7 +56,7 @@ jobs:
         with:
           toolchain: stable
       - name: Page logic and manifest tests (Node)
-        run: node --test tests/uq/*.test.mjs
+        run: node --test 'tests/uq/*.test.mjs'
       # QML_XHR_ALLOW_FILE_READ lets tst_page.qml read tests/uq/fixtures/.
       - name: Page tests (QML)
         run: QML_XHR_ALLOW_FILE_READ=1 QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -import tests/uq/stub -input tests/uq

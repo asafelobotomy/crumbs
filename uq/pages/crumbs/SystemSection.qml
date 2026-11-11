@@ -65,7 +65,7 @@ ColumnLayout {
             host: section.host
             item: modelData
             cleanText: "Clean up…"
-            onCleaned: section.refresh()
+            after: () => section.refresh()
             Layout.fillWidth: true
         }
     }

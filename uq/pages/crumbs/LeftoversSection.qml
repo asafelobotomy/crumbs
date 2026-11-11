@@ -47,6 +47,11 @@ ColumnLayout {
             onClicked: section.refresh()
         }
     }
+    Outcome {
+        host: section.host
+        noteKey: "section:leftovers"
+        Layout.fillWidth: true
+    }
     ErrorCard {
         title: "Couldn't look for leftovers"
         detail: section.problem
@@ -85,7 +90,7 @@ ColumnLayout {
                 QQC2.Button {
                     text: "Move to trash"
                     enabled: !!section.host && !section.host.busy && row.modelData.valid
-                    onClicked: section.host.write(row.key, "orphan-trash", [row.modelData.path], () => section.refresh())
+                    onClicked: section.host.write(row.key, "orphan-trash", [row.modelData.path], () => section.refresh(), "section:leftovers")
                 }
             }
             UqLabel {

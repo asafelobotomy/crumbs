@@ -32,7 +32,7 @@ Item {
 
     /// Runs one write (a confirmed command) for the row `key`, then `done(result)` unless the
     /// person cancelled. A cancel changes nothing and shows nothing.
-    function write(key, command, args, done) {
+    function write(key, command, args, done, sectionKey) {
         if (page.busy || !page.ctx)
             return;
         const why = Logic.argsProblem(command, args);
@@ -41,12 +41,18 @@ Item {
             return;
         }
         page.notes = Logic.withNote(page.notes, key, null);
+        if (sectionKey)
+            page.notes = Logic.withNote(page.notes, sectionKey, null);
         page.workingKey = key;
         page.ctx.command.run(command, args, result => {
             page.workingKey = "";
             if (Logic.isCancelled(result))
                 return;
-            page.notes = Logic.withNote(page.notes, key, Logic.outcome(result));
+            const note = Logic.outcome(result);
+            page.notes = Logic.withNote(page.notes, key, note);
+            // A re-read can drop the row (an app that is gone), so the section shows it too.
+            if (sectionKey)
+                page.notes = Logic.withNote(page.notes, sectionKey, note);
             if (done)
                 done(result);
         });

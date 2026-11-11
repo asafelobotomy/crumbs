@@ -49,6 +49,11 @@ ColumnLayout {
             onClicked: section.refresh()
         }
     }
+    Outcome {
+        host: section.host
+        noteKey: "section:apps"
+        Layout.fillWidth: true
+    }
     UqLabel {
         text: "AppImages kept by appOFholding are managed there."
         wrapMode: Text.Wrap
@@ -105,7 +110,7 @@ ColumnLayout {
                     text: "Uninstall…"
                     visible: row.modelData.partOf === null
                     enabled: !!section.host && !section.host.busy && row.modelData.canUninstall
-                    onClicked: section.host.write(row.key, "uninstall", [row.modelData.id], () => section.refresh())
+                    onClicked: section.host.write(row.key, "uninstall", [row.modelData.id], () => section.refresh(), "section:apps")
                 }
             }
             Outcome {

@@ -54,7 +54,7 @@ ColumnLayout {
             required property var modelData
             host: section.host
             item: modelData
-            onCleaned: section.refresh()
+            after: () => section.refresh()
             Layout.fillWidth: true
         }
     }
