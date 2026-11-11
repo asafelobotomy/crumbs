@@ -88,7 +88,6 @@ PY
 # The AUR files, with each 'SKIP' replaced by the artifact's sum.
 sum() { sha256sum | cut -d' ' -f1; }
 tarball_sum=$(sum < "$TARBALL")
-license_sum=$(sum < LICENSE)
 bin_sum=$(sum < "$BIN")
 fill() { # <package> <array>=<sum>...
     pkg=$1; shift
@@ -110,7 +109,8 @@ open(dst + "/.SRCINFO", "w").write(srcinfo)
 PY
 }
 fill crum-bs "sha256sums=$tarball_sum"
-fill crum-bs-bin "sha256sums=$license_sum" "sha256sums_x86_64=$bin_sum"
+# The -bin package takes its licence and uQ files from the same source tarball.
+fill crum-bs-bin "sha256sums=$tarball_sum" "sha256sums_x86_64=$bin_sum"
 
 echo "dist/ now holds:" >&2
 (cd dist && sha256sum -c SHA256SUMS >&2)

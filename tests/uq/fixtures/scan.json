@@ -1,0 +1,241 @@
+{
+  "schema_version": 1,
+  "command": "scan",
+  "data": {
+    "categories": [
+      {
+        "category": "cache",
+        "items": [
+          {
+            "category": "cache",
+            "path": "/home/user/.cache/foo",
+            "label": "foo",
+            "size": 1400000000,
+            "rebuildable": true,
+            "preselected": true,
+            "note": null,
+            "action": "trash",
+            "scope": "home",
+            "extra_paths": [],
+            "app_id": null
+          },
+          {
+            "category": "cache",
+            "path": "/home/user/.cache/bar",
+            "label": "bar",
+            "size": 52000000,
+            "rebuildable": true,
+            "preselected": true,
+            "note": null,
+            "action": "trash",
+            "scope": "home",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 1452000000,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "thumbnails",
+        "items": [
+          {
+            "category": "thumbnails",
+            "path": "/home/user/.cache/thumbnails",
+            "label": "thumbnails",
+            "size": 18300000,
+            "rebuildable": true,
+            "preselected": true,
+            "note": null,
+            "action": "trash",
+            "scope": "home",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 18300000,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "trash",
+        "items": [
+          {
+            "category": "trash",
+            "path": "/home/user/.local/share/Trash/files/old.txt",
+            "label": "~/docs/old.txt",
+            "size": 8192,
+            "rebuildable": false,
+            "preselected": false,
+            "note": null,
+            "action": "delete",
+            "scope": "home-trash",
+            "extra_paths": [
+              "/home/user/.local/share/Trash/info/old.txt.trashinfo"
+            ],
+            "app_id": null
+          }
+        ],
+        "total": 8192,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "temp",
+        "items": [
+          {
+            "category": "temp",
+            "path": "/tmp/old-download.bin",
+            "label": "/tmp/old-download.bin",
+            "size": 4096000,
+            "rebuildable": false,
+            "preselected": true,
+            "note": "deleted permanently (temporary file)",
+            "action": "delete",
+            "scope": "user-temp",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 4096000,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "browser-cache",
+        "items": [
+          {
+            "category": "browser-cache",
+            "path": "/home/user/.cache/mozilla/firefox/default/cache2",
+            "label": "Firefox cache",
+            "size": 730000000,
+            "rebuildable": true,
+            "preselected": true,
+            "note": null,
+            "action": "trash",
+            "scope": "home",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 730000000,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "dev-cache",
+        "items": [],
+        "total": 0,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": true
+      },
+      {
+        "category": "flatpak-unused",
+        "items": [],
+        "total": 0,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "appimage-old",
+        "items": [
+          {
+            "category": "appimage-old",
+            "path": "/home/user/Downloads/Tool-1.0-x86_64.AppImage",
+            "label": "Tool 1.0",
+            "size": 81920000,
+            "rebuildable": true,
+            "preselected": true,
+            "note": null,
+            "action": "trash",
+            "scope": "home",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 81920000,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "logs",
+        "items": [
+          {
+            "category": "logs",
+            "path": "/home/user/.local/state/foo/old.log",
+            "label": "foo/old.log",
+            "size": 262144,
+            "rebuildable": true,
+            "preselected": true,
+            "note": null,
+            "action": "trash",
+            "scope": "home",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 262144,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "aur-build",
+        "items": [],
+        "total": 0,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "app-cache",
+        "items": [
+          {
+            "category": "app-cache",
+            "path": "/home/user/.config/Code/Cache",
+            "label": "Code: Cache",
+            "size": 310000000,
+            "rebuildable": true,
+            "preselected": false,
+            "note": "Code is running",
+            "action": "trash",
+            "scope": "home",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 310000000,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "containers",
+        "items": [],
+        "total": 0,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false,
+        "unavailable": "podman and docker not found"
+      },
+      {
+        "category": "build-output",
+        "items": [],
+        "total": 0,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": true
+      }
+    ]
+  },
+  "errors": []
+}

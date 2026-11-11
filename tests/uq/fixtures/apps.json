@@ -1,0 +1,161 @@
+{
+  "schema_version": 1,
+  "command": "apps list",
+  "data": {
+    "apps": [
+      {
+        "id": "pacman:firefox",
+        "name": "firefox",
+        "display_name": "Firefox Web Browser",
+        "version": "1.0-1",
+        "description": null,
+        "source": "pacman",
+        "installation": "system",
+        "install_size": 316982060,
+        "location": null,
+        "desktop_ids": [
+          "firefox.desktop"
+        ],
+        "rdns_id": null,
+        "exec_names": [
+          "firefox"
+        ],
+        "wm_classes": [
+          "firefox"
+        ],
+        "has_gui": true,
+        "part_of": null
+      },
+      {
+        "id": "pacman:uq",
+        "name": "uq",
+        "display_name": "uQ",
+        "version": "1.0-1",
+        "description": null,
+        "source": "pacman",
+        "installation": "system",
+        "install_size": 204000000,
+        "location": null,
+        "desktop_ids": [
+          "uq.desktop"
+        ],
+        "rdns_id": null,
+        "exec_names": [
+          "uq"
+        ],
+        "wm_classes": [
+          "uq"
+        ],
+        "has_gui": true,
+        "part_of": "uQ"
+      },
+      {
+        "id": "flatpak:user/org.example.Notes",
+        "name": "org.example.Notes",
+        "display_name": "Notes",
+        "version": "1.0-1",
+        "description": null,
+        "source": "flatpak",
+        "installation": "system",
+        "install_size": 96000000,
+        "location": null,
+        "desktop_ids": [
+          "org.example.Notes.desktop"
+        ],
+        "rdns_id": null,
+        "exec_names": [
+          "org.example.Notes"
+        ],
+        "wm_classes": [
+          "org.example.Notes"
+        ],
+        "has_gui": true,
+        "part_of": null
+      },
+      {
+        "id": "pacman:scdr",
+        "name": "scdr",
+        "display_name": "scdr",
+        "version": "1.0-1",
+        "description": null,
+        "source": "pacman",
+        "installation": "system",
+        "install_size": 8400000,
+        "location": null,
+        "desktop_ids": [
+          "scdr.desktop"
+        ],
+        "rdns_id": null,
+        "exec_names": [
+          "scdr"
+        ],
+        "wm_classes": [
+          "scdr"
+        ],
+        "has_gui": true,
+        "part_of": "uQ"
+      },
+      {
+        "id": "appimage:~/Downloads/GutCheck-0.19.0-x86_64.AppImage",
+        "name": "GutCheck",
+        "display_name": "GutCheck",
+        "version": "1.0-1",
+        "description": null,
+        "source": "appimage",
+        "installation": "system",
+        "install_size": 81920000,
+        "location": null,
+        "desktop_ids": [
+          "GutCheck.desktop"
+        ],
+        "rdns_id": null,
+        "exec_names": [
+          "GutCheck"
+        ],
+        "wm_classes": [
+          "GutCheck"
+        ],
+        "has_gui": true,
+        "part_of": null
+      },
+      {
+        "id": "unmanaged:foo.desktop",
+        "name": "foo",
+        "display_name": "Foo",
+        "version": "1.0-1",
+        "description": null,
+        "source": "unmanaged",
+        "installation": "system",
+        "install_size": null,
+        "location": null,
+        "desktop_ids": [
+          "foo.desktop"
+        ],
+        "rdns_id": null,
+        "exec_names": [
+          "foo"
+        ],
+        "wm_classes": [
+          "foo"
+        ],
+        "has_gui": true,
+        "part_of": null
+      }
+    ],
+    "statuses": [
+      {
+        "app_count": 3,
+        "available": true,
+        "skipped_reason": null,
+        "source": "pacman"
+      },
+      {
+        "app_count": 0,
+        "available": false,
+        "skipped_reason": "not installed",
+        "source": "snap"
+      }
+    ]
+  },
+  "errors": []
+}

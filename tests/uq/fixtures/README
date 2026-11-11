@@ -1,0 +1,7 @@
+These are crumbs --json answers, as the examples in docs/json-schema.md show them, trimmed.
+
+scan, scan-system, orphans, history, clean-exit5 and the two uninstall refusals follow the
+documented examples and field lists. apps, clean-ok and the history batches that the schema doc
+has no whole example for were written by hand from the documented field tables (not generated
+with the debug build against crumbs_core::testing::FixtureTree), with the same keys and types.
+If crumBS changes a documented shape, update the doc first and these files with it.

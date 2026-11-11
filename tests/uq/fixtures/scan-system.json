@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "command": "scan",
+  "data": {
+    "categories": [
+      {
+        "category": "pkg-cache",
+        "items": [
+          {
+            "category": "pkg-cache",
+            "path": null,
+            "label": "package cache (keep 2 versions)",
+            "size": 90400000,
+            "rebuildable": true,
+            "preselected": true,
+            "note": null,
+            "action": {
+              "privileged": {
+                "program": "paccache",
+                "args": [
+                  "-rk2"
+                ]
+              }
+            },
+            "scope": "system",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 90400000,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "orphan-pkgs",
+        "items": [
+          {
+            "category": "orphan-pkgs",
+            "path": null,
+            "label": "2 orphaned packages",
+            "size": 7900000,
+            "rebuildable": false,
+            "preselected": false,
+            "note": "gn, libjuice",
+            "action": {
+              "privileged": {
+                "program": "pacman",
+                "args": [
+                  "-Rn",
+                  "--noconfirm",
+                  "gn",
+                  "libjuice"
+                ]
+              }
+            },
+            "scope": "system",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 7900000,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "journal",
+        "items": [
+          {
+            "category": "journal",
+            "path": null,
+            "label": "systemd journal",
+            "size": 229743002,
+            "rebuildable": false,
+            "preselected": true,
+            "note": null,
+            "action": {
+              "privileged": {
+                "program": "journalctl",
+                "args": [
+                  "--vacuum-size=500M"
+                ]
+              }
+            },
+            "scope": "system",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 229743002,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "coredumps",
+        "items": [
+          {
+            "category": "coredumps",
+            "path": "/var/lib/systemd/coredump/core.foo.1000.abc.1.zst",
+            "label": "core.foo.1000.abc.1.zst",
+            "size": 12288,
+            "rebuildable": false,
+            "preselected": true,
+            "note": null,
+            "action": "delete",
+            "scope": "system",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 12288,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "system-temp",
+        "items": [
+          {
+            "category": "system-temp",
+            "path": null,
+            "label": "stale system temporary files",
+            "size": null,
+            "rebuildable": false,
+            "preselected": true,
+            "note": null,
+            "action": {
+              "privileged": {
+                "program": "systemd-tmpfiles",
+                "args": [
+                  "--clean",
+                  "--prefix=/tmp",
+                  "--prefix=/var/tmp"
+                ]
+              }
+            },
+            "scope": "system",
+            "extra_paths": [],
+            "app_id": null
+          }
+        ],
+        "total": 0,
+        "unknown_sizes": 1,
+        "error": null,
+        "skipped": false
+      },
+      {
+        "category": "flatpak-unused-system",
+        "items": [],
+        "total": 0,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false,
+        "unavailable": "flatpak not installed"
+      },
+      {
+        "category": "snapshots",
+        "items": [],
+        "total": 0,
+        "unknown_sizes": 0,
+        "error": null,
+        "skipped": false,
+        "unavailable": "timeshift not installed"
+      }
+    ]
+  },
+  "errors": []
+}

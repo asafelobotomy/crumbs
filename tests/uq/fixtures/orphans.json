@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "command": "orphans",
+  "data": {
+    "orphans": [
+      {
+        "confidence": "medium",
+        "kind": "dot-dir",
+        "mime_lines": [],
+        "path": "/home/user/.thunderbird",
+        "preselected": false,
+        "reason": "looks like thunderbird data; thunderbird was not detected as installed",
+        "shared": false,
+        "size": {
+          "bytes": 12288,
+          "errors": 0,
+          "files": 1
+        }
+      },
+      {
+        "confidence": "medium",
+        "kind": "config",
+        "mime_lines": [],
+        "path": "/home/user/.config/OldChat",
+        "preselected": false,
+        "reason": "looks like oldchat data; oldchat was not detected as installed",
+        "shared": false,
+        "size": {
+          "bytes": 90112,
+          "errors": 0,
+          "files": 1
+        }
+      }
+    ]
+  },
+  "errors": []
+}

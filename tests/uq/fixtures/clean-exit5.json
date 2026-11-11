@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "command": "clean",
+  "data": {
+    "manual_commands": [
+      "sudo '/usr/bin/journalctl' '--vacuum-size=500M'"
+    ],
+    "plans": [
+      {
+        "actions": [],
+        "app_id": null,
+        "notes": [],
+        "total_size": 229743002
+      }
+    ],
+    "report": [
+      {
+        "batch": "1794164328456",
+        "escalation_failed": true,
+        "freed": 0,
+        "results": [
+          {
+            "action": {
+              "args": [
+                "--vacuum-size=500M"
+              ],
+              "program": "journalctl",
+              "type": "privileged-command"
+            },
+            "error": "privilege escalation was cancelled or denied",
+            "history_id": "1794164328456-0",
+            "ok": false
+          }
+        ]
+      }
+    ]
+  },
+  "errors": [
+    {
+      "source": "cli",
+      "message": "administrator rights were not granted; nothing that needs them was changed"
+    }
+  ]
+}

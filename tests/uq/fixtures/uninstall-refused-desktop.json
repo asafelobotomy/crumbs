@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "command": "uninstall",
+  "data": {
+    "plans": [],
+    "report": null
+  },
+  "errors": [
+    {
+      "source": "cli",
+      "message": "refusing: pacman:uq is part of the uQ desktop; re-run with --desktop to remove it, or --leftovers-only to keep it"
+    }
+  ]
+}

@@ -1,0 +1,122 @@
+# The Storage and cleanup page of uQ Settings. Installed by the crum-bs packages to
+# /usr/share/uq/settings/pages/crumbs/. Everything it reads or changes goes through the
+# crumbs command line; see uq/README.md.
+uq_api = 1
+id = "crumbs"
+name = "Storage and cleanup"
+icon = "user-trash-full"
+qml = "Page.qml"
+keywords = ["crumbs", "disk", "space", "cache", "cleanup", "leftovers", "uninstall", "trash"]
+
+[requires]
+bins = ["crumbs"]
+
+[[setting]]
+id = "space"
+label = "Space you can free"
+keywords = ["disk", "storage", "cache", "clean", "free"]
+
+[[setting]]
+id = "system-space"
+label = "System space"
+keywords = ["disk", "packages", "logs", "journal", "system", "cleanup"]
+
+[[setting]]
+id = "leftovers"
+label = "Leftovers of removed apps"
+keywords = ["orphans", "uninstall", "remains", "config", "trash"]
+
+[[setting]]
+id = "history"
+label = "Recent cleanups"
+keywords = ["undo", "restore", "put back", "trash", "log"]
+
+[[setting]]
+id = "apps"
+label = "Apps and their size"
+keywords = ["uninstall", "remove", "software", "size", "packages"]
+
+# Reads. The scans can take a minute on a big disk.
+[[command]]
+id = "scan"
+argv = ["/usr/bin/crumbs", "scan", "--json"]
+output = "json"
+timeout_ms = 180000
+
+[[command]]
+id = "scan-system"
+argv = ["/usr/bin/crumbs", "scan", "--system", "--json"]
+output = "json"
+timeout_ms = 180000
+
+[[command]]
+id = "orphans"
+argv = ["/usr/bin/crumbs", "orphans", "--json"]
+output = "json"
+timeout_ms = 120000
+
+[[command]]
+id = "history"
+argv = ["/usr/bin/crumbs", "history", "--limit", "20", "--json"]
+output = "json"
+timeout_ms = 30000
+watch = { files = ["~/.local/state/crumbs/history.jsonl"] }
+
+[[command]]
+id = "apps"
+argv = ["/usr/bin/crumbs", "apps", "list", "--sort", "size", "--json"]
+output = "json"
+timeout_ms = 120000
+
+# Writes. Each one asks first (confirm), is named by a category, a path, a batch or an app id
+# that crumbs itself printed, and always answers with a full JSON envelope, whatever the exit
+# code. The page never forces anything: no flag that overrides crumbs' own refusals is in any
+# argv. The category lists split by what a cleanup does (to the trash, deleted for good, system).
+[[command]]
+id = "clean"
+argv = ["/usr/bin/crumbs", "clean", "--yes", "--json"]
+output = "json"
+timeout_ms = 600000
+args = [{ name = "category", pattern = '^(cache|thumbnails|browser-cache|dev-cache|appimage-old|logs|app-cache|build-output)$' }]
+confirm = "Clean up %s? Items go to the trash, and crumBS can put them back."
+
+[[command]]
+id = "clean-for-good"
+argv = ["/usr/bin/crumbs", "clean", "--yes", "--json"]
+output = "json"
+timeout_ms = 600000
+args = [{ name = "category", pattern = '^(trash|temp|aur-build|containers|flatpak-unused)$' }]
+confirm = "Clean up %s? This deletes them for good."
+
+[[command]]
+id = "clean-system"
+argv = ["/usr/bin/crumbs", "clean", "--system", "--yes", "--json"]
+output = "json"
+timeout_ms = 600000
+args = [{ name = "category", pattern = '^(pkg-cache|orphan-pkgs|journal|coredumps|system-temp|flatpak-unused-system|snapshots)$' }]
+confirm = "Clean up %s for the whole system? This needs your password and can't be undone."
+
+# `--select` is the last fixed argument: the path follows as its own argument.
+[[command]]
+id = "orphan-trash"
+argv = ["/usr/bin/crumbs", "orphans", "--clean", "--yes", "--json", "--select"]
+output = "json"
+timeout_ms = 300000
+args = [{ name = "path", pattern = '^/[^\x00-\x1f\x7f]+$' }]
+confirm = "Move %s to the trash?"
+
+[[command]]
+id = "restore"
+argv = ["/usr/bin/crumbs", "restore", "--json"]
+output = "json"
+timeout_ms = 300000
+args = [{ name = "batch", pattern = '^[0-9]{1,20}$' }]
+confirm = "Put back the files from this cleanup?"
+
+[[command]]
+id = "uninstall"
+argv = ["/usr/bin/crumbs", "uninstall", "--yes", "--json"]
+output = "json"
+timeout_ms = 600000
+args = [{ name = "app", pattern = '^(pacman|dpkg|rpm|snap|flatpak|appimage|unmanaged):[^\x00-\x1f\x7f]{1,400}$' }]
+confirm = "Uninstall %s and remove its leftovers? A removed package can't be put back by crumBS."

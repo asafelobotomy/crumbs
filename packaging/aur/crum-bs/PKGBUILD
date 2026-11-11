@@ -11,7 +11,7 @@ arch=('x86_64')
 url="https://github.com/asafelobotomy/crumbs"
 license=('GPL-3.0-or-later')
 depends=('gcc-libs' 'glibc')
-optdepends=('uq: an "Uninstall…" entry in the uQ app menus')
+optdepends=('uq: the Storage and cleanup page in Settings and an "Uninstall…" entry in the app menus')
 makedepends=('cargo')
 conflicts=('crumbs')
 # Rust's own LTO is set in the release profile.
@@ -49,4 +49,5 @@ package() {
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
     # uQ integration (inert without uQ): uq/README.md says what each file adds.
     install -Dm644 -t "$pkgdir/usr/share/uq/launcher/actions" uq/launcher/actions/*.appaction
+    install -Dm644 -t "$pkgdir/usr/share/uq/settings/pages/crumbs" uq/pages/crumbs/*
 }

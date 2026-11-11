@@ -3,6 +3,12 @@
 # run in an Arch container (as a non-root user: makepkg refuses root).
 . "$(dirname "$0")/lib.sh"
 AUR=$PWD/packaging/aur
+# The files the uq/ folder should put under usr/share/uq: its launcher action and every file of
+# the Settings page (not uq/README.md). uq/pages/<id>/ goes to settings/pages/<id>/.
+uq_files() {
+    (cd uq && find launcher pages -type f | sort) |
+        sed -e 's|^launcher/|usr/share/uq/launcher/|' -e 's|^pages/|usr/share/uq/settings/pages/|' | sort
+}
 WORK=$HOME/.cache/crumbs-test/aur
 # The builds run as a container user, so their files are removed from
 # inside podman's user namespace.
@@ -39,8 +45,10 @@ mkdir -p "$WORK/crum-bs" "$WORK/crum-bs-bin"
 cp "$AUR/crum-bs/PKGBUILD" "$WORK/crum-bs/"
 git archive --format=tar.gz --prefix="crumbs-$VERSION/" -o "$WORK/crum-bs/crumbs-$VERSION.tar.gz" HEAD
 cp "$AUR/crum-bs-bin/PKGBUILD" "$WORK/crum-bs-bin/"
-cp "$STATIC" "$WORK/crum-bs-bin/crumbs-$VERSION"
-cp LICENSE "$WORK/crum-bs-bin/crumbs-$VERSION-LICENSE"
+# crum-bs-bin downloads the same source tarball (it holds the licence and the uQ files) and the
+# binary, which keeps the name the release gives it.
+cp "$WORK/crum-bs/crumbs-$VERSION.tar.gz" "$WORK/crum-bs-bin/"
+cp "$STATIC" "$WORK/crum-bs-bin/"
 
 check aur_source_package_builds
 run_build() { # <pkg dir> <package name>
@@ -52,6 +60,8 @@ run_build() { # <pkg dir> <package name>
             { tail -30 /work/'"$1"'.makepkg.log; exit 1; }
         pkg=$(ls /work/'"$1"'/'"$2"'-'"$VERSION"'-*-x86_64.pkg.tar.zst | grep -v -- -debug-)
         namcap "$pkg" | grep " E: " && exit 1
+        # What the package puts under /usr/share/uq, one file per line.
+        bsdtar -tf "$pkg" | grep "^usr/share/uq/" | grep -v "/\$" | sort >/work/'"$1"'.uqfiles
         pacman -U --noconfirm "$pkg" >/dev/null
         chown -R root:root /work/'"$1"'
         crumbs --version
@@ -59,9 +69,13 @@ run_build() { # <pkg dir> <package name>
 }
 out=$(run_build crum-bs crum-bs) || fail "$(echo "$out" | tail -5 | tr '\n' ' ')"
 [ "$(echo "$out" | tail -1)" = "crumbs $VERSION" ] || fail "crum-bs printed: $out"
+check aur_source_package_installs_the_uq_folder
+[ "$(cat "$WORK/crum-bs.uqfiles")" = "$(uq_files)" ] || fail "crum-bs installs under usr/share/uq: $(tr '\n' ' ' < "$WORK/crum-bs.uqfiles"); want: $(uq_files | tr '\n' ' ')"
 
 check aur_bin_package_builds
 out=$(run_build crum-bs-bin crum-bs-bin) || fail "$(echo "$out" | tail -5 | tr '\n' ' ')"
 [ "$(echo "$out" | tail -1)" = "crumbs $VERSION" ] || fail "crum-bs-bin printed: $out"
+check aur_bin_package_installs_the_uq_folder
+[ "$(cat "$WORK/crum-bs-bin.uqfiles")" = "$(uq_files)" ] || fail "crum-bs-bin installs under usr/share/uq: $(tr '\n' ' ' < "$WORK/crum-bs-bin.uqfiles"); want: $(uq_files | tr '\n' ' ')"
 
 pass

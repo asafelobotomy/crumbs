@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "command": "clean",
+  "data": {
+    "plans": [
+      {
+        "actions": [],
+        "app_id": null,
+        "notes": [],
+        "total_size": 1200000000
+      }
+    ],
+    "report": [
+      {
+        "batch": "1794141850000",
+        "freed": 1200000000,
+        "results": [
+          {
+            "action": {
+              "path": "/home/user/.cache/foo",
+              "type": "trash"
+            },
+            "error": null,
+            "history_id": "1794141850000-0",
+            "ok": true
+          },
+          {
+            "action": {
+              "path": "/home/user/.cache/bar",
+              "type": "trash"
+            },
+            "error": null,
+            "history_id": "1794141850000-1",
+            "ok": true
+          }
+        ]
+      }
+    ]
+  },
+  "errors": []
+}
