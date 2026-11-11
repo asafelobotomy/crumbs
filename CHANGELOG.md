@@ -2,11 +2,14 @@
 
 ## Unreleased
 
+## 0.4.0
+
 - **`build-output`** (off by default): build folders git ignores in your projects: Cargo's `target`, `node_modules` and web bundler caches, Gradle's and CMake's `build`, a project's `.gradle`, Python `.venv`s. Recent ones and any in a repository a process works in are not preselected. New config keys `project_dirs` and `build_age_days`.
 - **`containers`:** podman's and Docker's untagged images (pruned by the engine) and unused volumes (never preselected).
 - **`aur-build`:** pamac's build trees in `/var/tmp` (or its `BuildDirectory`), deleted permanently while no process works in them.
 - **`app-cache`:** the Chromium caches of Electron apps in `~/.config` (Discord, VS Code, Cursor, Claude, ...), held back while the app runs.
 - **`pkg-cache`:** also every cached version of packages no longer installed (`paccache -ruk0`).
+- **Deleting** a tree that holds read-only folders of yours (Go's module cache) now completes: their write permission is restored first, by file descriptor, never outside the tree.
 - **`snapshots`** (system, opt-in): Timeshift snapshots beyond the newest `snapshots_keep` (3), deleted by Timeshift in the root step.
 
 ## 0.3.0
