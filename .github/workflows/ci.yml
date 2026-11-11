@@ -36,6 +36,46 @@ jobs:
       # mistake that only breaks release cannot reach main.
       - run: cargo build --workspace --release --locked
 
+  # The Storage and cleanup page of uQ Settings (uq/pages/crumbs/): its Node and QML tests, what
+  # the packages install of it, and uqctl's own check of the uq/ folder.
+  uq:
+    name: uQ Settings page
+    runs-on: ubuntu-24.04
+    env:
+      UQ_TAG: v0.3.0-rc.1   # the uQ release whose `uqctl` and settings page test kit this repo follows
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install Qt Quick and qmltestrunner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-declarative-dev-tools \
+            qml6-module-qtquick qml6-module-qtquick-layouts qml6-module-qtquick-controls \
+            qml6-module-qttest qml6-module-qtqml qml6-module-qtqml-workerscript \
+            qml6-module-qtquick-window qml6-module-qtquick-templates
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Page logic and manifest tests (Node)
+        run: node --test tests/uq/*.test.mjs
+      # QML_XHR_ALLOW_FILE_READ lets tst_page.qml read tests/uq/fixtures/.
+      - name: Page tests (QML)
+        run: QML_XHR_ALLOW_FILE_READ=1 QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -import tests/uq/stub -input tests/uq
+      - name: The packages install the whole uq/ folder
+        run: scripts/test-packaging.sh uq_files
+      - name: Cache uqctl
+        id: uqctl
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.uq
+          key: uqctl-${{ env.UQ_TAG }}
+      - name: Build uqctl
+        if: steps.uqctl.outputs.cache-hit != 'true'
+        run: cargo install --locked --git https://github.com/asafelobotomy/uq --tag "$UQ_TAG" uqctl --root "$HOME/.uq"
+      # `--no-programs` skips only the "program exists" check: crumbs isn't installed here. Paths
+      # and everything else are still checked.
+      - name: uQ integration check
+        run: ~/.uq/bin/uqctl integrations check --no-programs uq/
+
   arch:
     runs-on: ubuntu-latest
     container: archlinux:latest

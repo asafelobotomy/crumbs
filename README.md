@@ -254,6 +254,17 @@ A `..` in a `protect`, `exclude`, `appimage_dirs` or `project_dirs` entry is res
 
 Exit codes: 0 ok, 1 error, 2 usage error or ambiguous app, 3 partial failure (including a privileged run that stopped part-way), 4 aborted by the user, 5 administrator rights needed but unavailable or denied.
 
+## uQ desktop
+
+On the [uQ](https://github.com/asafelobotomy/uq) desktop, crumBS adds two things to uQ (`uq/`; the `crum-bs` and `crum-bs-bin` packages install them, the `.deb` and `.rpm` do not install the page because uQ runs on Arch only):
+
+- **Uninstall…** in the right-click menu of every app in the launcher.
+- **Storage and cleanup** under Apps in uQ Settings. It shows the space you can free (your own files first, the system only when you ask), the leftovers of removed apps, your recent cleanups with a way to put one back, and your apps by size with **Uninstall…**. It only runs the `crumbs` commands above with `--json`, so it does exactly what they do: trash-backed categories go to the trash and can be put back, the permanent ones say so first, system cleanups ask for your password, and every change asks before it starts.
+
+The page never forces anything. It passes neither `--force`, `--desktop`, `--permanent` nor `-i`, so crumBS's own refusals (an app that is running, a package that is part of uQ) are shown as they are, and uQ's own packages are listed as "Part of uQ" with no Uninstall button. AppImages that appOFholding keeps are managed there, as everywhere in crumBS.
+
+To try the page without installing the package, from a checkout: `uq-settings --plugin-dir uq/pages` (it needs `/usr/bin/crumbs`, so install crumBS first). `uq/README.md` has the details and how the page is tested.
+
 ## Using crumbs from an AI agent
 
 `crumbs mcp` is an [MCP](https://modelcontextprotocol.io) server over stdio. An MCP client such as Claude Code or Claude Desktop starts it, and the agent can then look at your machine and prepare clean-ups with the same data the CLI shows. **Nothing changes until you say yes, in the client, to the exact plan.**

@@ -65,6 +65,10 @@ grep -q "$bin_sum" dist/aur/crum-bs-bin/PKGBUILD || fail "crum-bs-bin lacks the 
 # is of the very bytes users fetch (GitHub's own tag tarballs differ).
 tar_sum=$(sha256sum "dist/crumbs-$VERSION.tar.gz" | cut -d' ' -f1)
 grep -q "sha256sums=('$tar_sum')" dist/aur/crum-bs/PKGBUILD || fail "crum-bs lacks the source tarball's sum"
+# crum-bs-bin takes its licence and uQ files from that same tarball.
+grep -q "sha256sums=('$tar_sum')" dist/aur/crum-bs-bin/PKGBUILD || fail "crum-bs-bin lacks the source tarball's sum"
+grep -q "source = crumbs-$VERSION.tar.gz::https://github.com/asafelobotomy/crumbs/releases/download/v$VERSION/crumbs-$VERSION.tar.gz" dist/aur/crum-bs-bin/.SRCINFO ||
+    fail "crum-bs-bin does not download the release's source tarball"
 grep -q "source = https://github.com/asafelobotomy/crumbs/releases/download/v$VERSION/crumbs-$VERSION.tar.gz" dist/aur/crum-bs/.SRCINFO ||
     fail "crum-bs does not download the release's source tarball"
 tar -tzf "dist/crumbs-$VERSION.tar.gz" | grep -qx "crumbs-$VERSION/Cargo.lock" || fail "the source tarball lacks crumbs-$VERSION/Cargo.lock"

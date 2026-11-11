@@ -8,17 +8,24 @@ pkgdesc="Find and remove app leftovers, caches and system bloat (static binary)"
 arch=('x86_64')
 url="https://github.com/asafelobotomy/crumbs"
 license=('GPL-3.0-or-later')
+optdepends=('uq: the Storage and cleanup page in Settings and an "Uninstall…" entry in the app menus')
 # Installs /usr/bin/crumbs, as does the unrelated AUR package `crumbs`.
 provides=("crum-bs=$pkgver")
 conflicts=('crum-bs' 'crumbs')
 # The release binary is already stripped, and static.
 options=('!strip' '!debug')
-source=("$_pkgname-$pkgver-LICENSE::$url/releases/download/v$pkgver/LICENSE")
-source_x86_64=("$_pkgname-$pkgver::$url/releases/download/v$pkgver/$_pkgname-$pkgver-$CARCH-linux-musl")
+# The source tarball (the one crum-bs builds) carries the licence and the uQ files. makepkg
+# unpacks it to $_pkgname-$pkgver/, so the binary has a different name.
+source=("$_pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/$_pkgname-$pkgver.tar.gz")
+source_x86_64=("$_pkgname-$pkgver-$CARCH-linux-musl::$url/releases/download/v$pkgver/$_pkgname-$pkgver-$CARCH-linux-musl")
 sha256sums=('SKIP') # filled in by scripts/release.sh
 sha256sums_x86_64=('SKIP') # filled in by scripts/release.sh
 
 package() {
-    install -Dm755 "$_pkgname-$pkgver" "$pkgdir/usr/bin/$_pkgname"
-    install -Dm644 "$_pkgname-$pkgver-LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm755 "$_pkgname-$pkgver-$CARCH-linux-musl" "$pkgdir/usr/bin/$_pkgname"
+    cd "$_pkgname-$pkgver"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    # uQ integration (inert without uQ): uq/README.md says what each file adds.
+    install -Dm644 -t "$pkgdir/usr/share/uq/launcher/actions" uq/launcher/actions/*.appaction
+    install -Dm644 -t "$pkgdir/usr/share/uq/settings/pages/crumbs" uq/pages/crumbs/*
 }

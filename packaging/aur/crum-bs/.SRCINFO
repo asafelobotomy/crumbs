@@ -8,6 +8,7 @@ pkgbase = crum-bs
 	makedepends = cargo
 	depends = gcc-libs
 	depends = glibc
+	optdepends = uq: the Storage and cleanup page in Settings and an "Uninstall…" entry in the app menus
 	conflicts = crumbs
 	options = !lto
 	source = https://github.com/asafelobotomy/crumbs/releases/download/v0.4.0/crumbs-0.4.0.tar.gz
