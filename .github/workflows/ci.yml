@@ -97,6 +97,15 @@ jobs:
             case "$rc" in 0|3) ;; *) echo "unexpected exit code $rc"; exit 1 ;; esac
             echo "$out" | jq -e '.schema_version == 1'
           done
+      # The .SRCINFO files are edited by hand at release time; makepkg must agree with them.
+      - name: AUR .SRCINFO matches its PKGBUILD
+        run: |
+          useradd -m builder
+          for d in packaging/aur/*/; do
+            cp -r "$d" /tmp/srcinfo && chown -R builder /tmp/srcinfo
+            su builder -c 'cd /tmp/srcinfo && makepkg --printsrcinfo' | diff -u "$d.SRCINFO" -
+            rm -rf /tmp/srcinfo
+          done
 
   # Builds, tests, smoke-tests and runs a real `crumbs uninstall sl` inside
   # each distro's container (scripts/distro-check.sh; run locally with podman).
