@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.0
+
 - **uQ Settings page:** Storage and cleanup (`uq/pages/crumbs/`), under Apps in uQ Settings: space you can free (user files, and the system on request) with a Clean up button per category, leftovers of removed apps, recent cleanups with Put back, and your apps by size with Uninstall…. It runs the existing `crumbs … --json` commands, asks before every change, never forces one, and shows crumBS's own refusals as they are. The `crum-bs` and `crum-bs-bin` packages install it (the `.deb` and `.rpm` do not: uQ is Arch-only); `crum-bs-bin` now also installs the "Uninstall…" action, and builds from the release's source tarball for that.
 - **`uninstall --desktop-id <id>`:** removes the app that owns a launcher, named by its desktop file id (`firefox.desktop`) and nothing else. An id that is not a plain desktop file id, or that no app or several apps own, is refused with exit 2. The usual preview, `Proceed?` and the second question for uQ's own packages still apply.
 - **uQ:** an "Uninstall…" app action (`uq/launcher/actions/crumbs-uninstall.appaction`) on every app row in uQ's launcher, running `crumbs uninstall --desktop-id` in a terminal. The `crum-bs` package and the `.deb` install it to `/usr/share/uq/launcher/actions/`.
