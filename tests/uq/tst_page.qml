@@ -107,6 +107,8 @@ Item {
         function init() {
             fake.calls = [];
             fake.confirms = true;
+            fake.hold = [];
+            fake.held = {};
             fake.commands = root.defaults();
             loader.source = "";
             loader.source = root.pageUrl;
@@ -276,27 +278,9 @@ Item {
 
         function test_one_write_at_a_time() {
             tryVerify(root.shows("App caches"));
-            let held = null;
-            const real = fake.ctx;
-            loader.item.ctx = {
-                theme: real.theme,
-                command: {
-                    run: (id, args, callback) => {
-                        if (id === "clean") {
-                            fake.calls.push(["run", id, args]);
-                            held = callback;
-                        } else {
-                            real.command.run(id, args, callback);
-                        }
-                    },
-                    watch: real.command.watch,
-                    unwatch: real.command.unwatch
-                },
-                dbus: real.dbus,
-                openApp: real.openApp
-            };
+            fake.hold = ["clean"];
             rowButton("App caches", "Clean up").clicked();
-            verify(held !== null, "the cleanup is running");
+            verify(fake.held.clean !== undefined, "the cleanup is running");
             verify(root.findLabel(loader.item, "Working…") !== null);
             const buttons = root.findButtons(loader.item, "Clean up");
             verify(buttons.length > 1);
@@ -305,10 +289,29 @@ Item {
             // a second click, if it got through, must not start a second write
             rowButton("Thumbnails", "Clean up").clicked();
             compare(root.runs("clean").length, 1);
-            held(root.answer("clean-ok"));
+            fake.held.clean(root.answer("clean-ok"));
             tryVerify(root.idle);
             tryVerify(root.shows("Freed 1.2 GB"));
             verify(rowButton("Thumbnails", "Clean up").enabled);
+        }
+
+        function test_a_clean_that_ends_during_a_scan_scans_again() {
+            tryVerify(root.shows("App caches"));
+            tryVerify(root.idle);
+            const before = root.runs("scan").length;
+            fake.hold = ["scan", "clean"];
+            rowButton("App caches", "Clean up").clicked();
+            verify(fake.held.clean !== undefined, "the cleanup is running");
+            root.findButton(loader.item, "Refresh").clicked();
+            verify(fake.held.scan !== undefined, "a scan started before the cleanup ended");
+            const early = fake.held.scan;
+            fake.held.clean(root.answer("clean-ok"));
+            // the re-read after the cleanup waits for the scan in flight, then scans once more
+            wait(50);
+            compare(root.runs("scan").length, before + 1);
+            fake.hold = [];
+            early(root.answer("scan"));
+            tryVerify(() => root.runs("scan").length === before + 2);
         }
 
         function test_history_put_back() {

@@ -25,6 +25,10 @@ QtObject {
     /// What the page asked for, in order: ["run", id, args], ["call", method, args, target],
     /// ["get", property, target], ["openApp", desktopId], ["watch", id], ["unwatch", handle].
     property var calls: []
+    /// Command ids whose answers are held back: run() keeps the callback in `held[id]` (the
+    /// newest one) for the test to call when it likes, to test what happens meanwhile.
+    property var hold: []
+    property var held: ({})
     /// handle -> {id, callback} for ctx.command.watch; change(id) runs them again.
     property var watches: ({})
     property int nextWatch: 0
@@ -52,6 +56,10 @@ QtObject {
         fake.calls.push(["run", id, args || []]);
         if (fake.confirmed.indexOf(id) >= 0 && !fake.confirms)
             return answer(callback, { error: "Cancelled", cancelled: true });
+        if (fake.hold.indexOf(id) >= 0) {
+            fake.held[id] = callback;
+            return;
+        }
         answer(callback, pick(fake.commands, id, args || [], { error: "unknown command" }));
     }
 

@@ -10,16 +10,27 @@ ColumnLayout {
 
     property var host
     property bool loading: false
+    // A refresh asked for while a scan runs (say, after a clean) scans once more when it ends,
+    // so the sizes shown never come from a scan that started before the change.
+    property bool again: false
     property var view: Logic.emptyView()
 
     function refresh() {
-        if (!section.host || !section.host.ctx || section.loading)
+        if (!section.host || !section.host.ctx)
             return;
+        if (section.loading) {
+            section.again = true;
+            return;
+        }
         section.loading = true;
         section.host.ctx.command.run("scan", [], result => {
             section.loading = false;
             if (!Logic.isCancelled(result))
                 section.view = Logic.spaceView(result);
+            if (section.again) {
+                section.again = false;
+                section.refresh();
+            }
         });
     }
 
