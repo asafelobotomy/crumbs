@@ -60,7 +60,7 @@ The page says `uq_api = 2`, so it has the tabs and cards of Settings' own pages;
   components (`SettingsPage`, `SettingsTab`, `SettingsCard`, `HelpTip`, `UqAppIcon`) from uq#69.
 - `scripts/test-packaging.sh uq_files` runs each AUR `package()` in a scratch tree and checks that what it
   installs under `usr/share/uq` equals this folder; `scripts/test-packaging.sh aur` checks the built packages.
-- `uqctl integrations check --no-programs uq/` (CI builds it from the uQ commit that adds `uq_api = 2`, until a release has it) checks the folder.
+- `uqctl integrations check --no-programs uq/` (CI builds it from the uQ main commit that added `uq_api = 2`, until a release has it) checks the folder.
 - `cargo test --workspace`: the lookup (`crumbs-core`, `inventory/tests.rs`) and the command
   (`crumbs-cli/tests/cli.rs`, `uninstall_by_desktop_id_*`).
 - Without `--no-programs`, `uqctl integrations check uq/` also reports that `/usr/bin/crumbs` does not exist
