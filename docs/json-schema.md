@@ -103,6 +103,7 @@ Commands that take an app accept an ID, a name, a desktop ID or a display name. 
 | `wm_classes` | array of string |
 | `has_gui` | boolean |
 | `part_of` | `"uQ"` for a package that is part of the uQ desktop, else null |
+| `icon` | string or null: the icon name or absolute path from the first of the app's launchers that sets `Icon=`; a Flatpak app with none falls back to its `rdns_id`. Look it up in the icon theme; crumbs does not check that it exists. |
 
 **Finding** (a leftover or an orphan)
 
@@ -129,7 +130,7 @@ Commands that take an app accept an ID, a name, a desktop ID or a display name. 
 | `total_size` | number | Sum of the actions' `size`. |
 | `notes` | array of string | For example `the app itself stays installed (leftovers only)`. |
 
-Each action is `{ "action", "size", "reason" }`, plus two optional fields. `action` is tagged by `type`:
+Each action is `{ "action", "size", "reason" }`, plus three optional fields. `action` is tagged by `type`:
 
 - `trash` and `delete` carry `path`;
 - `edit-file` carries `path` and `remove_lines` (array of string; the file is edited and a backup is kept next to it);
@@ -149,6 +150,7 @@ The optional fields are left out when they have no value:
 |---|---|---|
 | `scope` | string | Where the path may lie: `user-temp` (a direct child of `/tmp`), `home-trash` (an entry of the home trash) or `system` (a root-owned system file, deleted as root in the privileged batch; only `coredumps` uses it) or `system-tree` (a directory tree or file directly under `/etc` or `/opt`, deleted as root with `rm -rf --one-file-system`; see below). Absent means the home directory, as in M2; always absent on an action without a path. |
 | `depends_on` | number | Index of an earlier action in the same plan. If that action did not succeed, this one is skipped. The `.trashinfo` file of a trashed entry depends on the entry itself. |
+| `group` | string | `uninstall` and `orphans --clean` only: what the action removes, for a preview that sorts them. `app` (the app itself: its package, Flatpak, snap, AppImage or unmanaged files), `data` (data, state, Flatpak and Snap data, folders in home, `/opt`), `settings` (config, dot files, `/etc`), `cache`, or `launchers` (autostart, desktop entries, icons, systemd units, file-type associations). Absent on `clean` plans. |
 
 ## `apps list`
 
@@ -1412,6 +1414,41 @@ The history entry that running the Flatpak command leaves (see `history`):
   "size": 0,
   "time": "2026-11-08T14:52:51.98359927Z",
   "trashed": null
+}
+```
+
+## `config`
+
+`config show` lists the settings in effect; `config set|add|remove|reset` change `~/.config/crumbs/config.toml` one key at a time and then show the result. `data`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | string | The config file (`~/` for the home directory). |
+| `values` | object | Every key below with the value in effect (the default when the file leaves it out): path lists and category lists as arrays of string, `journal_max` as a string, the rest as numbers. |
+| `keys` | array | `{ "key", "kind" }` for each key `config` can change. `kind` is `paths`, `categories`, `days` (whole number, at least 1), `count` (whole number, at least 0) or `size` (digits and an optional `K`, `M`, `G` or `T`, above 0). |
+| `changed` | boolean | Present on `set`, `add`, `remove` and `reset`: whether the file changed. Adding an entry that is already there, or removing one that is not, changes nothing. |
+
+The keys are `protect`, `exclude`, `appimage_dirs`, `project_dirs` (paths; each entry starts with `/` or `~/`), `categories_off`, `categories_on` (categories), `temp_age_days`, `log_age_days`, `build_age_days`, `snapshots_keep` (days), `pkg_cache_keep` (count) and `journal_max` (size). `set` takes a number or size key, `add` and `remove` a list key, `reset` any key or `all`. A value that loading the file would drop or replace with a warning is refused with exit 1 and the error envelope (`config change: ...`); nothing is written then. Keys crumbs does not know are kept; comments in the file are not.
+
+```json
+{
+  "schema_version": 1,
+  "command": "config set",
+  "data": {
+    "changed": true,
+    "keys": [
+      { "key": "protect", "kind": "paths" }
+      // ...
+    ],
+    "path": "~/.config/crumbs/config.toml",
+    "values": {
+      "build_age_days": 7,
+      "categories_off": ["dev-cache"],
+      "temp_age_days": 3
+      // ...
+    }
+  },
+  "errors": []
 }
 ```
 

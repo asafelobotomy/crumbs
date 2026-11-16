@@ -60,6 +60,9 @@ enum Command {
     Scan(cmd::scan::ScanArgs),
     /// Free reclaimable space (to the trash by default)
     Clean(cmd::clean::CleanArgs),
+    /// Show or change the settings in ~/.config/crumbs/config.toml
+    #[command(subcommand)]
+    Config(cmd::config::ConfigCmd),
     /// Check which sources and tools crumbs can use
     Doctor {
         /// Machine-readable output
@@ -101,6 +104,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Scan(args) => cmd::scan::run(&env, &args),
         Command::Clean(args) => cmd::clean::run(&env, &args),
         Command::Doctor { json } => cmd::doctor::run(&env, json),
+        Command::Config(c) => cmd::config::run(c, &env),
         #[cfg(feature = "mcp")]
         Command::Mcp => unreachable!("served above"),
     }
@@ -118,6 +122,7 @@ fn json_command(command: &Command) -> Option<&'static str> {
         Command::Scan(a) if a.json => Some("scan"),
         Command::Clean(a) if a.act.json => Some("clean"),
         Command::Doctor { json: true } => Some("doctor"),
+        Command::Config(c) if c.json() => Some(c.json_name()),
         _ => None,
     }
 }

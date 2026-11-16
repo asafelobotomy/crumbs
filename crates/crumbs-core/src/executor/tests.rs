@@ -20,6 +20,7 @@ fn planned(env: &Env, action: Action) -> PlannedAction {
         _ => disk_usage(env, &p).bytes,
     };
     PlannedAction {
+        group: None,
         size,
         fingerprint: fingerprint(env, &p).unwrap(),
         scope: Scope::Home,
@@ -714,6 +715,7 @@ fn env_dir(t: &FixtureTree, rel: &str) -> PathBuf {
 
 fn command_plan(program: &str, args: &[&str]) -> Plan {
     plan_of(vec![PlannedAction {
+        group: None,
         action: Action::UserCommand {
             program: program.into(),
             args: args.iter().map(|a| (*a).to_string()).collect(),
@@ -915,6 +917,7 @@ fn step_count(script: &[u8]) -> usize {
 
 fn unfingerprinted(action: Action) -> PlannedAction {
     PlannedAction {
+        group: None,
         action,
         size: 0,
         fingerprint: Fingerprint {
@@ -968,6 +971,7 @@ fn coredump_dir(t: &FixtureTree) {
 fn core_delete(env: &Env, name: &str) -> PlannedAction {
     let p = PathBuf::from(format!("/var/lib/systemd/coredump/{name}"));
     PlannedAction {
+        group: None,
         size: disk_usage(env, &p).bytes,
         fingerprint: fingerprint(env, &p).unwrap(),
         action: Action::Delete { path: p },

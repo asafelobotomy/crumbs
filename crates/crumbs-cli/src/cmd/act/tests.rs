@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 fn action(a: Action, size: u64) -> PlannedAction {
     PlannedAction {
+        group: None,
         action: a,
         size,
         fingerprint: Fingerprint {

@@ -3729,3 +3729,57 @@ fn uninstall_by_desktop_id_keeps_uq_protection() {
     assert!(pkg_present(&t, "scdr-0.2.0-8"));
     assert!(!real(&t, "/pacman-args").exists());
 }
+
+#[test]
+fn apps_list_json_has_icon_from_desktop_entry() {
+    let t = fixture(FLATPAK_OK);
+    t.desktop(
+        "/usr/share/applications/firefox.desktop",
+        "[Desktop Entry]\nType=Application\nName=Firefox\nIcon=firefox\nExec=/usr/bin/firefox %u\n",
+    );
+    let v = stdout_json(crumbs(&t).args(["apps", "list", "--json"]));
+    let apps = v["data"]["apps"].as_array().unwrap();
+    let firefox = apps.iter().find(|a| a["name"] == "firefox").unwrap();
+    assert_eq!(firefox["icon"], "firefox", "{firefox}");
+    let xemu = apps
+        .iter()
+        .find(|a| a["id"].as_str().unwrap().contains("app.xemu.xemu"))
+        .unwrap();
+    assert_eq!(
+        xemu["icon"], "app.xemu.xemu",
+        "a Flatpak falls back to its id"
+    );
+}
+
+#[test]
+fn config_set_then_show_json() {
+    let t = fixture(FLATPAK_OK);
+    let v = stdout_json(crumbs(&t).args(["config", "set", "temp_age_days", "3", "--json"]));
+    assert_eq!(v["command"], "config set");
+    assert_eq!(v["data"]["changed"], true);
+    assert_eq!(v["data"]["values"]["temp_age_days"], 3);
+    let v = stdout_json(crumbs(&t).args(["config", "add", "protect", "~/Games", "--json"]));
+    assert_eq!(v["data"]["changed"], true);
+    let v = stdout_json(crumbs(&t).args(["config", "show", "--json"]));
+    assert_eq!(v["command"], "config show");
+    assert!(v["data"].get("changed").is_none());
+    assert_eq!(v["data"]["values"]["temp_age_days"], 3);
+    assert_eq!(v["data"]["values"]["protect"][0], "~/Games");
+    assert_eq!(v["data"]["keys"].as_array().unwrap().len(), 12);
+    crumbs(&t)
+        .args(["config", "reset", "all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Saved."));
+}
+
+#[test]
+fn config_refuses_bad_value() {
+    let t = fixture(FLATPAK_OK);
+    let out = crumbs(&t)
+        .args(["config", "set", "temp_age_days", "0"])
+        .output()
+        .unwrap();
+    assert_ne!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("at least 1"));
+}

@@ -91,6 +91,11 @@ pub struct App {
     pub exec_names: Vec<String>,
     pub wm_classes: Vec<String>,
     pub has_gui: bool,
+    /// The icon of the app's first launcher that names one (`Icon` in its
+    /// desktop entry): a theme icon name or an absolute path. A Flatpak
+    /// without one falls back to its rDNS id, which Flatpak exports icons
+    /// under.
+    pub icon: Option<String>,
     /// The desktop this package is a part of (`uQ`), if any. Removing it
     /// takes an extra confirmation; see [`desktop_of`].
     pub part_of: Option<String>,
@@ -121,6 +126,7 @@ impl App {
             exec_names: Vec::new(),
             wm_classes: Vec::new(),
             has_gui: false,
+            icon: None,
             part_of: desktop_of(source, name).map(str::to_string),
             program: None,
             program_link: None,

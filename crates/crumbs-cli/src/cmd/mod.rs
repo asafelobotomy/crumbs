@@ -2,6 +2,7 @@ pub mod act;
 pub mod apps;
 pub mod build;
 pub mod clean;
+pub mod config;
 pub mod context;
 pub mod doctor;
 pub mod history;

@@ -360,5 +360,7 @@ fn segment_match(p: &[u8], s: &[u8]) -> bool {
     p[pi..].iter().all(|&b| b == b'*')
 }
 
+pub mod edit;
+
 #[cfg(test)]
 mod tests;

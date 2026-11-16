@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **`crumbs config`:** `show`, `set`, `add`, `remove` and `reset` read and change `~/.config/crumbs/config.toml` one key at a time, refusing a value the config would not accept before anything is written. With `--json` the result lists every value in effect and every key with the kind of value it takes, so uQ's Storage and cleanup page can offer the settings.
+- **App icons:** apps in `apps list` and `apps show` (JSON) carry `icon`, the `Icon=` of their launcher (a Flatpak app's id when it has none).
+- **Uninstall groups:** each action of an `uninstall` or `orphans --clean` plan carries `group` in JSON (`app`, `data`, `settings`, `cache` or `launchers`), so a preview can say plainly what goes.
+
 ## 0.5.0
 
 - **uQ Settings page:** Storage and cleanup (`uq/pages/crumbs/`), under Apps in uQ Settings: space you can free (user files, and the system on request) with a Clean up button per category, leftovers of removed apps, recent cleanups with Put back, and your apps by size with Uninstall…. It runs the existing `crumbs … --json` commands, asks before every change, never forces one, and shows crumBS's own refusals as they are. The `crum-bs` and `crum-bs-bin` packages install it (the `.deb` and `.rpm` do not: uQ is Arch-only); `crum-bs-bin` now also installs the "Uninstall…" action, and builds from the release's source tarball for that.

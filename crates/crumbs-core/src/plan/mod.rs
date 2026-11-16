@@ -91,13 +91,57 @@ pub struct PlannedAction {
     /// shows `-` and its total `+ unknown`. Not part of the JSON.
     pub size_known: bool,
     pub reason: String,
+    /// What part of the app an uninstall action removes, for a front end
+    /// that groups the preview; `None` (left out of the JSON) for cleanups.
+    pub group: Option<Group>,
+}
+
+/// The part of an app an uninstall action removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Group {
+    /// The app itself: its package, AppImage file or program.
+    App,
+    /// Documents, game libraries, databases and other state it keeps.
+    Data,
+    /// Its settings.
+    Settings,
+    /// Caches it rebuilds on demand.
+    Cache,
+    /// Launchers, icons, autostart entries, file-type associations, units.
+    Launchers,
+}
+
+impl Group {
+    pub fn of(kind: FindingKind) -> Group {
+        match kind {
+            FindingKind::Config | FindingKind::DotFile | FindingKind::SystemConfig => {
+                Group::Settings
+            }
+            FindingKind::Cache => Group::Cache,
+            FindingKind::Data
+            | FindingKind::State
+            | FindingKind::DotDir
+            | FindingKind::FlatpakData
+            | FindingKind::SnapData
+            | FindingKind::SystemData => Group::Data,
+            FindingKind::Autostart
+            | FindingKind::DesktopEntry
+            | FindingKind::Icon
+            | FindingKind::SystemdUnit
+            | FindingKind::MimeAssoc => Group::Launchers,
+        }
+    }
 }
 
 impl Serialize for PlannedAction {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let with_scope = self.action.path().is_some() && !self.scope.is_home();
-        let fields = 3 + usize::from(with_scope) + usize::from(self.depends_on.is_some());
+        let fields = 3
+            + usize::from(with_scope)
+            + usize::from(self.depends_on.is_some())
+            + usize::from(self.group.is_some());
         let mut st = s.serialize_struct("PlannedAction", fields)?;
         st.serialize_field("action", &self.action)?;
         st.serialize_field("size", &self.size)?;
@@ -108,6 +152,9 @@ impl Serialize for PlannedAction {
             st.serialize_field("depends_on", &d)?;
         }
         st.serialize_field("reason", &self.reason)?;
+        if let Some(g) = self.group {
+            st.serialize_field("group", &g)?;
+        }
         st.end()
     }
 }
@@ -198,6 +245,7 @@ pub fn build_plan_unmanaged(
                 remove(t.path.clone(), opts)
             };
             actions.push(PlannedAction {
+                group: Some(Group::App),
                 action,
                 size: t.size.bytes,
                 fingerprint: t.fingerprint,
@@ -209,6 +257,7 @@ pub fn build_plan_unmanaged(
             });
             if let Some((link, fingerprint)) = &t.home_link {
                 actions.push(PlannedAction {
+                    group: Some(Group::App),
                     action: remove(link.clone(), opts),
                     size: 0,
                     fingerprint: *fingerprint,
@@ -238,6 +287,7 @@ pub fn build_plan_unmanaged(
             })?;
             let fingerprint = safety::fingerprint(env, &location)?;
             actions.push(PlannedAction {
+                group: Some(Group::App),
                 size: disk_usage(env, &location).bytes,
                 action: remove(location.clone(), opts),
                 fingerprint,
@@ -265,6 +315,7 @@ pub fn build_plan_unmanaged(
                 notes.push(NOTE_SYSTEM_DELETE.into());
             }
             actions.push(PlannedAction {
+                group: Some(Group::of(f.kind)),
                 action: Action::Delete {
                     path: f.path.clone(),
                 },
@@ -289,6 +340,7 @@ pub fn build_plan_unmanaged(
             (remove(f.path.clone(), opts), f.size.bytes)
         };
         actions.push(PlannedAction {
+            group: Some(Group::of(f.kind)),
             action,
             size,
             fingerprint: f.fingerprint,

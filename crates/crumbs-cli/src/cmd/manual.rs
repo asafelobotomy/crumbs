@@ -146,6 +146,7 @@ mod tests {
 
     fn planned(action: Action, scope: Scope) -> PlannedAction {
         PlannedAction {
+            group: None,
             action,
             size: 0,
             fingerprint: Fingerprint {

@@ -1,6 +1,6 @@
 //! Whole-system app discovery across all sources.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
@@ -160,6 +160,7 @@ pub fn discover(
         });
     }
 
+    attach_icons(&mut apps, &desktop);
     apps.sort_by(|a, b| {
         a.display_name
             .to_lowercase()
@@ -171,6 +172,26 @@ pub fn discover(
         statuses,
         errors,
         owned: OwnedIndex::new(owned, owned_dirs, package_db_listed),
+    }
+}
+
+/// Sets each app's `icon` from its launchers, in `desktop_ids` order; a
+/// Flatpak with no launcher icon gets its rDNS id.
+fn attach_icons(apps: &mut [App], desktop: &[crate::desktop::DesktopEntry]) {
+    let by_id: HashMap<&str, &str> = desktop
+        .iter()
+        .filter_map(|e| Some((e.id.as_str(), e.icon.as_deref()?)))
+        .collect();
+    for app in apps {
+        app.icon = app
+            .desktop_ids
+            .iter()
+            .find_map(|id| by_id.get(id.as_str()).map(|s| s.to_string()))
+            .or_else(|| {
+                (app.source == SourceKind::Flatpak)
+                    .then(|| app.rdns_id.clone())
+                    .flatten()
+            });
     }
 }
 

@@ -10,6 +10,8 @@ pub struct DesktopEntry {
     pub id: String,
     pub path: PathBuf,
     pub name: Option<String>,
+    /// `Icon`: a theme icon name or an absolute path.
+    pub icon: Option<String>,
     pub exec: Option<String>,
     pub exec_program: Option<String>,
     pub exec_args: Vec<String>,
@@ -70,6 +72,7 @@ pub fn parse_desktop(id: &str, path: &Path, bytes: &[u8]) -> DesktopEntry {
         id: id.to_string(),
         path: path.to_path_buf(),
         name: get("Name"),
+        icon: get("Icon").filter(|i| !i.is_empty()),
         exec,
         exec_program,
         exec_args,

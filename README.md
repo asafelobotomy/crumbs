@@ -37,6 +37,7 @@ cargo build --release
 - `crumbs restore <batch | entry | path>... [--dry-run] [--json]` puts items back. Restoring a batch skips what was permanently deleted, run as a command or removed as a package; naming such an entry by its ID says why it cannot come back.
 - `crumbs scan [--category <name>]... [--details] [--user | --system] [--json]` lists reclaimable space by category. `--system` lists the system categories instead. It only reads: it changes nothing, needs no administrator rights and writes no history. With `--details` every item is listed. Naming categories scans exactly those, even ones switched off in the config.
 - `crumbs clean [<category>...] [-i] [--exclude <pattern>]... [--dry-run] [--yes] [--permanent] [--force] [--user | --system] [--json]` frees the space `scan` found. With no category it cleans every enabled user category; `--system` cleans the system categories instead. Naming categories cleans exactly those, and naming a system category implies `--system`. `-i` opens a checklist over all items. `--exclude` leaves out what a pattern matches for this run, read exactly as `exclude` in the config (repeatable; it starts with `/` or `~/`), for example `crumbs clean cache --exclude '~/.cache/my-project'`. `--user` with `--system`, a category of the other kind, or an `--exclude` pattern that does not start with `/` or `~/`, is a usage error (exit 2).
+- `crumbs config show [--json]` lists the settings in effect and where they come from; `crumbs config set <key> <value>`, `config add|remove <key> <entry>` and `config reset <key | all>` change one key of the config file (see "Configuration"). A value the config would not accept is refused and nothing is written.
 - `crumbs doctor [--json]` reports which sources and tools crumbs can use.
 - `crumbs mcp` serves crumbs to an AI agent over the Model Context Protocol on stdin and stdout (see "Using crumbs from an AI agent").
 
@@ -251,6 +252,8 @@ These must be at least 1; a smaller value is replaced by 1 with a warning (`conf
 - `journal_max = "500M"`: the size `journal` vacuums the systemd journal down to; `journal` lists nothing while the journal is at or below it. Digits with an optional `K`, `M`, `G` or `T` (`^[0-9]+[KMGT]?$`), above 0; anything else is replaced by `500M` with a warning.
 
 A `..` in a `protect`, `exclude`, `appimage_dirs` or `project_dirs` entry is resolved as the system would: `/../x` is `/x`.
+
+`crumbs config` changes these one at a time, for example `crumbs config set temp_age_days 3`, `crumbs config add protect ~/Games` or `crumbs config reset all`. It checks the value first, more strictly than loading does, keeps keys it does not know, and rewrites the file whole (comments are not kept). Adding to `categories_off` when the file does not set it keeps the default `dev-cache`.
 
 Exit codes: 0 ok, 1 error, 2 usage error or ambiguous app, 3 partial failure (including a privileged run that stopped part-way), 4 aborted by the user, 5 administrator rights needed but unavailable or denied.
 
