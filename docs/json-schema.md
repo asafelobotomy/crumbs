@@ -281,7 +281,7 @@ The optional fields are left out when they have no value:
   "schema_version": 1,
   "command": "doctor",
   "data": {
-    "crumbs_version": "0.5.0",
+    "crumbs_version": "0.6.0",
     "distro": {
       "id": "unknown",
       "id_like": [],

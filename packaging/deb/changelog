@@ -1,3 +1,11 @@
+crumbs (0.6.0) unstable; urgency=medium
+
+  * crumbs config, app icons and uninstall groups in JSON, and a rebuilt
+    Storage and cleanup page for uQ. See
+    https://github.com/asafelobotomy/crumbs/blob/main/CHANGELOG.md.
+
+ -- asafelobotomy <213836723+asafelobotomy@users.noreply.github.com>  Mon, 16 Nov 2026 12:00:00 +0000
+
 crumbs (0.5.0) unstable; urgency=medium
 
   * uninstall --desktop-id, and uQ's "Uninstall..." app action. See

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.0
+
 - **`crumbs config`:** `show`, `set`, `add`, `remove` and `reset` read and change `~/.config/crumbs/config.toml` one key at a time, refusing a value the config would not accept before anything is written. With `--json` the result lists every value in effect and every key with the kind of value it takes, so uQ's Storage and cleanup page can offer the settings.
 - **App icons:** apps in `apps list` and `apps show` (JSON) carry `icon`, the `Icon=` of their launcher (a Flatpak app's id when it has none).
 - **uQ Settings page, rebuilt:** Storage and cleanup now has the tabs and cards of Settings' own pages (Overview, Apps, Leftovers, History, Preferences) and needs a uQ with `uq_api = 2`. Every long read shows a progress bar; the space you can free shows a share bar per category; apps show their icons. Uninstall… first shows what would be removed, grouped and saying what goes to the trash and what goes for good, and lets you keep your settings and data or remove only the leftovers. New: system leftovers in `/opt` (deleted with your password), and a Preferences tab for crumBS's own settings through `crumbs config`.

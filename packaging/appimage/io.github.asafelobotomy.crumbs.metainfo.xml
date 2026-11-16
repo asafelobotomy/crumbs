@@ -32,6 +32,11 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.6.0" date="2026-11-16">
+      <description>
+        <p>On the uQ desktop: a rebuilt Storage and cleanup page with tabs, app icons, progress, a preview of everything an uninstall removes, system leftovers and crumBS's settings. New crumbs config command.</p>
+      </description>
+    </release>
     <release version="0.5.0" date="2026-11-12">
       <description>
         <p>On the uQ desktop: a Storage and cleanup page in Settings and an "Uninstall…" entry in the app menus. New uninstall --desktop-id.</p>
