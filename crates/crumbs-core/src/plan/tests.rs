@@ -619,6 +619,7 @@ fn privileged_actions_have_no_path_and_kebab_tags() {
 #[test]
 fn scope_serialised_only_for_paths_outside_home() {
     let pa = |action: Action, scope: Scope| PlannedAction {
+        group: None,
         action,
         size: 0,
         fingerprint: Fingerprint {

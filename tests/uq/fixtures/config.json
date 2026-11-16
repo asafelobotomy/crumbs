@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "command": "config show",
+  "data": {
+    "path": "~/.config/crumbs/config.toml",
+    "values": {
+      "protect": ["~/Games"],
+      "exclude": [],
+      "appimage_dirs": [],
+      "project_dirs": [],
+      "categories_off": ["dev-cache"],
+      "categories_on": [],
+      "temp_age_days": 7,
+      "log_age_days": 14,
+      "build_age_days": 7,
+      "snapshots_keep": 3,
+      "pkg_cache_keep": 2,
+      "journal_max": "500M"
+    },
+    "keys": []
+  },
+  "errors": []
+}

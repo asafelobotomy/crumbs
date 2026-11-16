@@ -14,7 +14,7 @@ Item {
 
     FakeContext {
         id: fake
-        confirmed: ["clean", "clean-for-good", "clean-system", "orphan-trash", "restore", "uninstall"]
+        confirmed: ["clean", "clean-for-good", "clean-system", "orphan-trash", "orphan-delete-system", "restore", "uninstall", "uninstall-keep-data", "uninstall-leftovers"]
     }
 
     Loader {
@@ -45,8 +45,28 @@ Item {
             "clean-system": answer("clean-ok"),
             "orphan-trash": answer("clean-ok"),
             "restore": { code: 0, output: { schema_version: 1, command: "restore", data: { outcomes: [{ entry_id: "1-0", error: null, ok: true, path: "/a" }] }, errors: [] } },
-            "uninstall": answer("clean-ok")
+            "uninstall": answer("clean-ok"),
+            "uninstall-keep-data": answer("clean-ok"),
+            "uninstall-leftovers": answer("clean-ok"),
+            "preview-uninstall": answer("uninstall-preview"),
+            "preview-keep-data": answer("uninstall-preview"),
+            "preview-leftovers": answer("uninstall-preview"),
+            "orphans-system": { code: 0, output: { schema_version: 1, command: "orphans", errors: [], data: { orphans: [
+                { path: "/opt/oldtool", kind: "system-data", scope: "system-tree", confidence: "low", reason: "no package owns it", shared: false, preselected: false, mime_lines: [], size: { bytes: 4096, files: 1, errors: 0 } }] } } },
+            "orphan-delete-system": answer("clean-ok"),
+            "config": answer("config"),
+            "config-set": answer("config"),
+            "config-add": answer("config"),
+            "config-remove": answer("config"),
+            "config-reset": answer("config")
         };
+    }
+
+    /// Shows the tab with this title, as a click on it would.
+    function openTab(title) {
+        const tab = loader.item.tabList.find(t => t.title === title);
+        loader.item.show(tab);
+        return tab;
     }
 
     function all(item, out) {
@@ -102,6 +122,16 @@ Item {
             const button = root.findButton(label.parent, buttonText);
             verify(button !== null, labelText + " has a " + buttonText + " button");
             return button;
+        }
+
+        /// Opens Firefox's uninstall preview, waits for the plan, and presses its Uninstall.
+        function uninstallFirefox() {
+            rowButton("Firefox Web Browser", "Uninstall…").clicked();
+            tryVerify(root.shows("Frees about 362.0 MB"));
+            const row = root.findLabel(loader.item, "Firefox Web Browser").parent.parent;
+            const go = root.findButton(row, "Uninstall");
+            verify(go !== null && go.visible, "the preview has an Uninstall button");
+            go.clicked();
         }
 
         function init() {
@@ -179,9 +209,9 @@ Item {
             const c = root.defaults();
             c["uninstall"] = { code: 1, error: "exit 1: Firefox Web Browser is running", output: root.fixture("uninstall-running") };
             fake.commands = c;
-            root.findButton(loader.item, "List apps").clicked();
+            root.openTab("Apps");
             tryVerify(root.shows("Firefox Web Browser"));
-            rowButton("Firefox Web Browser", "Uninstall…").clicked();
+            uninstallFirefox();
             tryVerify(root.shows("Firefox Web Browser is running (pid 4242); close it first or re-run with --force"));
             compare(root.runs("uninstall"), [["run", "uninstall", ["pacman:firefox"]]]);
             tryVerify(root.idle);
@@ -201,16 +231,16 @@ Item {
             partial.data.report[0].results.push({ action: { path: "/home/user/.mozilla", type: "trash" }, error: "busy", history_id: "1-2", ok: false });
             c["uninstall"] = { code: 3, error: "exit 3: some failed", output: partial };
             fake.commands = c;
-            root.findButton(loader.item, "List apps").clicked();
+            root.openTab("Apps");
             tryVerify(root.shows("Firefox Web Browser"));
-            rowButton("Firefox Web Browser", "Uninstall…").clicked();
+            uninstallFirefox();
             tryVerify(() => root.findLabel(loader.item, "Firefox Web Browser") === null);
             tryVerify(() => root.findLabels(loader.item, "Some items couldn't be removed").length > 0);
             verify(root.findLabels(loader.item, "Some items couldn't be removed").some(l => l.visible), "the message is still shown");
         }
 
         function test_part_of_uq_has_no_button() {
-            root.findButton(loader.item, "List apps").clicked();
+            root.openTab("Apps");
             tryVerify(root.shows("Part of uQ"));
             const label = root.findLabel(loader.item, "Part of uQ");
             verify(root.findButton(label.parent, "Uninstall…") === null || root.findButton(label.parent, "Uninstall…").visible === false);
@@ -218,7 +248,7 @@ Item {
         }
 
         function test_filter_matches_the_name() {
-            root.findButton(loader.item, "List apps").clicked();
+            root.openTab("Apps");
             tryVerify(root.shows("Firefox Web Browser"));
             const field = root.all(loader.item, []).filter(i => i.placeholderText === "Filter by name")[0];
             verify(field !== undefined);
@@ -315,6 +345,7 @@ Item {
         }
 
         function test_history_put_back() {
+            root.openTab("History");
             tryVerify(root.shows("Cleanup"));
             compare(rowButton("Cleanup", "Put back").visible, true);
             compare(root.findButton(root.findLabel(loader.item, "Removed oldtool").parent, "Put back").visible, false);
@@ -333,12 +364,83 @@ Item {
             tryVerify(root.shows("Nothing cleaned up yet."));
         }
 
+        function test_apps_load_when_their_tab_opens() {
+            tryVerify(root.shows("App caches"));
+            compare(root.runs("apps").length, 0);
+            root.openTab("Apps");
+            tryVerify(() => root.runs("apps").length === 1);
+            tryVerify(root.shows("Firefox Web Browser"));
+            const icons = root.all(loader.item, []).filter(i => i.label === "Firefox Web Browser" && i.found !== undefined);
+            compare(icons.length, 1, "the app has an icon");
+            compare(icons[0].name, "firefox");
+            // opening the tab again doesn't list them again
+            root.openTab("Overview");
+            root.openTab("Apps");
+            wait(50);
+            compare(root.runs("apps").length, 1);
+        }
+
+        function test_uninstall_preview_says_what_goes_before_anything_goes() {
+            root.openTab("Apps");
+            tryVerify(root.shows("Firefox Web Browser"));
+            rowButton("Firefox Web Browser", "Uninstall…").clicked();
+            tryVerify(root.shows("Frees about 362.0 MB"));
+            compare(root.runs("preview-uninstall"), [["run", "preview-uninstall", ["pacman:firefox"]]]);
+            for (const t of ["The app itself", "Your files and data", "Caches", "Menu entries, icons and file types"])
+                verify(root.findLabel(loader.item, t) !== null, t);
+            verify(root.findLabel(loader.item, "Removed for good") !== null);
+            compare(root.runs("uninstall").length, 0, "nothing is removed by looking");
+            // keep settings and data: a new plan, and that choice is what runs
+            const keep = root.all(loader.item, []).filter(i => i.text === "The app and its caches; keep my settings and data" && i.visible)[0];
+            verify(keep !== undefined);
+            keep.clicked();
+            tryVerify(() => root.runs("preview-keep-data").length === 1);
+            tryVerify(root.shows("Frees about 362.0 MB"));
+            const row = root.findLabel(loader.item, "Firefox Web Browser").parent.parent;
+            root.findButton(row, "Uninstall").clicked();
+            tryVerify(root.idle);
+            compare(root.runs("uninstall-keep-data"), [["run", "uninstall-keep-data", ["pacman:firefox"]]]);
+            compare(root.runs("uninstall").length, 0);
+        }
+
+        function test_system_leftovers_are_deleted_only_when_chosen() {
+            root.openTab("Leftovers");
+            tryVerify(() => root.runs("orphans").length === 1, 5000, "user leftovers load with the tab");
+            compare(root.runs("orphans-system").length, 0, "system leftovers wait to be asked");
+            root.findButton(loader.item, "Find system leftovers").clicked();
+            tryVerify(root.shows("/opt/oldtool"));
+            rowButton("/opt/oldtool", "Delete…").clicked();
+            tryVerify(root.idle);
+            compare(root.runs("orphan-delete-system"), [["run", "orphan-delete-system", ["/opt/oldtool"]]]);
+        }
+
+        function test_preferences_follow_the_file_and_change_one_key() {
+            compare(fake.calls.filter(c => c[0] === "watch" && c[1] === "config").length, 0);
+            root.openTab("Preferences");
+            tryVerify(() => fake.calls.some(c => c[0] === "watch" && c[1] === "config"));
+            tryVerify(root.shows("Saved in ~/.config/crumbs/config.toml"));
+            verify(root.findLabel(loader.item, "~/Games") !== null);
+            const devCache = root.all(loader.item, []).filter(i => i.text === "Developer caches" && i.checked !== undefined)[0];
+            verify(devCache !== undefined);
+            compare(devCache.checked, false, "switched off by default");
+            devCache.toggle();
+            devCache.toggled();
+            tryVerify(root.idle);
+            compare(root.runs("config-remove"), [["run", "config-remove", ["categories_off", "dev-cache"]]]);
+            rowButton("~/Games", "Remove").clicked();
+            tryVerify(root.idle);
+            compare(root.runs("config-remove").length, 2);
+            compare(root.runs("config-remove")[1], ["run", "config-remove", ["protect", "~/Games"]]);
+        }
+
         function test_search_highlight_reaches_the_rows() {
             tryVerify(root.shows("App caches"));
             loader.item.highlight = "apps";
             const rows = root.all(loader.item, []).filter(i => i.settingId === "apps");
             compare(rows.length, 1);
             compare(rows[0].flashing, true);
+            loader.item.highlight = "preferences";
+            compare(root.all(loader.item, []).filter(i => i.settingId === "preferences" && i.flashing).length, 1);
         }
     }
 }

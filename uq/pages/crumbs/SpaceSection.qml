@@ -1,4 +1,5 @@
-// Space you can free (your own files): `scan` runs when the page opens and on Refresh.
+// Space you can free (your own files): `scan` runs when the page opens and on Refresh. The total
+// heads the card; each category has a bar for its size next to the biggest one.
 import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
@@ -38,18 +39,32 @@ ColumnLayout {
 
     SettingRow {
         settingId: "space"
-        label: "Space you can free"
+        label: section.loading && section.view.rows.length === 0 ? "Looking…" : (section.view.totalText || "Space you can free")
         highlight: section.host ? section.host.highlight : ""
         Layout.fillWidth: true
 
-        UqLabel {
-            text: "Looking for space you can free…"
-            visible: section.loading
-        }
         QQC2.Button {
             text: "Refresh"
             enabled: !section.loading
             onClicked: section.refresh()
+        }
+    }
+    // While a scan runs: a moving bar and what it is doing, so the total doesn't appear from
+    // nowhere. The last answer stays on screen under it until the new one is in.
+    ColumnLayout {
+        visible: section.loading
+        spacing: 4
+        Layout.fillWidth: true
+
+        QQC2.ProgressBar {
+            indeterminate: true
+            Layout.fillWidth: true
+        }
+        UqLabel {
+            text: "Looking through caches, logs, the trash and old downloads. This can take a minute on a big disk."
+            wrapMode: Text.Wrap
+            opacity: 0.7
+            Layout.fillWidth: true
         }
     }
     ErrorCard {

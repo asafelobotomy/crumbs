@@ -37,6 +37,7 @@ cargo build --release
 - `crumbs restore <batch | entry | path>... [--dry-run] [--json]` puts items back. Restoring a batch skips what was permanently deleted, run as a command or removed as a package; naming such an entry by its ID says why it cannot come back.
 - `crumbs scan [--category <name>]... [--details] [--user | --system] [--json]` lists reclaimable space by category. `--system` lists the system categories instead. It only reads: it changes nothing, needs no administrator rights and writes no history. With `--details` every item is listed. Naming categories scans exactly those, even ones switched off in the config.
 - `crumbs clean [<category>...] [-i] [--exclude <pattern>]... [--dry-run] [--yes] [--permanent] [--force] [--user | --system] [--json]` frees the space `scan` found. With no category it cleans every enabled user category; `--system` cleans the system categories instead. Naming categories cleans exactly those, and naming a system category implies `--system`. `-i` opens a checklist over all items. `--exclude` leaves out what a pattern matches for this run, read exactly as `exclude` in the config (repeatable; it starts with `/` or `~/`), for example `crumbs clean cache --exclude '~/.cache/my-project'`. `--user` with `--system`, a category of the other kind, or an `--exclude` pattern that does not start with `/` or `~/`, is a usage error (exit 2).
+- `crumbs config show [--json]` lists the settings in effect and where they come from; `crumbs config set <key> <value>`, `config add|remove <key> <entry>` and `config reset <key | all>` change one key of the config file (see "Configuration"). A value the config would not accept is refused and nothing is written.
 - `crumbs doctor [--json]` reports which sources and tools crumbs can use.
 - `crumbs mcp` serves crumbs to an AI agent over the Model Context Protocol on stdin and stdout (see "Using crumbs from an AI agent").
 
@@ -252,6 +253,8 @@ These must be at least 1; a smaller value is replaced by 1 with a warning (`conf
 
 A `..` in a `protect`, `exclude`, `appimage_dirs` or `project_dirs` entry is resolved as the system would: `/../x` is `/x`.
 
+`crumbs config` changes these one at a time, for example `crumbs config set temp_age_days 3`, `crumbs config add protect ~/Games` or `crumbs config reset all`. It checks the value first, more strictly than loading does, keeps keys it does not know, and rewrites the file whole (comments are not kept). Adding to `categories_off` when the file does not set it keeps the default `dev-cache`.
+
 Exit codes: 0 ok, 1 error, 2 usage error or ambiguous app, 3 partial failure (including a privileged run that stopped part-way), 4 aborted by the user, 5 administrator rights needed but unavailable or denied.
 
 ## uQ desktop
@@ -259,7 +262,7 @@ Exit codes: 0 ok, 1 error, 2 usage error or ambiguous app, 3 partial failure (in
 On the [uQ](https://github.com/asafelobotomy/uq) desktop, crumBS adds two things to uQ (`uq/`; the `crum-bs` and `crum-bs-bin` packages install them, the `.deb` and `.rpm` do not install the page because uQ runs on Arch only):
 
 - **Uninstall…** in the right-click menu of every app in the launcher.
-- **Storage and cleanup** under Apps in uQ Settings. It shows the space you can free (your own files first, the system only when you ask), the leftovers of removed apps, your recent cleanups with a way to put one back, and your apps by size with **Uninstall…**. It only runs the `crumbs` commands above with `--json`, so it does exactly what they do: trash-backed categories go to the trash and can be put back, the permanent ones say so first, system cleanups ask for your password, and every change asks before it starts.
+- **Storage and cleanup** under Apps in uQ Settings, in five tabs like Settings' own pages. It shows the space you can free (your own files first, the system only when you ask), your apps by size with their icons and **Uninstall…** (which first shows everything it would remove, and can keep your settings and data or remove only the leftovers), the leftovers of removed apps (yours, and folders in `/opt` that no package owns), your recent cleanups with a way to put one back, and crumBS's own settings. It only runs the `crumbs` commands above with `--json`, so it does exactly what they do: trash-backed categories go to the trash and can be put back, the permanent ones say so first, system cleanups ask for your password, and every change asks before it starts.
 
 The page never forces anything. It passes neither `--force`, `--desktop`, `--permanent` nor `-i`, so crumBS's own refusals (an app that is running, a package that is part of uQ) are shown as they are, and uQ's own packages are listed as "Part of uQ" with no Uninstall button. AppImages that appOFholding keeps are managed there, as everywhere in crumBS.
 

@@ -16,6 +16,7 @@ fn also_removed_lists_every_name() {
 fn unknown_size_shows_dash_and_unknown_total() {
     use crumbs_core::safety::Fingerprint;
     let mut a = PlannedAction {
+        group: None,
         action: Action::Delete {
             path: "/opt/inky".into(),
         },
@@ -46,6 +47,7 @@ fn report_text(cmds: &[(&str, &[&str], Option<u64>)]) -> String {
     let actions: Vec<PlannedAction> = cmds
         .iter()
         .map(|(program, args, _)| PlannedAction {
+            group: None,
             action: Action::PrivilegedCommand {
                 program: (*program).into(),
                 args: args.iter().map(|a| (*a).to_string()).collect(),

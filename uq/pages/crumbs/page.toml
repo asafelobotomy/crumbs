@@ -1,7 +1,7 @@
 # The Storage and cleanup page of uQ Settings. Installed by the crum-bs packages to
 # /usr/share/uq/settings/pages/crumbs/. Everything it reads or changes goes through the
 # crumbs command line; see uq/README.md.
-uq_api = 1
+uq_api = 2
 id = "crumbs"
 name = "Storage and cleanup"
 icon = "user-trash-full"
@@ -36,6 +36,11 @@ id = "apps"
 label = "Apps and their size"
 keywords = ["uninstall", "remove", "software", "size", "packages"]
 
+[[setting]]
+id = "preferences"
+label = "What crumBS looks at"
+keywords = ["settings", "protect", "exclude", "categories", "days", "journal", "snapshots"]
+
 # Reads. The scans can take a minute on a big disk.
 [[command]]
 id = "scan"
@@ -67,6 +72,70 @@ id = "apps"
 argv = ["/usr/bin/crumbs", "apps", "list", "--sort", "size", "--json"]
 output = "json"
 timeout_ms = 120000
+
+[[command]]
+id = "orphans-system"
+argv = ["/usr/bin/crumbs", "orphans", "--system", "--json"]
+output = "json"
+timeout_ms = 120000
+
+[[command]]
+id = "config"
+argv = ["/usr/bin/crumbs", "config", "show", "--json"]
+output = "json"
+timeout_ms = 30000
+watch = { files = ["~/.config/crumbs/config.toml"] }
+
+# What an uninstall would remove, one per way of uninstalling: reads, so they don't ask.
+[[command]]
+id = "preview-uninstall"
+argv = ["/usr/bin/crumbs", "uninstall", "--dry-run", "--json"]
+output = "json"
+timeout_ms = 120000
+args = [{ name = "app", pattern = '^(pacman|dpkg|rpm|snap|flatpak|appimage|unmanaged):[^\x00-\x1f\x7f]{1,400}$' }]
+
+[[command]]
+id = "preview-keep-data"
+argv = ["/usr/bin/crumbs", "uninstall", "--keep-data", "--dry-run", "--json"]
+output = "json"
+timeout_ms = 120000
+args = [{ name = "app", pattern = '^(pacman|dpkg|rpm|snap|flatpak|appimage|unmanaged):[^\x00-\x1f\x7f]{1,400}$' }]
+
+[[command]]
+id = "preview-leftovers"
+argv = ["/usr/bin/crumbs", "uninstall", "--leftovers-only", "--dry-run", "--json"]
+output = "json"
+timeout_ms = 120000
+args = [{ name = "app", pattern = '^(pacman|dpkg|rpm|snap|flatpak|appimage|unmanaged):[^\x00-\x1f\x7f]{1,400}$' }]
+
+# Settings: `crumbs config` checks every value before it writes, and refuses what it wouldn't load.
+[[command]]
+id = "config-set"
+argv = ["/usr/bin/crumbs", "config", "set", "--json"]
+output = "json"
+timeout_ms = 30000
+args = [{ name = "key", pattern = '^(temp_age_days|log_age_days|build_age_days|snapshots_keep|pkg_cache_keep|journal_max)$' }, { name = "value", pattern = '^[0-9]{1,15}[KMGT]?$' }]
+
+[[command]]
+id = "config-add"
+argv = ["/usr/bin/crumbs", "config", "add", "--json"]
+output = "json"
+timeout_ms = 30000
+args = [{ name = "key", pattern = '^(protect|exclude|appimage_dirs|project_dirs|categories_off|categories_on)$' }, { name = "value", pattern = '^(~|~/[^\x00-\x1f\x7f]*|/[^\x00-\x1f\x7f]*|[a-z][a-z-]{0,39})$' }]
+
+[[command]]
+id = "config-remove"
+argv = ["/usr/bin/crumbs", "config", "remove", "--json"]
+output = "json"
+timeout_ms = 30000
+args = [{ name = "key", pattern = '^(protect|exclude|appimage_dirs|project_dirs|categories_off|categories_on)$' }, { name = "value", pattern = '^(~|~/[^\x00-\x1f\x7f]*|/[^\x00-\x1f\x7f]*|[a-z][a-z-]{0,39})$' }]
+
+[[command]]
+id = "config-reset"
+argv = ["/usr/bin/crumbs", "config", "reset", "--json"]
+output = "json"
+timeout_ms = 30000
+args = [{ name = "key", pattern = '^(temp_age_days|log_age_days|build_age_days|snapshots_keep|pkg_cache_keep|journal_max|protect|exclude|appimage_dirs|project_dirs|categories_off|categories_on)$' }]
 
 # Writes. Each one asks first (confirm), is named by a category, a path, a batch or an app id
 # that crumbs itself printed, and always answers with a full JSON envelope, whatever the exit
@@ -106,6 +175,14 @@ args = [{ name = "path", pattern = '^/[^\x00-\x1f\x7f]+$' }]
 confirm = "Move %s to the trash?"
 
 [[command]]
+id = "orphan-delete-system"
+argv = ["/usr/bin/crumbs", "orphans", "--clean", "--system", "--yes", "--json", "--select"]
+output = "json"
+timeout_ms = 300000
+args = [{ name = "path", pattern = '^/opt/[^/\x00-\x1f\x7f]+$' }]
+confirm = "Delete %s for good? This needs your password and can't be undone."
+
+[[command]]
 id = "restore"
 argv = ["/usr/bin/crumbs", "restore", "--json"]
 output = "json"
@@ -120,3 +197,19 @@ output = "json"
 timeout_ms = 600000
 args = [{ name = "app", pattern = '^(pacman|dpkg|rpm|snap|flatpak|appimage|unmanaged):[^\x00-\x1f\x7f]{1,400}$' }]
 confirm = "Uninstall %s and remove its leftovers? A removed package can't be put back by crumBS."
+
+[[command]]
+id = "uninstall-keep-data"
+argv = ["/usr/bin/crumbs", "uninstall", "--keep-data", "--yes", "--json"]
+output = "json"
+timeout_ms = 600000
+args = [{ name = "app", pattern = '^(pacman|dpkg|rpm|snap|flatpak|appimage|unmanaged):[^\x00-\x1f\x7f]{1,400}$' }]
+confirm = "Uninstall %s and keep your settings and data? A removed package can't be put back by crumBS."
+
+[[command]]
+id = "uninstall-leftovers"
+argv = ["/usr/bin/crumbs", "uninstall", "--leftovers-only", "--yes", "--json"]
+output = "json"
+timeout_ms = 600000
+args = [{ name = "app", pattern = '^(pacman|dpkg|rpm|snap|flatpak|appimage|unmanaged):[^\x00-\x1f\x7f]{1,400}$' }]
+confirm = "Remove the leftovers of %s? The app itself stays installed."

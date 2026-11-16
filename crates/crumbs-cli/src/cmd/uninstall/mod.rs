@@ -12,7 +12,8 @@ use crumbs_core::inventory::{
 };
 use crumbs_core::leftovers::{Finding, FindingKind, find_leftovers, find_system_leftovers};
 use crumbs_core::plan::{
-    NOTE_APP_STAYS, Plan, PlanOptions, PlannedAction, build_plan_unmanaged, is_system_leftover,
+    Group, NOTE_APP_STAYS, Plan, PlanOptions, PlannedAction, build_plan_unmanaged,
+    is_system_leftover,
 };
 use crumbs_core::removal::{
     RemovalError, RemovalPlan, UnmanagedTarget, plan_removal, plan_unmanaged,
@@ -321,6 +322,7 @@ fn attach_removal(plan: &mut Plan, removal: RemovalPlan) {
         .into_iter()
         .enumerate()
         .map(|(k, action)| PlannedAction {
+            group: Some(Group::App),
             action,
             size: 0,
             fingerprint: Fingerprint {

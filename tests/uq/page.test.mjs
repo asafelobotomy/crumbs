@@ -63,7 +63,8 @@ test("every QML file stays under 400 lines, and the page folder holds what it sh
   for (const f of files(".qml")) assert.ok(read(f).split("\n").length <= 400, `${f} is over 400 lines`);
   assert.deepEqual(readdirSync(pageDir).sort(), [
     "AppsSection.qml", "CategoryRow.qml", "HistorySection.qml", "LeftoversSection.qml", "Outcome.qml",
-    "Page.qml", "SpaceSection.qml", "SystemSection.qml", "logic.js", "page.toml",
+    "Page.qml", "PreferencesSection.qml", "SpaceSection.qml", "SystemLeftovers.qml", "SystemSection.qml",
+    "UninstallPreview.qml", "logic.js", "page.toml",
   ]);
 });
 
@@ -85,3 +86,17 @@ test("only Page.qml's sections read on open", () => {
   assert.equal((page.match(/\.refresh\(\)|\.start\(\)/g) ?? []).length, 2);
 });
 
+
+test("the page is laid out like Settings' own pages", () => {
+  const page = read("Page.qml");
+  assert.match(page, /^SettingsPage \{/m);
+  assert.deepEqual([...page.matchAll(/SettingsTab \{\s*title: "([^"]+)"/g)].map((m) => m[1]), ["Overview", "Apps", "Leftovers", "History", "Preferences"]);
+  assert.match(page, /pageId: "crumbs"/);
+  // every [[setting]] row exists, so search can open its tab
+  const all = files(".qml").map(read).join("\n");
+  for (const s of manifest.setting) assert.match(all, new RegExp(`settingId: "${s.id}"`), `${s.id} has no row`);
+  // a long read shows that it is working
+  for (const f of ["SpaceSection.qml", "SystemSection.qml", "AppsSection.qml", "LeftoversSection.qml", "SystemLeftovers.qml", "UninstallPreview.qml"])
+    assert.match(read(f), /ProgressBar \{\s*indeterminate: true/, `${f} has no progress bar`);
+  assert.match(read("AppsSection.qml"), /UqAppIcon \{/);
+});

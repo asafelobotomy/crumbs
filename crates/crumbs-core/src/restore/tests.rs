@@ -12,6 +12,7 @@ fn run(env: &Env, actions: Vec<Action>) -> ExecReport {
     let actions: Vec<PlannedAction> = actions
         .into_iter()
         .map(|action| PlannedAction {
+            group: None,
             size: 1,
             fingerprint: fingerprint(env, action.path().unwrap()).unwrap(),
             scope: crate::safety::Scope::Home,
@@ -527,6 +528,7 @@ fn restore_reports_commands_not_undoable() {
         app_id: None,
         kind: None,
         actions: vec![PlannedAction {
+            group: None,
             action: Action::UserCommand {
                 program: "flatpak".into(),
                 args: vec!["uninstall".into()],
@@ -607,6 +609,7 @@ fn restore_refuses_packages_with_reinstall_hint() {
     t.write_exec("usr/bin/flatpak", b"#!/bin/sh\n");
     let env = t.env();
     let unfp = |action| PlannedAction {
+        group: None,
         action,
         size: 0,
         fingerprint: crate::safety::Fingerprint {

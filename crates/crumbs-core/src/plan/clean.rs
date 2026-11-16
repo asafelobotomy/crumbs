@@ -62,6 +62,7 @@ pub fn build_clean_plan(
         };
         if let Some(action) = command {
             actions.push(PlannedAction {
+                group: None,
                 action,
                 size: item.size.unwrap_or(0),
                 fingerprint: Fingerprint::default(),
@@ -86,6 +87,7 @@ pub fn build_clean_plan(
         };
         let main = actions.len();
         actions.push(PlannedAction {
+            group: None,
             action,
             size: item.size.unwrap_or(0),
             fingerprint,
@@ -97,6 +99,7 @@ pub fn build_clean_plan(
         });
         for (extra, fp) in &item.extra_paths {
             actions.push(PlannedAction {
+                group: None,
                 action: Action::Delete {
                     path: extra.clone(),
                 },

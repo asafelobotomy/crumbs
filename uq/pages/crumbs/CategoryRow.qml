@@ -47,6 +47,25 @@ ColumnLayout {
             onClicked: row.clean()
         }
     }
+    // The row's size next to the biggest row's, as a bar.
+    Item {
+        visible: row.item.share !== undefined && row.item.items > 0 && row.item.error === null
+        implicitHeight: 4
+        Layout.fillWidth: true
+
+        Rectangle {
+            anchors.fill: parent
+            radius: 2
+            opacity: 0.2
+            color: row.host ? row.host.accentColor() : "steelblue"
+        }
+        Rectangle {
+            width: parent.width * Math.max(0.02, row.item.share || 0)
+            height: parent.height
+            radius: 2
+            color: row.host ? row.host.accentColor() : "steelblue"
+        }
+    }
     UqLabel {
         id: detail
         text: row.item.error !== null ? row.item.error : row.item.how
