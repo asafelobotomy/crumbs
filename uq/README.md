@@ -27,13 +27,19 @@ The page is a front end for the `crumbs` command line, as `docs/settings-pages.m
 Everything it reads or changes is a `[[command]]` of `pages/crumbs/page.toml`, run with `--json`
 (`docs/json-schema.md` is the contract), and `logic.js` is the only code that reads crumbs' answers.
 
-| Section | Reads | Changes |
-|---|---|---|
-| Space you can free | `scan`, when the page opens and on Refresh | `clean` for categories that go to the trash, `clean-for-good` for the ones deleted for good |
-| System space | `scan --system`, only when asked | `clean --system`, which asks for the password through crumbs' own prompt |
-| Leftovers of removed apps | `orphans`, only when asked | `orphans --clean --select <path>` (to the trash) |
-| Recent cleanups | `history`, followed through `~/.local/state/crumbs/history.jsonl` | `restore <batch>` |
-| Apps and their size | `apps list --sort size`, only when asked | `uninstall <app id>` |
+The page says `uq_api = 2`, so it has the tabs and cards of Settings' own pages; an older uQ skips it with
+"needs a newer uQ". Every read that takes a while shows a progress bar.
+
+| Tab | Section | Reads | Changes |
+|---|---|---|---|
+| Overview | Space you can free | `scan`, when the page opens and on Refresh | `clean` for categories that go to the trash, `clean-for-good` for the ones deleted for good |
+| Overview | System space | `scan --system`, only when asked | `clean --system`, which asks for the password through crumbs' own prompt |
+| Apps | Your apps (with their icons) | `apps list --sort size`, when the tab opens | `uninstall`, `uninstall --keep-data` or `uninstall --leftovers-only` for one app id |
+| Apps | Uninstall preview | `uninstall [--keep-data\|--leftovers-only] --dry-run`, when a row's Uninstall… opens | (none: it shows what would go, grouped as the app, your files, settings, caches and menu entries, and whether each goes to the trash or for good) |
+| Leftovers | Leftovers of removed apps | `orphans`, when the tab opens | `orphans --clean --select <path>` (to the trash) |
+| Leftovers | System leftovers | `orphans --system`, only when asked | `orphans --clean --system --select <path under /opt>` (for good, with the password) |
+| History | Recent cleanups | `history`, followed through `~/.local/state/crumbs/history.jsonl` | `restore <batch>` |
+| Preferences | crumBS's settings | `config show`, followed through `~/.config/crumbs/config.toml` once the tab opens | `config set`, `add`, `remove` and `reset`, one key at a time; crumBS refuses a bad value before it writes |
 
 - Every change asks first (the `confirm` of its command), takes one name that crumbs itself printed, and runs
   alone: while one runs, every other change button waits.
@@ -50,10 +56,11 @@ Everything it reads or changes is a `[[command]]` of `pages/crumbs/page.toml`, r
   plain words) and what the packages install. `tests/uq/fixtures/` holds crumbs' `--json` answers.
 - `QML_XHR_ALLOW_FILE_READ=1 QT_QPA_PLATFORM=offscreen qmltestrunner -import tests/uq/stub -input tests/uq`:
   the page against a fake `ctx` (`tests/uq/tst_page.qml`; needs Qt 6, so it runs in CI). The stub components
-  and `FakeContext.qml` are uQ's test kit as of v0.3.0-rc.1.
+  and `FakeContext.qml` are uQ's test kit as of v0.3.0-rc.1, plus the `uq_api = 2` layout
+  components (`SettingsPage`, `SettingsTab`, `SettingsCard`, `HelpTip`, `UqAppIcon`) from uq#69.
 - `scripts/test-packaging.sh uq_files` runs each AUR `package()` in a scratch tree and checks that what it
   installs under `usr/share/uq` equals this folder; `scripts/test-packaging.sh aur` checks the built packages.
-- `uqctl integrations check --no-programs uq/` (CI pins uQ v0.3.0-rc.1) checks the folder.
+- `uqctl integrations check --no-programs uq/` (CI builds it from the uQ commit that adds `uq_api = 2`, until a release has it) checks the folder.
 - `cargo test --workspace`: the lookup (`crumbs-core`, `inventory/tests.rs`) and the command
   (`crumbs-cli/tests/cli.rs`, `uninstall_by_desktop_id_*`).
 - Without `--no-programs`, `uqctl integrations check uq/` also reports that `/usr/bin/crumbs` does not exist

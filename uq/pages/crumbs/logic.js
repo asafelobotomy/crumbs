@@ -49,6 +49,13 @@ var SOURCES = {
     "unmanaged": "Installed by hand"
 };
 
+var APP_PATTERN = "^(pacman|dpkg|rpm|snap|flatpak|appimage|unmanaged):[^\\x00-\\x1f\\x7f]{1,400}$";
+/// The keys `crumbs config` changes (crumbs-core config::edit::KEYS), split by kind.
+var NUMBER_KEYS = ["temp_age_days", "log_age_days", "build_age_days", "snapshots_keep", "pkg_cache_keep", "journal_max"];
+var LIST_KEYS = ["protect", "exclude", "appimage_dirs", "project_dirs", "categories_off", "categories_on"];
+/// A path or pattern (from / or ~/), or a category name.
+var LIST_ENTRY = "^(~|~/[^\\x00-\\x1f\\x7f]*|/[^\\x00-\\x1f\\x7f]*|[a-z][a-z-]{0,39})$";
+
 /// The argument patterns of page.toml's [[command]] tables: command id -> argument -> pattern.
 /// tests/uq/logic.test.mjs checks that they are the same strings. uQ refuses an argument over
 /// ARG_BYTES bytes, which is why the path pattern has no length bound of its own (a bounded
@@ -58,8 +65,18 @@ var PATTERNS = {
     "clean-for-good": { "category": "^(" + USER_FOR_GOOD.join("|") + ")$" },
     "clean-system": { "category": "^(" + SYSTEM.join("|") + ")$" },
     "orphan-trash": { "path": "^/[^\\x00-\\x1f\\x7f]+$" },
+    "orphan-delete-system": { "path": "^/opt/[^/\\x00-\\x1f\\x7f]+$" },
     "restore": { "batch": "^[0-9]{1,20}$" },
-    "uninstall": { "app": "^(pacman|dpkg|rpm|snap|flatpak|appimage|unmanaged):[^\\x00-\\x1f\\x7f]{1,400}$" }
+    "uninstall": { "app": APP_PATTERN },
+    "uninstall-keep-data": { "app": APP_PATTERN },
+    "uninstall-leftovers": { "app": APP_PATTERN },
+    "preview-uninstall": { "app": APP_PATTERN },
+    "preview-keep-data": { "app": APP_PATTERN },
+    "preview-leftovers": { "app": APP_PATTERN },
+    "config-set": { "key": "^(" + NUMBER_KEYS.join("|") + ")$", "value": "^[0-9]{1,15}[KMGT]?$" },
+    "config-add": { "key": "^(" + LIST_KEYS.join("|") + ")$", "value": LIST_ENTRY },
+    "config-remove": { "key": "^(" + LIST_KEYS.join("|") + ")$", "value": LIST_ENTRY },
+    "config-reset": { "key": "^(" + NUMBER_KEYS.concat(LIST_KEYS).join("|") + ")$" }
 };
 
 /// Shown beside a row while its command runs.
@@ -200,7 +217,7 @@ function categories(scanData) {
 }
 
 function emptyView() {
-    return { rows: [], unavailable: "", switchedOff: "", problem: "" };
+    return { rows: [], unavailable: "", switchedOff: "", problem: "", total: 0, totalText: "" };
 }
 
 /// What a space section shows for a `scan` (or `scan --system`) result: the rows to list, a
@@ -224,6 +241,15 @@ function spaceView(result) {
         else
             view.rows.push(all[i]);
     }
+    // How big each row is next to the biggest (for its bar), and the sum of them all.
+    var biggest = 0;
+    for (var r = 0; r < view.rows.length; r++) {
+        view.total += view.rows[r].total;
+        biggest = Math.max(biggest, view.rows[r].total);
+    }
+    for (var b = 0; b < view.rows.length; b++)
+        view.rows[b].share = biggest > 0 ? view.rows[b].total / biggest : 0;
+    view.totalText = view.total > 0 ? size(view.total) : "Nothing to free";
     if (unavailable.length > 0)
         view.unavailable = "Not on this computer: " + unavailable.join(", ");
     if (off.length > 0)
@@ -490,6 +516,7 @@ function apps(data) {
             source: typeof a.source === "string" ? a.source : "",
             sourceText: has(SOURCES, a.source) ? SOURCES[a.source] : "Other",
             partOf: part,
+            icon: typeof a.icon === "string" ? clip(a.icon, 200) : "",
             canUninstall: part === null && argProblem("uninstall", "app", a.id) === ""
         });
     }
@@ -513,4 +540,197 @@ function filterApps(list, query, limit) {
         rows.push(list[i]);
     }
     return { rows: rows, more: more };
+}
+
+// ---- uninstall preview --------------------------------------------------------------------
+
+/// The groups of an uninstall plan (crumbs' `group` on each action), in the order shown.
+var GROUPS = [
+    { key: "app", title: "The app itself" },
+    { key: "data", title: "Your files and data" },
+    { key: "settings", title: "Settings" },
+    { key: "cache", title: "Caches" },
+    { key: "launchers", title: "Menu entries, icons and file types" },
+    { key: "other", title: "Other" }
+];
+var PREVIEW_ITEMS = 50;
+
+/// One planned action as a line of text: its path, or what a package or command removes.
+function actionText(action, home) {
+    if (!action || typeof action !== "object")
+        return "";
+    if (typeof action.path === "string")
+        return clip(shortPath(action.path, home), 300);
+    if (action.type === "package-remove" && Array.isArray(action.names))
+        return clip("Package " + action.names.filter(n => typeof n === "string").join(", "), 300);
+    if (typeof action.program === "string")
+        return clip([action.program].concat(Array.isArray(action.args) ? action.args : []).join(" "), 300);
+    return "";
+}
+
+/// `/home/user/x` as `~/x` when `home` is the home folder.
+function shortPath(path, home) {
+    if (typeof home === "string" && home !== "" && (path === home || path.indexOf(home + "/") === 0))
+        return "~" + path.slice(home.length);
+    return path;
+}
+
+/// What an `uninstall --dry-run` answer removes, grouped: {problem, groups, totalText, notes,
+/// empty}. Each group says whether its items go to the trash or are gone for good.
+function removalPreview(result, home) {
+    var env = envelope(result);
+    var view = { problem: "", groups: [], totalText: "", notes: [], empty: true };
+    var plans = env.data && Array.isArray(env.data.plans) ? env.data.plans : null;
+    if (plans === null || plans.length === 0 || !plans[0] || typeof plans[0] !== "object") {
+        view.problem = env.cli || env.error || "crumBS gave an answer this page can't read.";
+        return view;
+    }
+    var plan = plans[0];
+    var actions = Array.isArray(plan.actions) ? plan.actions : [];
+    var byKey = {};
+    var total = 0;
+    var unknown = false;
+    for (var i = 0; i < actions.length && i < ROW_LIMIT; i++) {
+        var a = actions[i];
+        if (!a || typeof a !== "object")
+            continue;
+        var key = typeof a.group === "string" && GROUPS.some(g => g.key === a.group) ? a.group : "other";
+        if (!byKey[key])
+            byKey[key] = { count: 0, bytes: 0, forGood: false, items: [] };
+        var g = byKey[key];
+        var bytes = number(a.size);
+        g.count++;
+        g.bytes += bytes || 0;
+        total += bytes || 0;
+        unknown = unknown || bytes === null;
+        var type = a.action && typeof a.action.type === "string" ? a.action.type : "";
+        if (type !== "trash" && type !== "edit-file")
+            g.forGood = true;
+        if (g.items.length < PREVIEW_ITEMS) {
+            var text = actionText(a.action, home);
+            if (text !== "")
+                g.items.push(text);
+        }
+    }
+    for (var k = 0; k < GROUPS.length; k++) {
+        var grp = byKey[GROUPS[k].key];
+        if (!grp)
+            continue;
+        view.groups.push({
+            key: GROUPS[k].key,
+            title: GROUPS[k].title,
+            countText: plural(grp.count, "item", "items"),
+            sizeText: grp.bytes > 0 ? size(grp.bytes) : "",
+            how: grp.forGood ? "Removed for good" : "Goes to the trash",
+            forGood: grp.forGood,
+            items: grp.items,
+            more: grp.count - grp.items.length
+        });
+    }
+    view.empty = view.groups.length === 0;
+    view.totalText = view.empty ? "Nothing to remove." : "Frees about " + size(total) + (unknown ? " (some sizes unknown)" : "");
+    var notes = Array.isArray(plan.notes) ? plan.notes : [];
+    for (var n = 0; n < notes.length && n < 10; n++)
+        if (typeof notes[n] === "string" && notes[n] !== "")
+            view.notes.push(clip(notes[n], MESSAGE_LIMIT));
+    return view;
+}
+
+/// The preview and the removal for each way of uninstalling.
+var UNINSTALL_MODES = {
+    "all": { preview: "preview-uninstall", run: "uninstall" },
+    "keep-data": { preview: "preview-keep-data", run: "uninstall-keep-data" },
+    "leftovers": { preview: "preview-leftovers", run: "uninstall-leftovers" }
+};
+
+function uninstallCommands(mode) {
+    return has(UNINSTALL_MODES, mode) ? UNINSTALL_MODES[mode] : UNINSTALL_MODES["all"];
+}
+
+// ---- preferences (`crumbs config`) ---------------------------------------------------------
+
+var KEY_TEXT = {
+    "temp_age_days": { label: "Temporary files count as old after", unit: "days", min: 1 },
+    "log_age_days": { label: "Log files count as old after", unit: "days", min: 1 },
+    "build_age_days": { label: "Build folders count as old after", unit: "days", min: 1 },
+    "snapshots_keep": { label: "System snapshots to keep", unit: "", min: 1 },
+    "pkg_cache_keep": { label: "Versions of each package to keep", unit: "", min: 0 },
+    "journal_max": { label: "Keep system logs under", unit: "", min: 0 },
+    "protect": { label: "Never touch these folders", help: "crumBS never offers anything inside them." },
+    "exclude": { label: "Leave out of cleanups", help: "Folders or patterns a cleanup skips, like ~/.cache/my-project." },
+    "appimage_dirs": { label: "Where your AppImages are", help: "Folders crumBS looks in for AppImages." },
+    "project_dirs": { label: "Where your projects are", help: "Folders searched for build folders." }
+};
+
+/// The settings in a `config show` answer: numbers, lists and the categories switched on.
+function configView(result) {
+    var env = envelope(result);
+    var view = { problem: "", path: "", numbers: [], lists: [], off: [], on: [] };
+    var values = env.data && env.data.values && typeof env.data.values === "object" ? env.data.values : null;
+    if (values === null) {
+        view.problem = env.cli || env.error || "crumBS gave an answer this page can't read.";
+        return view;
+    }
+    view.path = clip(env.data.path, 300);
+    for (var i = 0; i < NUMBER_KEYS.length; i++) {
+        var k = NUMBER_KEYS[i];
+        var v = values[k];
+        var isSize = k === "journal_max";
+        view.numbers.push({
+            key: k,
+            label: KEY_TEXT[k].label,
+            unit: KEY_TEXT[k].unit,
+            min: KEY_TEXT[k].min,
+            isSize: isSize,
+            value: isSize ? (typeof v === "string" ? clip(v, 20) : "") : (number(v) === null ? KEY_TEXT[k].min : Math.floor(v))
+        });
+    }
+    for (var j = 0; j < 4; j++) {
+        var key = LIST_KEYS[j];
+        var entries = Array.isArray(values[key]) ? values[key] : [];
+        view.lists.push({
+            key: key,
+            label: KEY_TEXT[key].label,
+            help: KEY_TEXT[key].help,
+            entries: entries.filter(e => typeof e === "string").slice(0, ROW_LIMIT).map(e => clip(e, 300))
+        });
+    }
+    var strings = list => (Array.isArray(list) ? list : []).filter(e => typeof e === "string");
+    view.off = strings(values.categories_off);
+    view.on = strings(values.categories_on);
+    return view;
+}
+
+/// Whether a plain `scan` and `clean` include `category`. `build-output` runs only when
+/// categories_on names it; the rest unless categories_off names them and categories_on doesn't.
+function categoryOn(category, view) {
+    var on = view && Array.isArray(view.on) ? view.on : [];
+    var off = view && Array.isArray(view.off) ? view.off : [];
+    if (category === "build-output")
+        return on.indexOf(category) >= 0;
+    return off.indexOf(category) < 0 || on.indexOf(category) >= 0;
+}
+
+/// The config changes, as [command, args] pairs in order, that switch `category` on or off.
+function categorySteps(category, want, view) {
+    var on = view && Array.isArray(view.on) ? view.on : [];
+    var off = view && Array.isArray(view.off) ? view.off : [];
+    var steps = [];
+    if (want) {
+        if (off.indexOf(category) >= 0)
+            steps.push(["config-remove", ["categories_off", category]]);
+        if (category === "build-output" && on.indexOf(category) < 0)
+            steps.push(["config-add", ["categories_on", category]]);
+    } else {
+        if (on.indexOf(category) >= 0)
+            steps.push(["config-remove", ["categories_on", category]]);
+        if (category !== "build-output" && off.indexOf(category) < 0)
+            steps.push(["config-add", ["categories_off", category]]);
+    }
+    return steps;
+}
+
+/// The user categories, with their plain names, for the switches.
+function userCategories() {
+    return USER_TRASH.concat(USER_FOR_GOOD).map(c => ({ category: c, label: categoryLabel(c) }));
 }

@@ -1,4 +1,5 @@
-// Leftovers of removed apps: `orphans` runs when asked; each one can be moved to the trash.
+// Leftovers of removed apps: `orphans` runs when the tab is first opened, and when asked; each
+// one can be moved to the trash.
 import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
@@ -13,6 +14,21 @@ ColumnLayout {
     property bool loaded: false
     property string problem: ""
     property var rows: []
+
+    /// Reads when the tab is first shown, also when Settings opens the page on this tab.
+    function autoload() {
+        if (section.visible && !section.loaded && !section.loading)
+            section.refresh();
+    }
+
+    onVisibleChanged: section.autoload()
+
+    Connections {
+        target: section.host
+        function onCtxChanged() {
+            section.autoload();
+        }
+    }
 
     function refresh() {
         if (!section.host || !section.host.ctx || section.loading)
@@ -37,14 +53,24 @@ ColumnLayout {
         highlight: section.host ? section.host.highlight : ""
         Layout.fillWidth: true
 
-        UqLabel {
-            text: "Looking for leftovers…"
-            visible: section.loading
-        }
         QQC2.Button {
-            text: "Find leftovers"
+            text: section.loaded ? "Look again" : "Find leftovers"
             enabled: !section.loading
             onClicked: section.refresh()
+        }
+    }
+    ColumnLayout {
+        visible: section.loading
+        spacing: 4
+        Layout.fillWidth: true
+
+        QQC2.ProgressBar {
+            indeterminate: true
+            Layout.fillWidth: true
+        }
+        UqLabel {
+            text: "Looking through your settings, data and cache folders…"
+            opacity: 0.7
         }
     }
     Outcome {

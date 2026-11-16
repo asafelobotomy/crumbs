@@ -24,7 +24,8 @@
           "firefox"
         ],
         "has_gui": true,
-        "part_of": null
+        "part_of": null,
+        "icon": "firefox"
       },
       {
         "id": "pacman:uq",

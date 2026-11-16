@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "command": "uninstall",
+  "data": {
+    "plans": [
+      {
+        "app_id": "pacman:firefox",
+        "actions": [
+          { "action": { "type": "package-remove", "source": "pacman", "names": ["firefox"], "versions": ["159.0.1-1"], "program": "pacman", "args": ["-Rn", "--noconfirm", "firefox"] }, "size": 0, "reason": "the app's package", "group": "app" },
+          { "action": { "type": "trash", "path": "/home/user/.mozilla" }, "size": 52000000, "reason": "firefox profile", "group": "data" },
+          { "action": { "type": "trash", "path": "/home/user/.cache/mozilla" }, "size": 310000000, "reason": "firefox cache", "group": "cache" },
+          { "action": { "type": "edit-file", "path": "/home/user/.config/mimeapps.list", "remove_lines": ["x-scheme-handler/http=firefox.desktop"] }, "size": 0, "reason": "default browser", "group": "launchers" }
+        ],
+        "notes": [],
+        "total_size": 362000000
+      }
+    ],
+    "report": null
+  },
+  "errors": []
+}

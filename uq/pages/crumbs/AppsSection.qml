@@ -1,5 +1,7 @@
-// Apps and their size: `apps` runs when asked. Uninstall removes an app with its leftovers; the
-// desktop's own packages say "Part of uQ" and have no button (crumBS would refuse anyway).
+// Apps and their size: `apps` runs when the tab is first opened, and on Refresh. Each app shows
+// its icon; Uninstall… opens a preview of everything that would go (UninstallPreview), and
+// only its own button removes anything. The desktop's own packages say "Part of uQ" and have
+// no button (crumBS would refuse anyway).
 import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
@@ -15,6 +17,23 @@ ColumnLayout {
     property string problem: ""
     property var all: []
     readonly property var shown: Logic.filterApps(section.all, filter.text, 200)
+    /// The id of the app whose preview is open, "" when none.
+    property string previewing: ""
+
+    /// Reads when the tab is first shown, also when Settings opens the page on this tab.
+    function autoload() {
+        if (section.visible && !section.loaded && !section.loading)
+            section.refresh();
+    }
+
+    onVisibleChanged: section.autoload()
+
+    Connections {
+        target: section.host
+        function onCtxChanged() {
+            section.autoload();
+        }
+    }
 
     function refresh() {
         if (!section.host || !section.host.ctx || section.loading)
@@ -39,14 +58,24 @@ ColumnLayout {
         highlight: section.host ? section.host.highlight : ""
         Layout.fillWidth: true
 
-        UqLabel {
-            text: "Listing apps…"
-            visible: section.loading
-        }
         QQC2.Button {
-            text: "List apps"
+            text: section.loaded ? "Refresh" : "List apps"
             enabled: !section.loading
             onClicked: section.refresh()
+        }
+    }
+    ColumnLayout {
+        visible: section.loading
+        spacing: 4
+        Layout.fillWidth: true
+
+        QQC2.ProgressBar {
+            indeterminate: true
+            Layout.fillWidth: true
+        }
+        UqLabel {
+            text: "Listing your apps and measuring them…"
+            opacity: 0.7
         }
     }
     Outcome {
@@ -93,6 +122,11 @@ ColumnLayout {
                 spacing: 12
                 Layout.fillWidth: true
 
+                UqAppIcon {
+                    name: row.modelData.icon
+                    label: row.modelData.name
+                    size: 32
+                }
                 UqLabel {
                     text: row.modelData.name
                     wrapMode: Text.Wrap
@@ -107,11 +141,23 @@ ColumnLayout {
                     visible: row.modelData.partOf !== null
                 }
                 QQC2.Button {
-                    text: "Uninstall…"
+                    text: section.previewing === row.modelData.id ? "Close" : "Uninstall…"
                     visible: row.modelData.partOf === null
                     enabled: !!section.host && !section.host.busy && row.modelData.canUninstall
-                    onClicked: section.host.write(row.key, "uninstall", [row.modelData.id], () => section.refresh(), "section:apps")
+                    onClicked: section.previewing = section.previewing === row.modelData.id ? "" : row.modelData.id
                 }
+            }
+            UninstallPreview {
+                visible: section.previewing === row.modelData.id
+                active: visible
+                host: section.host
+                app: row.modelData
+                noteKey: row.key
+                after: () => {
+                    section.previewing = "";
+                    section.refresh();
+                }
+                Layout.fillWidth: true
             }
             Outcome {
                 host: section.host

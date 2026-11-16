@@ -30,18 +30,30 @@ ColumnLayout {
 
     SettingRow {
         settingId: "system-space"
-        label: "System space"
+        label: section.checked && section.view.problem === "" ? section.view.totalText : "System space"
         highlight: section.host ? section.host.highlight : ""
         Layout.fillWidth: true
 
-        UqLabel {
-            text: "Checking system space…"
-            visible: section.loading
-        }
         QQC2.Button {
-            text: "Check system space"
+            text: section.checked ? "Check again" : "Check system space"
             enabled: !section.loading
             onClicked: section.refresh()
+        }
+    }
+    ColumnLayout {
+        visible: section.loading
+        spacing: 4
+        Layout.fillWidth: true
+
+        QQC2.ProgressBar {
+            indeterminate: true
+            Layout.fillWidth: true
+        }
+        UqLabel {
+            text: "Checking package files, system logs and crash dumps…"
+            wrapMode: Text.Wrap
+            opacity: 0.7
+            Layout.fillWidth: true
         }
     }
     UqLabel {

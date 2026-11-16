@@ -44,6 +44,11 @@ test("fixture scan: user categories, plain labels, skipped and unavailable apart
   ]);
   assert.equal(view.unavailable, "Not on this computer: Unused container images and volumes");
   assert.equal(view.switchedOff, "Switched off in crumBS: Developer caches, Build folders in your projects");
+  assert.equal(view.total, view.rows.reduce((n, r) => n + r.total, 0));
+  assert.notEqual(view.totalText, "");
+  assert.equal(Math.max(...view.rows.map((r) => r.share)), 1);
+  assert.ok(view.rows.every((r) => r.share >= 0 && r.share <= 1));
+  assert.equal(L.emptyView().totalText, "");
 });
 
 test("fixture scan-system: system rows, opt-in note, unknown sizes", () => {
@@ -289,10 +294,16 @@ test("manifest: the page, its settings and its programs", () => {
     ["leftovers", "Leftovers of removed apps"],
     ["history", "Recent cleanups"],
     ["apps", "Apps and their size"],
+    ["preferences", "What crumBS looks at"],
   ]);
+  assert.equal(manifest.uq_api, 2, "the page uses Settings' tabs and cards");
   for (const s of manifest.setting) assert.ok(s.keywords?.length > 0, `${s.id} has no keywords`);
   assert.deepEqual(manifest.command.map((c) => c.id), [
-    "scan", "scan-system", "orphans", "history", "apps", "clean", "clean-for-good", "clean-system", "orphan-trash", "restore", "uninstall",
+    "scan", "scan-system", "orphans", "history", "apps", "orphans-system", "config",
+    "preview-uninstall", "preview-keep-data", "preview-leftovers",
+    "config-set", "config-add", "config-remove", "config-reset",
+    "clean", "clean-for-good", "clean-system", "orphan-trash", "orphan-delete-system", "restore",
+    "uninstall", "uninstall-keep-data", "uninstall-leftovers",
   ]);
   const argvTail = (id) => command(id).argv.slice(1).join(" ");
   assert.equal(argvTail("scan"), "scan --json");
@@ -307,12 +318,25 @@ test("manifest: the page, its settings and its programs", () => {
   assert.equal(argvTail("restore"), "restore --json");
   assert.equal(argvTail("apps"), "apps list --sort size --json");
   assert.equal(argvTail("uninstall"), "uninstall --yes --json");
+  assert.equal(argvTail("uninstall-keep-data"), "uninstall --keep-data --yes --json");
+  assert.equal(argvTail("uninstall-leftovers"), "uninstall --leftovers-only --yes --json");
+  assert.equal(argvTail("preview-uninstall"), "uninstall --dry-run --json");
+  assert.equal(argvTail("preview-keep-data"), "uninstall --keep-data --dry-run --json");
+  assert.equal(argvTail("preview-leftovers"), "uninstall --leftovers-only --dry-run --json");
+  assert.equal(argvTail("orphans-system"), "orphans --system --json");
+  assert.equal(argvTail("orphan-delete-system"), "orphans --clean --system --yes --json --select");
+  assert.equal(argvTail("config"), "config show --json");
+  for (const verb of ["set", "add", "remove", "reset"]) assert.equal(argvTail(`config-${verb}`), `config ${verb} --json`);
+  assert.deepEqual(command("config").watch, { files: ["~/.config/crumbs/config.toml"] });
   assert.deepEqual(command("history").watch, { files: ["~/.local/state/crumbs/history.jsonl"] });
   for (const c of manifest.command) assert.equal(c.output, "json");
   const timeouts = Object.fromEntries(manifest.command.map((c) => [c.id, c.timeout_ms]));
   assert.deepEqual(timeouts, {
     scan: 180000, "scan-system": 180000, orphans: 120000, history: 30000, apps: 120000,
     clean: 600000, "clean-for-good": 600000, "clean-system": 600000, "orphan-trash": 300000, restore: 300000, uninstall: 600000,
+    "orphans-system": 120000, config: 30000, "preview-uninstall": 120000, "preview-keep-data": 120000, "preview-leftovers": 120000,
+    "config-set": 30000, "config-add": 30000, "config-remove": 30000, "config-reset": 30000,
+    "orphan-delete-system": 300000, "uninstall-keep-data": 600000, "uninstall-leftovers": 600000,
   });
 });
 
@@ -325,7 +349,7 @@ test("patterns_match_manifest", () => {
     }
     assert.equal((c.args ?? []).length, Object.keys(L.PATTERNS[c.id] ?? {}).length, `${c.id}: argument count differs`);
   }
-  assert.equal(seen.size, 6);
+  assert.equal(seen.size, 19);
   assert.equal(command("clean").args[0].pattern, `^(${L.USER_TRASH.join("|")})$`);
   assert.equal(command("clean-for-good").args[0].pattern, `^(${L.USER_FOR_GOOD.join("|")})$`);
   assert.equal(command("clean-system").args[0].pattern, `^(${L.SYSTEM.join("|")})$`);
@@ -374,10 +398,99 @@ test("confirms_match_plan", () => {
     "orphan-trash": "Move %s to the trash?",
     uninstall: "Uninstall %s and remove its leftovers? A removed package can't be put back by crumBS.",
     restore: "Put back the files from this cleanup?",
+    "uninstall-keep-data": "Uninstall %s and keep your settings and data? A removed package can't be put back by crumBS.",
+    "uninstall-leftovers": "Remove the leftovers of %s? The app itself stays installed.",
+    "orphan-delete-system": "Delete %s for good? This needs your password and can't be undone.",
   };
   for (const c of manifest.command) assert.equal(c.confirm, plan[c.id], `${c.id}: confirm`);
   for (const id of Object.keys(plan)) assert.ok(command(id), `${id} is missing`);
-  // every command with arguments that changes something asks; the reads take no arguments
-  for (const c of manifest.command) assert.equal(Boolean(c.args), Boolean(c.confirm), `${c.id}: args and confirm go together`);
+  // every command that removes or puts back asks first; the previews (dry runs) and settings
+  // changes don't remove anything, and the plain reads take no arguments
+  const quiet = new Set(["preview-uninstall", "preview-keep-data", "preview-leftovers", "config-set", "config-add", "config-remove", "config-reset"]);
+  for (const c of manifest.command) {
+    if (quiet.has(c.id)) {
+      assert.ok(c.args && !c.confirm, `${c.id}: takes arguments and doesn't ask`);
+      assert.ok(c.argv.includes("--dry-run") || c.argv[1] === "config", `${c.id}: a quiet command must not remove anything`);
+    } else {
+      assert.equal(Boolean(c.args), Boolean(c.confirm), `${c.id}: args and confirm go together`);
+    }
+  }
 });
 
+
+// ---- the uninstall preview and preferences -------------------------------------------------
+
+const dryRun = (actions, notes = []) => ({ code: 0, output: { schema_version: 1, command: "uninstall", data: { plans: [{ app_id: "pacman:x", actions, notes, total_size: 0 }], report: null }, errors: [] } });
+
+test("removalPreview groups what goes, in order, and says what can come back", () => {
+  const v = L.removalPreview(dryRun([
+    { action: { type: "trash", path: "/home/u/.cache/x" }, size: 2000, group: "cache", reason: "" },
+    { action: { type: "package-remove", names: ["x", "x-data"], source: "pacman" }, size: 0, group: "app", reason: "" },
+    { action: { type: "trash", path: "/home/u/.config/x" }, size: 1000, group: "settings", reason: "" },
+    { action: { type: "edit-file", path: "/home/u/.config/mimeapps.list", remove_lines: ["a"] }, size: 0, group: "launchers", reason: "" },
+    { action: { type: "trash", path: "/elsewhere\nx" }, size: null, reason: "" },
+  ], ["the app itself stays installed"]), "/home/u");
+  assert.equal(v.problem, "");
+  assert.deepEqual(v.groups.map((g) => g.key), ["app", "settings", "cache", "launchers", "other"]);
+  assert.equal(v.groups[0].items[0], "Package x, x-data");
+  assert.equal(v.groups[0].how, "Removed for good");
+  assert.equal(v.groups[1].items[0], "~/.config/x");
+  assert.equal(v.groups[1].how, "Goes to the trash");
+  assert.equal(v.groups[3].how, "Goes to the trash", "an edited file keeps a backup");
+  assert.equal(v.groups[4].items[0], "/elsewhere x", "control characters are cut");
+  assert.equal(v.totalText, "Frees about 3.0 kB (some sizes unknown)");
+  assert.deepEqual(v.notes, ["the app itself stays installed"]);
+  assert.equal(L.removalPreview(dryRun([])).totalText, "Nothing to remove.");
+  assert.equal(L.removalPreview({ code: 2, output: { data: null, errors: [{ source: "cli", message: "no such app" }] } }).problem, "no such app");
+  assert.notEqual(L.removalPreview({ error: "timed out" }).problem, "");
+  const many = L.removalPreview(dryRun(Array.from({ length: 80 }, (_, i) => ({ action: { type: "trash", path: `/p/${i}` }, size: 1, group: "data" }))));
+  assert.equal(many.groups[0].items.length, 50);
+  assert.equal(many.groups[0].more, 30);
+  for (const mode of ["all", "keep-data", "leftovers", "nope"]) {
+    const c = L.uninstallCommands(mode);
+    assert.ok(command(c.preview) && command(c.run), `${mode}: commands exist`);
+    assert.ok(command(c.preview).argv.includes("--dry-run") && !command(c.run).argv.includes("--dry-run"));
+  }
+  assert.equal(L.uninstallCommands("nope").run, "uninstall");
+});
+
+test("configView reads config show, and the category switches change the right lists", () => {
+  const v = L.configView({ code: 0, output: { data: { path: "~/.config/crumbs/config.toml", keys: [], values: {
+    protect: ["~/Games", 3], exclude: [], appimage_dirs: ["~/Apps"], project_dirs: [], categories_off: ["dev-cache", "cache"], categories_on: ["cache"],
+    temp_age_days: 3, log_age_days: 14, build_age_days: 7, snapshots_keep: 3, pkg_cache_keep: 0, journal_max: "1G",
+  } } } });
+  assert.equal(v.problem, "");
+  assert.deepEqual(v.numbers.map((n) => n.key), L.NUMBER_KEYS);
+  assert.equal(v.numbers[0].value, 3);
+  assert.equal(v.numbers[4].value, 0);
+  assert.equal(v.numbers[5].value, "1G");
+  assert.deepEqual(v.lists[0].entries, ["~/Games"]);
+  assert.equal(L.categoryOn("dev-cache", v), false);
+  assert.equal(L.categoryOn("cache", v), true, "categories_on wins");
+  assert.equal(L.categoryOn("build-output", v), false, "build-output only when listed on");
+  assert.equal(L.categoryOn("logs", v), true);
+  assert.deepEqual(L.categorySteps("dev-cache", true, v), [["config-remove", ["categories_off", "dev-cache"]]]);
+  assert.deepEqual(L.categorySteps("build-output", true, v), [["config-add", ["categories_on", "build-output"]]]);
+  assert.deepEqual(L.categorySteps("cache", false, v), [["config-remove", ["categories_on", "cache"]]]);
+  assert.deepEqual(L.categorySteps("logs", false, v), [["config-add", ["categories_off", "logs"]]]);
+  for (const [cmd, args] of [...L.categorySteps("dev-cache", true, v), ...L.categorySteps("logs", false, v)]) assert.equal(L.argsProblem(cmd, args), "");
+  assert.equal(L.argsProblem("config-set", ["journal_max", "500M"]), "");
+  assert.equal(L.argsProblem("config-set", ["temp_age_days", "7"]), "");
+  assert.notEqual(L.argsProblem("config-set", ["protect", "7"]), "");
+  assert.notEqual(L.argsProblem("config-set", ["temp_age_days", "-1"]), "");
+  assert.equal(L.argsProblem("config-add", ["protect", "~/Games"]), "");
+  assert.notEqual(L.argsProblem("config-add", ["protect", "Games/x"]), "");
+  assert.notEqual(L.argsProblem("config-add", ["temp_age_days", "~/x"]), "");
+  assert.equal(L.argsProblem("orphan-delete-system", ["/opt/oldtool"]), "");
+  assert.notEqual(L.argsProblem("orphan-delete-system", ["/opt/a/b"]), "");
+  assert.notEqual(L.argsProblem("orphan-delete-system", ["/home/u/x"]), "");
+  assert.notEqual(L.argsProblem("orphan-delete-system", ["/etc/x"]), "");
+  assert.ok(L.configView({ error: "timed out" }).problem !== "");
+  assert.deepEqual(L.userCategories().map((c) => c.category), [...L.USER_TRASH, ...L.USER_FOR_GOOD]);
+});
+
+test("apps carry their icon name", () => {
+  const rows = L.apps({ apps: [{ id: "pacman:firefox", name: "firefox", display_name: "Firefox", icon: "firefox", source: "pacman" }, { id: "pacman:x", name: "x", icon: 7 }] });
+  assert.equal(rows[0].icon, "firefox");
+  assert.equal(rows[1].icon, "");
+});
