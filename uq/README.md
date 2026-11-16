@@ -6,7 +6,7 @@ these files unless uQ is installed; the `crum-bs` and `crum-bs-bin` packages ins
 
 | File | Installed to | What it does |
 |---|---|---|
-| `launcher/actions/crumbs-uninstall.appaction` | `/usr/share/uq/launcher/actions/` | "Uninstall…" in the right-click menu of every app row in Spotlight and the app menu |
+| `launcher/actions/crumbs-uninstall.appaction` | `/usr/share/uq/launcher/actions/` | "Uninstall…" in the right-click menu of every app row in look=see>do_ and the app menu |
 | `pages/crumbs/` (`page.toml`, `Page.qml`, section components, `logic.js`) | `/usr/share/uq/settings/pages/crumbs/` | the "Storage and cleanup" page under Apps in uQ Settings |
 
 ## "Uninstall…"
