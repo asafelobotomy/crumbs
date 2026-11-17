@@ -341,6 +341,7 @@ mod tests {
                 bytes,
                 files: 0,
                 errors,
+                uncompressed: false,
             },
             preselected: false,
             scope: Scope::SystemTree,

@@ -339,6 +339,7 @@ mod tests {
 
     fn item(preselected: bool, note: Option<&str>) -> BloatItem {
         BloatItem {
+            size_uncompressed: false,
             category: Category::Cache,
             path: None,
             label: String::new(),

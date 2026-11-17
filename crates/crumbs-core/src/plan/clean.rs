@@ -127,6 +127,9 @@ pub fn build_clean_plan(
     if actions.iter().any(|a| a.scope == Scope::HomeTrash) {
         notes.push(NOTE_PERMANENT_TRASH.into());
     }
+    if items.iter().any(|i| i.size_uncompressed) {
+        notes.push(NOTE_UNCOMPRESSED.into());
+    }
     let total_size = actions.iter().map(|a| a.size).sum();
     Ok(Plan {
         app_id: None,

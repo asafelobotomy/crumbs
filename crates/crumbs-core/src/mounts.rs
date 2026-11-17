@@ -52,6 +52,73 @@ pub fn mounts_at_or_below(env: &Env, in_system: &Path) -> Result<Vec<PathBuf>, C
     Ok(found)
 }
 
+/// The filesystem of the mount holding the in-system path `in_system`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MountFs {
+    /// The filesystem type, such as `btrfs`.
+    pub fstype: String,
+    /// The per-mount options and the filesystem's own (super) options.
+    pub options: Vec<String>,
+}
+
+impl MountFs {
+    /// Whether the mount is btrfs with compression switched on by a mount
+    /// option (`compress` or `compress-force`, other than `=no`).
+    pub fn btrfs_compresses(&self) -> bool {
+        self.fstype == "btrfs"
+            && self.options.iter().any(|o| {
+                let (name, value) = o.split_once('=').unwrap_or((o, ""));
+                matches!(name, "compress" | "compress-force") && value != "no"
+            })
+    }
+}
+
+/// The filesystem of the mount holding the canonical in-system path
+/// `in_system`: the mountinfo entry whose mount point is the longest one at
+/// or above it, the last such entry when several share a mount point (it
+/// covers the earlier ones). `None` when mountinfo cannot be read or no
+/// entry matches.
+pub(crate) fn mount_fs(env: &Env, in_system: &Path) -> Option<MountFs> {
+    let data = fs::read(env.sys("/proc/self/mountinfo")).ok()?;
+    let mut best: Option<(usize, MountFs)> = None;
+    for line in data.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        let Some(mount) = parse_mount_point(line) else {
+            continue;
+        };
+        let mount = env.unsys(&mount);
+        if !in_system.starts_with(&mount) {
+            continue;
+        }
+        let depth = mount.components().count();
+        if best.as_ref().is_some_and(|(d, _)| *d > depth) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(line);
+        let fields: Vec<&str> = text.split(' ').collect();
+        let Some(sep) = fields.iter().position(|f| *f == "-") else {
+            continue;
+        };
+        let (Some(fstype), Some(mount_opts)) = (fields.get(sep + 1), fields.get(5)) else {
+            continue;
+        };
+        let super_opts = fields.get(sep + 3).copied().unwrap_or("");
+        let options = mount_opts
+            .split(',')
+            .chain(super_opts.split(','))
+            .filter(|o| !o.is_empty())
+            .map(str::to_string)
+            .collect();
+        best = Some((
+            depth,
+            MountFs {
+                fstype: (*fstype).to_string(),
+                options,
+            },
+        ));
+    }
+    best.map(|(_, fs)| fs)
+}
+
 /// Field 5 of a mountinfo line, unescaped; `None` when the line has too few
 /// fields, the mount point is not absolute, or an escape is not one of
 /// `\040`, `\011`, `\012`, `\134`.
@@ -167,6 +234,42 @@ mod tests {
             mounts_at_or_below(&env, Path::new("/opt/inky")).unwrap(),
             [PathBuf::from("/opt/inky/data")]
         );
+    }
+
+    #[test]
+    fn mount_fs_picks_the_deepest_and_last_mount() {
+        let t = FixtureTree::new();
+        let info = [
+            "1 0 0:1 / / rw - ext4 /dev/a rw\n",
+            "2 1 0:2 / /home rw,relatime - btrfs /dev/b rw,compress=zstd:3,ssd\n",
+            "3 1 0:3 / /home/solon/plain rw - btrfs /dev/c rw,ssd\n",
+            "4 1 0:4 / /home/solon/plain rw - btrfs /dev/c rw,compress-force=lzo\n",
+            "5 1 0:5 / /home/solon/off rw - btrfs /dev/d rw,compress=no\n",
+            "6 1 0:6 / /home/solon/x rw - xfs /dev/e rw,compress=zstd\n",
+        ]
+        .concat();
+        t.write("proc/self/mountinfo", info.as_bytes());
+        let env = t.env();
+        let fs = |p: &str| mount_fs(&env, Path::new(p)).unwrap();
+        assert_eq!(fs("/etc").fstype, "ext4");
+        assert!(!fs("/etc").btrfs_compresses());
+        assert!(fs("/home/solon/.cache").btrfs_compresses());
+        assert_eq!(
+            fs("/home/solon/.cache").options,
+            ["rw", "relatime", "rw", "compress=zstd:3", "ssd"]
+        );
+        // The later mount over the same point wins.
+        assert!(fs("/home/solon/plain/a").btrfs_compresses());
+        assert!(!fs("/home/solon/off/a").btrfs_compresses());
+        assert!(!fs("/home/solon/x").btrfs_compresses());
+        // `/home/solonx` is not below `/home/solon/x`.
+        assert!(fs("/home/solon/xy").btrfs_compresses());
+    }
+
+    #[test]
+    fn mount_fs_without_mountinfo_is_none() {
+        let t = FixtureTree::new();
+        assert!(mount_fs(&t.env(), Path::new("/home")).is_none());
     }
 
     #[test]

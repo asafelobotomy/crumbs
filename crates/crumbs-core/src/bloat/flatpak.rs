@@ -47,6 +47,7 @@ impl Scanner for FlatpakUnusedScanner {
             ),
         };
         Ok(vec![BloatItem {
+            size_uncompressed: false,
             category: Category::FlatpakUnused,
             path: None,
             label,

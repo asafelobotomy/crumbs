@@ -64,6 +64,7 @@ pub(super) fn privileged_item(
     args: Vec<String>,
 ) -> BloatItem {
     BloatItem {
+        size_uncompressed: false,
         category,
         path: None,
         label,

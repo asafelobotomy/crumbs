@@ -107,26 +107,38 @@ paths = ["$XDG_CONFIG_HOME/Slack"]
 match = { package = ["zoom"] }
 paths = ["~/.zoom", "$XDG_CONFIG_HOME/zoomus.conf"]
 
+# Go: the build cache and `go env -w` settings (never ~/go, which holds code)
+[[app]]
+match = { package = ["go", "golang", "golang-go", "golang-bin"] }
+paths = ["$XDG_CACHE_HOME/go-build", "$XDG_CONFIG_HOME/go"]
+
+# NVIDIA driver: the shader caches
+[[app]]
+match = { package = ["nvidia-utils", "nvidia-580xx-utils", "nvidia-570xx-utils", "nvidia-550xx-utils", "nvidia-470xx-utils", "nvidia-390xx-utils"] }
+paths = ["$XDG_CACHE_HOME/nvidia", "~/.nv"]
+
 # Android Studio
 [[app]]
 match = { package = ["android-studio"] }
 paths = ["$XDG_CONFIG_HOME/Google/AndroidStudio*", "$XDG_CACHE_HOME/Google/AndroidStudio*"]
 
-# uQ desktop: the shell's Hyprland files and generated theme. ~/.config/hypr
+# uQ desktop: the shell's Hyprland files and generated theme, its themes, and
+# uq-dev's workspace (packages, promotions, nested sessions). ~/.config/hypr
 # itself is shared with a plain Hyprland setup and is not listed.
 [[app]]
 match = { package = ["uq"] }
-paths = ["$XDG_CONFIG_HOME/hypr/uq", "$XDG_STATE_HOME/uq"]
+paths = ["$XDG_CONFIG_HOME/hypr/uq", "$XDG_STATE_HOME/uq", "$XDG_DATA_HOME/uq", "$XDG_DATA_HOME/uq-dev"]
 
 # scdr: rules and imported ananicy rules. /var/lib/scdr is the daemon's own.
 [[app]]
 match = { package = ["scdr"] }
 paths = ["/etc/scdr"]
 
-# noti-fi: notifd's rules and history
+# noti-fi: notifd's rules and history, the shell it keeps for rollback,
+# its daemon state and notify's own state
 [[app]]
 match = { package = ["noti-fi"] }
-paths = ["$XDG_CONFIG_HOME/notifd", "$XDG_DATA_HOME/notifd"]
+paths = ["$XDG_CONFIG_HOME/notifd", "$XDG_DATA_HOME/notifd", "$XDG_DATA_HOME/notifd.prev", "$XDG_STATE_HOME/notifd", "$XDG_STATE_HOME/notify"]
 
 # appOFholding: its library database, sandbox homes and extracted AppImages.
 # The AppImages it manages are its own as well; crumBS leaves them alone.

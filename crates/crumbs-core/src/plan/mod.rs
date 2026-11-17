@@ -182,6 +182,10 @@ pub struct PlanOptions {
     pub leftovers_only: bool,
 }
 
+/// Some sizes were counted before btrfs compression (see
+/// [`DiskUsage::uncompressed`](crate::size::DiskUsage)).
+pub const NOTE_UNCOMPRESSED: &str =
+    "sizes are counted before btrfs compression: the space freed can be smaller";
 pub const NOTE_APP_STAYS: &str = "the app itself stays installed (leftovers only)";
 pub const REASON_APPIMAGE: &str = "AppImage file";
 pub const REASON_UNMANAGED_LINK: &str = "link to the app's program";
@@ -234,6 +238,7 @@ pub fn build_plan_unmanaged(
     let mut actions = Vec::new();
     let mut notes = Vec::new();
     let mut skip_path: Option<PathBuf> = None;
+    let mut uncompressed = false;
     if let Some(app) = app {
         if let (SourceKind::Unmanaged, Some(t), false) = (app.source, target, opts.leftovers_only) {
             let action = if t.scope == Scope::SystemTree {
@@ -244,6 +249,7 @@ pub fn build_plan_unmanaged(
             } else {
                 remove(t.path.clone(), opts)
             };
+            uncompressed |= t.size.uncompressed;
             actions.push(PlannedAction {
                 group: Some(Group::App),
                 action,
@@ -286,9 +292,11 @@ pub fn build_plan_unmanaged(
                 message: "AppImage has no location".into(),
             })?;
             let fingerprint = safety::fingerprint(env, &location)?;
+            let size = disk_usage(env, &location);
+            uncompressed |= size.uncompressed;
             actions.push(PlannedAction {
                 group: Some(Group::App),
-                size: disk_usage(env, &location).bytes,
+                size: size.bytes,
                 action: remove(location.clone(), opts),
                 fingerprint,
                 scope: Scope::Home,
@@ -314,6 +322,7 @@ pub fn build_plan_unmanaged(
             if !notes.iter().any(|n| n == NOTE_SYSTEM_DELETE) {
                 notes.push(NOTE_SYSTEM_DELETE.into());
             }
+            uncompressed |= f.size.uncompressed;
             actions.push(PlannedAction {
                 group: Some(Group::of(f.kind)),
                 action: Action::Delete {
@@ -337,6 +346,7 @@ pub fn build_plan_unmanaged(
             // Editing frees nothing.
             (edit, 0)
         } else {
+            uncompressed |= f.size.uncompressed;
             (remove(f.path.clone(), opts), f.size.bytes)
         };
         actions.push(PlannedAction {
@@ -362,6 +372,9 @@ pub fn build_plan_unmanaged(
                 a.depends_on = Some(0);
             }
         }
+    }
+    if uncompressed {
+        notes.push(NOTE_UNCOMPRESSED.into());
     }
     let total_size = actions.iter().map(|a| a.size).sum();
     Ok(Plan {

@@ -86,6 +86,35 @@ pub fn appofholding_library(env: &Env) -> Option<PathBuf> {
         .then(|| env.home.join("Applications"))
 }
 
+/// What appOFholding's library holds (its AppImages and the folders it keeps
+/// beside them), as AppImage apps named after each entry, sorted. crumBS
+/// leaves these apps alone, but their settings and data are still theirs,
+/// so they are not orphans. Empty when appOFholding is not in use.
+pub fn appofholding_apps(env: &Env) -> Vec<App> {
+    let Some(dir) = appofholding_library(env) else {
+        return Vec::new();
+    };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut apps: Vec<App> = rd
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if name.starts_with('.') {
+                return None;
+            }
+            let mut app = App::new(SourceKind::AppImage, &name);
+            app.display_name = split_appimage_name(&name).0;
+            app.location = Some(env.unsys(&e.path()));
+            app.installation = Installation::User;
+            Some(app)
+        })
+        .collect();
+    apps.sort_by(|a, b| a.name.cmp(&b.name));
+    apps
+}
+
 fn all_scan_dirs(env: &Env, cfg: &Config) -> Vec<(PathBuf, bool)> {
     let mut dirs = vec![
         (env.home.join("Applications"), false),

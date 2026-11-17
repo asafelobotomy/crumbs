@@ -36,6 +36,10 @@ const STOPLIST: [&str; 26] = [
     "settings",
 ];
 
+/// Suffixes of AUR packages that build or repackage an app under its own
+/// name.
+const PACKAGE_VARIANTS: [&str; 3] = ["-bin", "-git", "-appimage"];
+
 const MIN_LEN: usize = 3;
 const MIN_LOW_LEN: usize = 4;
 
@@ -106,6 +110,15 @@ impl Idents {
             app.name.clone()
         };
         push(&mut strong, &name, IdentKind::Name);
+        // An AUR-style variant (`paru-bin`, `foo-git`) keeps its files under
+        // the plain name.
+        if matches!(app.source, SourceKind::Pacman)
+            && let Some(plain) = PACKAGE_VARIANTS
+                .iter()
+                .find_map(|suffix| name.strip_suffix(suffix))
+        {
+            push(&mut strong, plain, IdentKind::Name);
+        }
         for d in &app.desktop_ids {
             push(&mut strong, desktop_stem(d), IdentKind::DesktopId);
         }

@@ -40,6 +40,7 @@ pub(super) fn new_item(
     }
     let fp = fingerprint(cx.env, &path).ok()?;
     Some(BloatItem {
+        size_uncompressed: false,
         category,
         path: Some(path),
         label,

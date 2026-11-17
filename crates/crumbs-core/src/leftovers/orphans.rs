@@ -7,13 +7,16 @@ use std::time::SystemTime;
 use crate::command::TRUSTED_DIRS;
 use crate::config::Config;
 use crate::env::Env;
+use crate::model::App;
 use crate::ownership::tmpfiles_declared;
 use crate::rules::{Rule, RuleOrigin, resolve_rule_paths, rule_matches};
 use crate::safety::{self, Scope};
 use crate::size::disk_usage;
+use crate::sources::appimage::appofholding_apps;
 
 use super::candidates::{Candidate, Subject, lexical};
-use super::matcher::LeftoverIndex;
+use super::matcher::{LeftoverIndex, claims};
+use super::score::Idents;
 use super::system::Claimant;
 use super::{Confidence, Finding, FindingKind};
 
@@ -55,6 +58,17 @@ const IGNORED_NAMES: &[&str] = &[
     "autostart",
     "menus",
     "xsettingsd",
+    // KDE's and GTK's shared settings, recent files and places.
+    "kdeglobals",
+    "session",
+    "recently-used.xbel",
+    "user-places.xbel",
+    "user-places.xbel.bak",
+    "user-places.xbel.tbcache",
+    // NSS's certificate database, used by every NSS program.
+    "pki",
+    // Storage and settings shared by podman, buildah, skopeo and others.
+    "containers",
 ];
 
 fn is_ignored(env: &Env, c: &Candidate) -> bool {
@@ -84,6 +98,26 @@ fn program_resolves(env: &Env, program: &str) -> bool {
             env.unsys(&env.home).join(".local/bin").join(program),
         ))
         .any(|p| exists(&p))
+}
+
+/// Whether an installed program is named like the candidate (`~/.config/gh`
+/// for `gh`, `~/.cargo` for `cargo`): its data, even when the package that
+/// provides the program has another name.
+fn program_installed(env: &Env, c: &Candidate) -> bool {
+    if !matches!(c.subject, Subject::Name(_)) {
+        return false;
+    }
+    let Some(name) = c.path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let name = name.strip_prefix('.').unwrap_or(name);
+    !name.is_empty() && !name.contains('/') && program_resolves(env, name)
+}
+
+/// Whether a launcher's program is missing: it is broken whoever made it.
+fn broken_launcher(env: &Env, c: &Candidate) -> bool {
+    matches!(&c.subject, Subject::Launcher(e)
+        if e.exec_program.as_deref().is_some_and(|p| !program_resolves(env, p)))
 }
 
 /// What names a rule in messages: its first package, else its first
@@ -118,6 +152,15 @@ pub(crate) fn find_orphans_at(
 ) -> Vec<Finding> {
     let env = idx.env();
     let apps = &idx.inventory().apps;
+    // AppImages appOFholding manages are not in the inventory, but they are
+    // installed: what they claim is not an orphan.
+    let held: Vec<(App, Idents)> = appofholding_apps(env)
+        .into_iter()
+        .map(|a| {
+            let ids = Idents::of(&a);
+            (a, ids)
+        })
+        .collect();
 
     // Resolved paths of every rule, split by whether an installed app uses it.
     let mut live: Vec<PathBuf> = Vec::new();
@@ -167,6 +210,8 @@ pub(crate) fn find_orphans_at(
             || idx.matched_by_any(i)
             || is_ignored(env, c)
             || shadowed_by_live(&c.path, &live, &claimed)
+            || program_installed(env, c)
+            || (held.iter().any(|(a, ids)| claims(c, a, ids)) && !broken_launcher(env, c))
         {
             continue;
         }

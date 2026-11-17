@@ -321,6 +321,7 @@ impl Scanner for TempScanner {
                 continue;
             };
             out.push(BloatItem {
+                size_uncompressed: false,
                 category: Category::Temp,
                 label: display_path(cx.env, &path),
                 path: Some(path),
