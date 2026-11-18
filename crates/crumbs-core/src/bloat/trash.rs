@@ -145,6 +145,7 @@ impl Scanner for TrashScanner {
                 (None, false) => format!("{} (no trash info)", name.to_string_lossy()),
             };
             out.push(BloatItem {
+                size_uncompressed: false,
                 category: Category::Trash,
                 path: Some(path),
                 label,

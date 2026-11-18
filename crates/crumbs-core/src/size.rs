@@ -1,5 +1,7 @@
 //! Sequential disk-usage measurement (allocated size, `st_blocks * 512`).
 
+mod btrfs;
+
 use std::collections::HashSet;
 use std::fs;
 use std::io;
@@ -10,12 +12,18 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::env::Env;
+use crate::mounts::{MountFs, mount_fs};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct DiskUsage {
     pub bytes: u64,
     pub files: u64,
     pub errors: u64,
+    /// `bytes` counts files that btrfs may keep compressed at their
+    /// uncompressed size, so removing them can free less. False when there
+    /// are none, or when crumbs read their real size (as root).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub uncompressed: bool,
 }
 
 /// Formats a byte count in IEC units with one decimal place.
@@ -37,38 +45,147 @@ pub fn fmt_size(bytes: u64) -> String {
 ///
 /// Does not follow symlinks, does not cross devices, counts each
 /// `(dev, ino)` once, and counts unreadable entries in `errors`.
+///
+/// On btrfs, which reports a compressed file's blocks uncompressed, the
+/// result says so in `uncompressed` (the mount compresses, or a file is
+/// marked compressed). Running as root, crumbs instead reads the real size
+/// of each file's extents, as `compsize` does, counting an extent shared by
+/// several files of the tree once.
 pub fn disk_usage(env: &Env, in_system: &Path) -> DiskUsage {
     let start = env.sys(&in_system.to_string_lossy());
-    let mut usage = DiskUsage::default();
     let Ok(meta) = fs::symlink_metadata(&start) else {
-        usage.errors = 1;
-        return usage;
-    };
-    let dev = meta.dev();
-    let mut seen: HashSet<(u64, u64)> = HashSet::new();
-    let mut stack: Vec<PathBuf> = Vec::new();
-    visit(&start, &meta, dev, &mut seen, &mut stack, &mut usage);
-    while let Some(dir) = stack.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => {
-                usage.errors += 1;
-                continue;
-            }
+        return DiskUsage {
+            errors: 1,
+            ..DiskUsage::default()
         };
-        for entry in entries {
-            let Ok(entry) = entry else {
-                usage.errors += 1;
-                continue;
-            };
-            let path = entry.path();
-            match fs::symlink_metadata(&path) {
-                Ok(m) => visit(&path, &m, dev, &mut seen, &mut stack, &mut usage),
-                Err(_) => usage.errors += 1,
-            }
+    };
+    let mount = mount_fs(env, in_system);
+    let btrfs = mount.as_ref().map(|m| m.fstype == "btrfs") == Some(true);
+    if btrfs
+        && rustix::process::geteuid().is_root()
+        && let Some(usage) = exact_usage(&start, &meta)
+    {
+        return usage;
+    }
+    let compresses = btrfs.then(|| mount.as_ref().is_some_and(MountFs::btrfs_compresses));
+    let mut walk = Walk::new(&meta, compresses, None);
+    // Without an extent search, a walk cannot fail.
+    let _ = walk.run(&start, &meta);
+    walk.usage
+}
+
+/// [`disk_usage`] as root on btrfs: the real size of the extents. `None`
+/// when a search fails (not root after all, or not btrfs), so the caller
+/// falls back to counting blocks.
+fn exact_usage(start: &Path, meta: &fs::Metadata) -> Option<DiskUsage> {
+    let dir = if meta.is_dir() {
+        start.to_path_buf()
+    } else {
+        let parent = start.parent()?;
+        // The search runs in the parent's subvolume.
+        if fs::symlink_metadata(parent).ok()?.dev() != meta.dev() {
+            return None;
+        }
+        parent.to_path_buf()
+    };
+    let extents = btrfs::Extents::open(&dir).ok()?;
+    let mut walk = Walk::new(meta, None, Some(extents));
+    walk.run(start, meta).ok()?;
+    let extents = walk.extents.take()?;
+    walk.usage.bytes = walk.usage.bytes.saturating_add(extents.bytes);
+    Some(walk.usage)
+}
+
+/// One measurement of a tree.
+struct Walk {
+    dev: u64,
+    seen: HashSet<(u64, u64)>,
+    stack: Vec<PathBuf>,
+    usage: DiskUsage,
+    /// On btrfs: whether the mount compresses. `None` elsewhere.
+    compresses: Option<bool>,
+    /// As root on btrfs: where a regular file's size is read from.
+    extents: Option<btrfs::Extents>,
+}
+
+impl Walk {
+    fn new(
+        start: &fs::Metadata,
+        compresses: Option<bool>,
+        extents: Option<btrfs::Extents>,
+    ) -> Self {
+        Walk {
+            dev: start.dev(),
+            seen: HashSet::new(),
+            stack: Vec::new(),
+            usage: DiskUsage::default(),
+            compresses,
+            extents,
         }
     }
-    usage
+
+    /// Walks from `start`; fails only when an extent search fails.
+    fn run(&mut self, start: &Path, meta: &fs::Metadata) -> io::Result<()> {
+        self.visit(start, meta)?;
+        while let Some(dir) = self.stack.pop() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(_) => {
+                    self.usage.errors += 1;
+                    continue;
+                }
+            };
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    self.usage.errors += 1;
+                    continue;
+                };
+                let path = entry.path();
+                match fs::symlink_metadata(&path) {
+                    Ok(m) => self.visit(&path, &m)?,
+                    Err(_) => self.usage.errors += 1,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Accounts for one entry; queues it when it is a directory.
+    fn visit(&mut self, path: &Path, meta: &fs::Metadata) -> io::Result<()> {
+        if meta.dev() != self.dev || !self.seen.insert((meta.dev(), meta.ino())) {
+            return Ok(());
+        }
+        let blocks = meta.blocks().saturating_mul(512);
+        if meta.is_dir() {
+            self.stack.push(path.to_path_buf());
+            self.usage.bytes = self.usage.bytes.saturating_add(blocks);
+            return Ok(());
+        }
+        self.usage.files += 1;
+        if meta.is_file() && blocks > 0 {
+            if let Some(extents) = &mut self.extents {
+                return extents.add_inode(meta.ino());
+            }
+            if let Some(compresses) = self.compresses
+                && !self.usage.uncompressed
+                && (compresses || marked_compressed(path))
+            {
+                self.usage.uncompressed = true;
+            }
+        }
+        self.usage.bytes = self.usage.bytes.saturating_add(blocks);
+        Ok(())
+    }
+}
+
+/// Whether the file at the real path `path` carries the compressed
+/// attribute (`chattr +c`, or a btrfs `compression` property inherited from
+/// its directory).
+fn marked_compressed(path: &Path) -> bool {
+    use rustix::fs::{AtFlags, CWD, StatxAttributes, StatxFlags, statx};
+    let bit = StatxAttributes::COMPRESSED;
+    statx(CWD, path, AtFlags::SYMLINK_NOFOLLOW, StatxFlags::empty())
+        .is_ok_and(|s| s.stx_attributes_mask.contains(bit) && s.stx_attributes.contains(bit))
 }
 
 /// [`disk_usage`] for each of `paths` in parallel, in the same order. Each
@@ -133,28 +250,6 @@ pub(crate) fn mount_id(path: &Path, meta: &fs::Metadata) -> Option<u64> {
         }
         Ok(_) | Err(Errno::NOSYS) => Some(meta.dev()),
         Err(_) => None,
-    }
-}
-
-/// Accounts for one entry; queues it when it is a directory.
-fn visit(
-    path: &Path,
-    meta: &fs::Metadata,
-    dev: u64,
-    seen: &mut HashSet<(u64, u64)>,
-    stack: &mut Vec<PathBuf>,
-    usage: &mut DiskUsage,
-) {
-    if meta.dev() != dev || !seen.insert((meta.dev(), meta.ino())) {
-        return;
-    }
-    usage.bytes = usage
-        .bytes
-        .saturating_add(meta.blocks().saturating_mul(512));
-    if meta.is_dir() {
-        stack.push(path.to_path_buf());
-    } else {
-        usage.files += 1;
     }
 }
 
@@ -296,6 +391,44 @@ mod tests {
         assert!(disk_usage_many(&env, &[]).is_empty());
     }
 
+    fn mount_line(mount: &Path, opts: &str) -> String {
+        format!("2 1 0:2 / {} rw - btrfs /dev/b {opts}\n", mount.display())
+    }
+
+    #[test]
+    fn btrfs_compression_is_flagged() {
+        if rustix::process::geteuid().is_root() {
+            // As root on btrfs the size would be read exactly instead.
+            return;
+        }
+        let t = FixtureTree::new();
+        t.write("/z/a", &[1u8; 5000]);
+        t.write("/z/empty", b"");
+        t.write("/plain/b", &[1u8; 5000]);
+        t.write("/ext/c", &[1u8; 5000]);
+        let root = t.dir.path();
+        let info = [
+            "1 0 0:1 / / rw - ext4 /dev/a rw\n".to_string(),
+            mount_line(&root.join("z"), "rw,compress=zstd:3"),
+            mount_line(&root.join("plain"), "rw,ssd"),
+        ]
+        .concat();
+        t.write("proc/self/mountinfo", info.as_bytes());
+        let env = t.env();
+        let z = disk_usage(&env, Path::new("/z"));
+        assert!(z.uncompressed && z.bytes >= 5000, "{z:?}");
+        // An empty file takes no blocks, so nothing is compressed.
+        assert!(!disk_usage(&env, Path::new("/z/empty")).uncompressed);
+        // btrfs without the mount option: only files marked compressed
+        // count, and a fixture file is not.
+        assert!(!disk_usage(&env, Path::new("/plain")).uncompressed);
+        assert!(!disk_usage(&env, Path::new("/ext")).uncompressed);
+        let json = serde_json::to_value(z).unwrap();
+        assert_eq!(json["uncompressed"], true);
+        let json = serde_json::to_value(disk_usage(&env, Path::new("/ext"))).unwrap();
+        assert!(json.get("uncompressed").is_none());
+    }
+
     #[test]
     fn missing_path_is_zero_with_error() {
         let t = FixtureTree::new();
@@ -305,7 +438,8 @@ mod tests {
             DiskUsage {
                 bytes: 0,
                 files: 0,
-                errors: 1
+                errors: 1,
+                uncompressed: false,
             }
         );
     }

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Sizes on compressed btrfs:** btrfs reports compressed files at their uncompressed size, so a Rust `target` folder could be listed at three times the space it takes. `scan` now marks such sizes `≤` with a note, and `clean`, `uninstall` and `orphans --clean` previews say the space freed can be smaller. JSON: `size_uncompressed` on a BloatItem, `uncompressed_sizes` on a CategoryReport and `uncompressed` in a Finding's `size`, each present only when set. Running as root, crumbs reads the real on-disk size, as `compsize` does.
+- **`build-output`:** also finds electron-builder's `dist` (beside its config file) and Godot's `.godot` import cache (beside `project.godot`).
+- **Orphans:** no longer lists data of installed software under another name: folders named after an installed program (`~/.config/gh`, `~/.cargo`, `~/.npm`), AUR variants' files under the plain name (`paru-bin`), the apps in appOFholding's library (GutCheck's settings, say), the desktop's shared files (`kdeglobals`, `recently-used.xbel`, `user-places.xbel`, `pki`) and the `containers` storage. Go's build cache and settings and the NVIDIA shader cache are now their packages' leftovers.
+- **uQ:** `~/.local/share/uq` and uq-dev's `~/.local/share/uq-dev` (uq), and `~/.local/share/notifd.prev`, `~/.local/state/notifd` and `~/.local/state/notify` (noti-fi) are claimed, so they are never offered as orphans.
+
 ## 0.6.0
 
 - **`crumbs config`:** `show`, `set`, `add`, `remove` and `reset` read and change `~/.config/crumbs/config.toml` one key at a time, refusing a value the config would not accept before anything is written. With `--json` the result lists every value in effect and every key with the kind of value it takes, so uQ's Storage and cleanup page can offer the settings.

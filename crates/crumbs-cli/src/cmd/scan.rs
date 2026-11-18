@@ -58,6 +58,7 @@ fn skipped(category: Category) -> CategoryReport {
         items: Vec::new(),
         total: 0,
         unknown_sizes: 0,
+        uncompressed_sizes: 0,
         error: None,
         skipped: true,
         unavailable: None,
@@ -208,6 +209,11 @@ fn print_human(report: &ScanReport, details: bool) -> anyhow::Result<()> {
                 (total, 0) => fmt_size(total),
                 (total, _) => format!("{}+", fmt_size(total)),
             };
+            let size = if rep.uncompressed_sizes > 0 {
+                format!("{UP_TO}{size}")
+            } else {
+                size
+            };
             (rep.items.len().to_string(), size)
         };
         rows.push(vec![rep.category.as_str().to_string(), items, size, note]);
@@ -225,17 +231,33 @@ fn print_human(report: &ScanReport, details: bool) -> anyhow::Result<()> {
     } else {
         ""
     };
+    let uncompressed = report.categories.iter().any(|r| r.uncompressed_sizes > 0);
+    let up_to = if uncompressed { UP_TO } else { "" };
+    let mut out = anstream::stdout().lock();
     writeln!(
-        anstream::stdout().lock(),
-        "\nreclaimable: {}{plus} across {count} items",
+        out,
+        "\nreclaimable: {up_to}{}{plus} across {count} items",
         fmt_size(total)
     )?;
+    if uncompressed {
+        writeln!(out, "note: {UNCOMPRESSED_NOTE}")?;
+    }
     Ok(())
 }
+
+/// Marks a size counted before btrfs compression.
+const UP_TO: &str = "≤ ";
+const UNCOMPRESSED_NOTE: &str = "≤ marks sizes counted before btrfs compression: \
+     the space freed can be smaller";
 
 /// `SIZE  LABEL  NOTE`; labels are already display strings (home as `~`).
 fn item_line(i: &BloatItem) -> String {
     let size = i.size.map_or_else(|| "?".to_string(), fmt_size);
+    let size = if i.size_uncompressed {
+        format!("{UP_TO}{size}")
+    } else {
+        size
+    };
     let mut s = format!("{size}  {}", sanitise(&i.label));
     if let Some(n) = &i.note {
         s.push_str("  ");

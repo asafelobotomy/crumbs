@@ -82,16 +82,17 @@ impl Scanner for ContainersScanner {
                     .as_str()
                     .map(Path::new)
                     .filter(|m| m.is_absolute() && fs::symlink_metadata(cx.env.sys_path(m)).is_ok())
-                    .map(|m| disk_usage(cx.env, m).bytes);
+                    .map(|m| disk_usage(cx.env, m));
                 let mut item = command_item(
                     format!("{engine} volume {name}"),
-                    size,
+                    size.map(|u| u.bytes),
                     false,
                     Some(VOLUME_NOTE.into()),
                     engine,
                     &["volume", "rm", name],
                 );
                 item.preselected = false;
+                item.size_uncompressed = size.is_some_and(|u| u.uncompressed);
                 out.push(item);
             }
         }
@@ -108,6 +109,7 @@ fn command_item(
     args: &[&str],
 ) -> BloatItem {
     BloatItem {
+        size_uncompressed: false,
         category: Category::Containers,
         path: None,
         label,

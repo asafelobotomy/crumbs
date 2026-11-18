@@ -75,6 +75,7 @@ impl Scanner for Failing {
 
 fn item(cat: Category, path: &str, size: Option<u64>) -> BloatItem {
     BloatItem {
+        size_uncompressed: false,
         category: cat,
         path: Some(path.into()),
         label: path.into(),

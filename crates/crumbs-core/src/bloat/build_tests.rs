@@ -72,8 +72,10 @@ fn ignore_args(t: &FixtureTree, repo: &str, rels: &[&str]) -> Vec<String> {
 }
 
 /// The candidates in [`projects`]' repository, sorted.
-const APP_RELS: [&str; 5] = [
+const APP_RELS: [&str; 7] = [
     "android/app/build",
+    "desktop/dist",
+    "game/.godot",
     "kept/node_modules",
     "target",
     "tools/.venv",
@@ -114,8 +116,15 @@ fn projects() -> FixtureTree {
     t.write(&format!("{r}/android/app/build.gradle.kts"), b"");
     t.write(&format!("{r}/android/app/build/out.apk"), b"apk");
     t.write(&format!("{r}/tools/.venv/pyvenv.cfg"), b"home = /usr/bin");
+    t.write(&format!("{r}/desktop/package.json"), b"{}");
+    t.write(&format!("{r}/desktop/electron-builder.yml"), b"appId: x");
+    t.write(&format!("{r}/desktop/dist/app.AppImage"), b"elf");
+    t.write(&format!("{r}/game/project.godot"), b"[application]");
+    t.write(&format!("{r}/game/.godot/imported/a.ctex"), b"tex");
     // Look-alikes: no project file beside them, or not ignored.
     t.write(&format!("{r}/docs/build/index.html"), b"<html>");
+    t.write(&format!("{r}/site/package.json"), b"{}");
+    t.write(&format!("{r}/site/dist/index.html"), b"<html>");
     t.write(&format!("{r}/kept/package.json"), b"{}");
     t.write(&format!("{r}/kept/node_modules/y"), b"y");
     t
@@ -130,6 +139,8 @@ fn lists_ignored_build_output_beside_its_project_file() {
         &args,
         &[
             "android/app/build",
+            "desktop/dist",
+            "game/.godot",
             "target",
             "tools/.venv",
             "web/node_modules",
@@ -143,6 +154,8 @@ fn lists_ignored_build_output_beside_its_project_file() {
         got,
         [
             "app/android/app/build",
+            "app/desktop/dist",
+            "app/game/.godot",
             "app/target",
             "app/tools/.venv",
             "app/web/node_modules"

@@ -71,6 +71,7 @@ impl Scanner for AurBuildScanner {
                 .unwrap_or(0);
             let what = if packages == 1 { "package" } else { "packages" };
             let mut item = BloatItem {
+                size_uncompressed: false,
                 category: Category::AurBuild,
                 path: Some(path.clone()),
                 label: format!("pamac build trees ({packages} {what})"),

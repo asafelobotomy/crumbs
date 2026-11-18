@@ -55,6 +55,7 @@ impl Scanner for CoredumpsScanner {
                 continue;
             };
             items.push(BloatItem {
+                size_uncompressed: false,
                 category: Category::Coredumps,
                 path: Some(path),
                 label: name.to_string_lossy().into_owned(),

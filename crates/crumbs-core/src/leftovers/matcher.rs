@@ -150,6 +150,12 @@ impl LeftoverIndex {
     }
 }
 
+/// Whether `app` (with its identifiers `ids`), which need not be in the
+/// index's inventory, claims candidate `c` at any confidence, ignoring rules.
+pub(crate) fn claims(c: &Candidate, app: &App, ids: &Idents) -> bool {
+    score(c, app, ids, &HashSet::new()).is_some()
+}
+
 /// A Flatpak keeps its data in `~/.var/app/<id>`; anything else it matches
 /// (other than by its own desktop ID or full app ID) is at most Medium.
 fn cap(c: &Candidate, app: &App, confidence: Confidence) -> Confidence {

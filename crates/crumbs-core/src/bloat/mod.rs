@@ -181,6 +181,11 @@ pub struct BloatItem {
     /// Display string (the description of a command item).
     pub label: String,
     pub size: Option<u64>,
+    /// `size` counts files that btrfs may keep compressed at their
+    /// uncompressed size: removing the item can free less. Left out of the
+    /// JSON when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub size_uncompressed: bool,
     pub rebuildable: bool,
     pub preselected: bool,
     pub note: Option<String>,
@@ -218,6 +223,10 @@ pub struct CategoryReport {
     pub items: Vec<BloatItem>,
     pub total: u64,
     pub unknown_sizes: usize,
+    /// How many items' sizes are uncompressed (`size_uncompressed`); left
+    /// out of the JSON when 0.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub uncompressed_sizes: usize,
     pub error: Option<String>,
     /// Listed but not scanned (a disabled category nobody asked for).
     /// Always false from [`scan_all`]; the CLI sets it.
@@ -226,6 +235,10 @@ pub struct CategoryReport {
     /// The category cannot run here, for example `pacman not installed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<String>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -285,6 +298,7 @@ fn scan_with(cx: &ScanContext, scanners: &[Box<dyn Scanner>], which: &[Category]
                 items,
                 total: 0,
                 unknown_sizes: 0,
+                uncompressed_sizes: 0,
                 error,
                 skipped: false,
                 unavailable,
@@ -307,7 +321,9 @@ fn scan_with(cx: &ScanContext, scanners: &[Box<dyn Scanner>], which: &[Category]
         }
     }
     for ((ci, ii), usage) in slots.into_iter().zip(disk_usage_many(cx.env, &paths)) {
-        categories[ci].items[ii].size = Some(usage.bytes);
+        let item = &mut categories[ci].items[ii];
+        item.size = Some(usage.bytes);
+        item.size_uncompressed = usage.uncompressed;
     }
 
     for rep in &mut categories {
@@ -322,6 +338,7 @@ fn scan_with(cx: &ScanContext, scanners: &[Box<dyn Scanner>], which: &[Category]
         });
         rep.total = rep.items.iter().filter_map(|i| i.size).sum();
         rep.unknown_sizes = rep.items.iter().filter(|i| i.size.is_none()).count();
+        rep.uncompressed_sizes = rep.items.iter().filter(|i| i.size_uncompressed).count();
     }
     ScanReport { categories }
 }

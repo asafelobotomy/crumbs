@@ -373,6 +373,7 @@ fn bitem(
 ) -> crate::bloat::BloatItem {
     let p = PathBuf::from(path);
     crate::bloat::BloatItem {
+        size_uncompressed: false,
         category: crate::bloat::Category::Cache,
         size: Some(disk_usage(env, &p).bytes),
         fingerprint: Some(safety::fingerprint(env, &p).unwrap()),
@@ -390,6 +391,7 @@ fn bitem(
 
 fn command_item() -> crate::bloat::BloatItem {
     crate::bloat::BloatItem {
+        size_uncompressed: false,
         category: crate::bloat::Category::FlatpakUnused,
         path: None,
         label: "remove unused runtimes".into(),

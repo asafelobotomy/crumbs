@@ -853,6 +853,7 @@ fn temp_delete_verified_in_user_temp_scope() {
     let item = |path: &str| {
         let p = PathBuf::from(path);
         BloatItem {
+            size_uncompressed: false,
             category: Category::Temp,
             size: Some(1),
             fingerprint: Some(fingerprint(&env, &p).unwrap()),

@@ -1,2 +1,8 @@
 # cargo-deny: dependency advisories (CI runs `cargo deny check advisories`).
 [advisories]
+ignore = [
+    # chrono is unmaintained (not a vulnerability). It comes only through
+    # rmcp and schemars' `chrono04` feature, which rmcp enables; no rmcp
+    # release (3.10.0 included) drops it. Remove once rmcp moves off chrono.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained chrono, only via rmcp; no alternative yet" },
+]

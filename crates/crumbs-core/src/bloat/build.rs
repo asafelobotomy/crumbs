@@ -1,7 +1,8 @@
 //! `build-output`: what builds leave in your projects and recreate on the
 //! next build: Cargo's `target`, `node_modules` and the caches of web
-//! bundlers, Gradle's and CMake's `build`, a project's `.gradle`, Python
-//! virtual environments. Off unless named or switched on.
+//! bundlers, Gradle's and CMake's `build`, a project's `.gradle`,
+//! electron-builder's `dist`, Godot's `.godot` import cache, Python virtual
+//! environments. Off unless named or switched on.
 //!
 //! Only inside git repositories under the project folders, and only a
 //! folder that is the known kind (its project file beside it, or its own
@@ -137,6 +138,19 @@ fn real_subdirs(dir: &Path) -> Vec<PathBuf> {
     v
 }
 
+/// electron-builder's own config files; its output goes to `dist` beside
+/// them unless the config says otherwise.
+const ELECTRON_BUILDER_CONFIGS: [&str; 8] = [
+    "electron-builder.yml",
+    "electron-builder.yaml",
+    "electron-builder.json",
+    "electron-builder.json5",
+    "electron-builder.toml",
+    "electron-builder.config.js",
+    "electron-builder.config.cjs",
+    "electron-builder.config.ts",
+];
+
 /// Whether the real folder `dir` is build output of a known kind.
 fn is_build_output(dir: &Path) -> bool {
     let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
@@ -156,6 +170,8 @@ fn is_build_output(dir: &Path) -> bool {
             "settings.gradle",
             "settings.gradle.kts",
         ]),
+        "dist" => beside(&ELECTRON_BUILDER_CONFIGS),
+        ".godot" => beside(&["project.godot"]),
         ".venv" | "venv" => dir.join("pyvenv.cfg").is_file(),
         _ => false,
     }
@@ -173,6 +189,8 @@ fn is_output_name(name: &str) -> bool {
             | ".parcel-cache"
             | "build"
             | ".gradle"
+            | "dist"
+            | ".godot"
             | ".venv"
             | "venv"
             | ".git"

@@ -114,7 +114,7 @@ Commands that take an app accept an ID, a name, a desktop ID or a display name. 
 | `confidence` | string | `high`, `medium` or `low`. |
 | `shared` | boolean | Another installed app may also use it. |
 | `reason` | string | Why crumbs thinks it belongs to the app. |
-| `size` | object | `{ "bytes", "files", "errors" }`, all numbers. `errors` counts entries that could not be measured. |
+| `size` | object | `{ "bytes", "files", "errors" }`, all numbers. `errors` counts entries that could not be measured. It also has `"uncompressed": true` when `bytes` counts files on btrfs that may be stored compressed (see "Sizes on compressed btrfs" under `scan`); the field is absent otherwise. |
 | `preselected` | boolean | Whether `uninstall` includes it by default. Always `false` for orphans. |
 | `mime_lines` | array of string | `mime-assoc` only: the exact `mimeapps.list` lines that would be removed. Empty otherwise. |
 | `scope` | string | `system-tree` for a `system-config` or `system-data` finding (deleted as root, never trashed; see the plan action's `scope`). Absent for everything else (the home directory). |
@@ -128,7 +128,7 @@ Commands that take an app accept an ID, a name, a desktop ID or a display name. 
 | `app_id` | string or null | `null` for orphans. |
 | `actions` | array | Planned actions, in execution order. |
 | `total_size` | number | Sum of the actions' `size`. |
-| `notes` | array of string | For example `the app itself stays installed (leftovers only)`. |
+| `notes` | array of string | For example `the app itself stays installed (leftovers only)`, or `sizes are counted before btrfs compression: the space freed can be smaller` when a size in the plan is uncompressed. |
 
 Each action is `{ "action", "size", "reason" }`, plus three optional fields. `action` is tagged by `type`:
 
@@ -808,9 +808,12 @@ Two further refusal texts, both with `ok` false and the entry's own `entry_id`:
 | `items` | array | BloatItems, largest first. |
 | `total` | number | Sum of the known item sizes, in bytes. |
 | `unknown_sizes` | number | Items whose size is unknown (`size` null). The real total is larger. |
+| `uncompressed_sizes` | number | Present only when not 0: items whose `size` is counted before btrfs compression (`size_uncompressed`). The space freed can be smaller than `total`. |
 | `error` | string or null | Set when this category's scanner failed. `items` is then empty. |
 | `skipped` | boolean | `true` for a category that is switched off and was not named: it was not scanned. |
 | `unavailable` | string | Present only when the category cannot run on this system (for example `pacman, apt-get or dnf not installed`). `items` is then empty and `error` null; this is not a failure and does not change the exit code. |
+
+**Sizes on compressed btrfs.** Sizes are allocated blocks, as `du` counts them. btrfs reports a compressed file's blocks uncompressed, and only a root-only ioctl reads how much space its extents take. So on btrfs crumbs marks a size `size_uncompressed` (an item) or `"uncompressed": true` (a `size` object) when the mount compresses (`compress` or `compress-force` other than `=no`) or a file carries the compressed attribute (`chattr +c`, or a `compression` property). Running as root, crumbs reads the extents instead, as `compsize` does: the size is then on-disk and not marked, counting an extent shared by several files of the item once.
 
 **BloatItem**
 
@@ -820,6 +823,7 @@ Two further refusal texts, both with `ok` false and the entry's own `entry_id`:
 | `path` | string or null | In-system path. `null` for a command item. |
 | `label` | string | What to show: a name, a display path, or for a command what it does. |
 | `size` | number or null | Bytes. `null` when unknown. |
+| `size_uncompressed` | boolean | Present only when `true`: `size` counts files on btrfs that may be stored compressed, at their uncompressed size, so removing the item can free less. |
 | `rebuildable` | boolean | The owner recreates it on demand (caches). |
 | `preselected` | boolean | Whether `clean` includes it by default. `false` for an item held back (its app is running; for a `cache` item a git working tree inside it or a process working in it; for `aur-build` and `build-output` a process using it; a `build-output` folder changed within `build_age_days`; see `note`), for every `build-output` virtual environment and `containers` volume, and for `flatpak-unused`, `trash`, `orphan-pkgs`, `flatpak-unused-system` and `snapshots` items, which `clean` includes only when their category is named. |
 | `note` | string or null | Why it is held back (`Firefox is running`, `contains a git checkout (repo)`, `in use by cargo (pid 4242)`), or what to know (`deleted permanently (temporary file)`, `decided by flatpak`, or the refs a `flatpak-unused` item removes). |
