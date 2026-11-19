@@ -1,3 +1,10 @@
+crumbs (0.8.0) unstable; urgency=medium
+
+  * uQ Storage page redesigned; apps carry a category in JSON. See
+    https://github.com/asafelobotomy/crumbs/blob/main/CHANGELOG.md.
+
+ -- asafelobotomy <213836723+asafelobotomy@users.noreply.github.com>  Thu, 19 Nov 2026 12:30:00 +0000
+
 crumbs (0.7.0) unstable; urgency=medium
 
   * uninstall --close-running, btrfs size notes and fewer false orphans. See

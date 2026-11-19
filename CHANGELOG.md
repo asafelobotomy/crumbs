@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0
 
 - **uQ Settings, Apps tab redesigned:** apps are sorted into menu categories (Internet, Multimedia, Graphics, Office, Games, Development, Utilities, System, Other), each folding away with its app count and size; the biggest opens first and a search opens them all. Each app is a framed tile with its icon, name, source, size and its own Uninstall… button inside the frame (no more button at the far edge of a wide row, next to the wrong app), two tiles to a line on a wide window. An open preview takes the whole line. Needs crumbs with `category` (below); with an older crumbs the apps are sorted by source instead.
 - **uQ Settings, the other tabs:** Overview, Leftovers and History rows are framed tiles too, with the size and the button together on one side of the tile, so a button is always next to what it acts on.
