@@ -35,7 +35,7 @@ ColumnLayout {
         });
     }
 
-    spacing: 8
+    spacing: 12
 
     SettingRow {
         settingId: "space"

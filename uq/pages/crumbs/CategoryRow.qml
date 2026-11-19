@@ -1,4 +1,5 @@
-// One category of reclaimable space: its plain name, how much, and a button that cleans it up.
+// One category of reclaimable space as a framed tile: its plain name and how it is cleaned on the
+// left, how much and the button that cleans it up on the right, in the same frame.
 // Which command runs comes from logic.js (cleanCommandFor), so a category is never cleaned under
 // a gentler question than its kind needs.
 import QtQuick
@@ -7,7 +8,7 @@ import QtQuick.Layouts
 import org.uq.settings
 import "logic.js" as Logic
 
-ColumnLayout {
+QQC2.Frame {
     id: row
 
     property var host
@@ -26,63 +27,81 @@ ColumnLayout {
         row.host.write(row.key, row.item.command, [row.item.category], row.after);
     }
 
-    spacing: 2
+    padding: 12
 
-    RowLayout {
-        spacing: 12
-        Layout.fillWidth: true
+    ColumnLayout {
+        anchors.fill: parent
+        spacing: 8
 
-        UqLabel {
-            text: row.item.label
-            wrapMode: Text.Wrap
+        RowLayout {
+            spacing: 16
+            Layout.fillWidth: true
+
+            ColumnLayout {
+                spacing: 2
+                Layout.fillWidth: true
+
+                UqLabel {
+                    text: row.item.label
+                    font.bold: true
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+                UqLabel {
+                    id: detail
+                    text: row.item.error !== null ? row.item.error : row.item.how
+                    visible: text !== ""
+                    wrapMode: Text.Wrap
+                    opacity: row.item.error !== null ? 1 : 0.7
+                    Layout.fillWidth: true
+                }
+            }
+            ColumnLayout {
+                spacing: 4
+                Layout.alignment: Qt.AlignVCenter
+
+                UqLabel {
+                    text: row.item.error !== null ? "Couldn't check this" : row.item.sizeText + " · " + row.item.itemsText
+                    Layout.alignment: Qt.AlignRight
+                }
+                QQC2.Button {
+                    text: row.cleanText
+                    visible: row.item.command !== null && row.item.error === null
+                    enabled: !!row.host && !row.host.busy && row.item.items > 0
+                    onClicked: row.clean()
+                    Layout.alignment: Qt.AlignRight
+                }
+            }
+        }
+        // The row's size next to the biggest row's, as a bar.
+        Item {
+            visible: row.item.share !== undefined && row.item.items > 0 && row.item.error === null
+            implicitHeight: 4
+            Layout.fillWidth: true
+
+            Rectangle {
+                anchors.fill: parent
+                radius: 2
+                opacity: 0.2
+                color: row.host ? row.host.accentColor() : "steelblue"
+            }
+            Rectangle {
+                width: parent.width * Math.max(0.02, row.item.share || 0)
+                height: parent.height
+                radius: 2
+                color: row.host ? row.host.accentColor() : "steelblue"
+            }
+        }
+        Binding {
+            target: detail
+            property: "color"
+            value: row.host ? row.host.errorColor() : "red"
+            when: row.item.error !== null
+        }
+        Outcome {
+            host: row.host
+            noteKey: row.key
             Layout.fillWidth: true
         }
-        UqLabel {
-            text: row.item.error !== null ? "Couldn't check this" : row.item.sizeText + " · " + row.item.itemsText
-        }
-        QQC2.Button {
-            text: row.cleanText
-            visible: row.item.command !== null && row.item.error === null
-            enabled: !!row.host && !row.host.busy && row.item.items > 0
-            onClicked: row.clean()
-        }
-    }
-    // The row's size next to the biggest row's, as a bar.
-    Item {
-        visible: row.item.share !== undefined && row.item.items > 0 && row.item.error === null
-        implicitHeight: 4
-        Layout.fillWidth: true
-
-        Rectangle {
-            anchors.fill: parent
-            radius: 2
-            opacity: 0.2
-            color: row.host ? row.host.accentColor() : "steelblue"
-        }
-        Rectangle {
-            width: parent.width * Math.max(0.02, row.item.share || 0)
-            height: parent.height
-            radius: 2
-            color: row.host ? row.host.accentColor() : "steelblue"
-        }
-    }
-    UqLabel {
-        id: detail
-        text: row.item.error !== null ? row.item.error : row.item.how
-        visible: text !== ""
-        wrapMode: Text.Wrap
-        opacity: row.item.error !== null ? 1 : 0.7
-        Layout.fillWidth: true
-    }
-    Binding {
-        target: detail
-        property: "color"
-        value: row.host ? row.host.errorColor() : "red"
-        when: row.item.error !== null
-    }
-    Outcome {
-        host: row.host
-        noteKey: row.key
-        Layout.fillWidth: true
     }
 }

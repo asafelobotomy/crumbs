@@ -34,7 +34,7 @@ The page says `uq_api = 2`, so it has the tabs and cards of Settings' own pages;
 |---|---|---|---|
 | Overview | Space you can free | `scan`, when the page opens and on Refresh | `clean` for categories that go to the trash, `clean-for-good` for the ones deleted for good |
 | Overview | System space | `scan --system`, only when asked | `clean --system`, which asks for the password through crumbs' own prompt |
-| Apps | Your apps (with their icons) | `apps list --sort size`, when the tab opens | `uninstall`, `uninstall --keep-data` or `uninstall --leftovers-only` for one app id |
+| Apps | Your apps, by category, as tiles with icon and their own Uninstall… | `apps list --sort size`, when the tab opens | `uninstall`, `uninstall --keep-data` or `uninstall --leftovers-only` for one app id |
 | Apps | Uninstall preview | `uninstall [--keep-data\|--leftovers-only] --dry-run`, when a row's Uninstall… opens | (none: it shows what would go, grouped as the app, your files, settings, caches and menu entries, and whether each goes to the trash or for good) |
 | Leftovers | Leftovers of removed apps | `orphans`, when the tab opens | `orphans --clean --select <path>` (to the trash) |
 | Leftovers | System leftovers | `orphans --system`, only when asked | `orphans --clean --system --select <path under /opt>` (for good, with the password) |

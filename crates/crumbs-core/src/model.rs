@@ -96,6 +96,10 @@ pub struct App {
     /// without one falls back to its rDNS id, which Flatpak exports icons
     /// under.
     pub icon: Option<String>,
+    /// The menu group of the app's first launcher that has one: `Internet`, `Development`,
+    /// `Games`, `Graphics`, `Multimedia`, `Office`, `System` or `Utilities`; null when no
+    /// launcher says (see [`crate::desktop::menu_group`]).
+    pub category: Option<String>,
     /// The desktop this package is a part of (`uQ`), if any. Removing it
     /// takes an extra confirmation; see [`desktop_of`].
     pub part_of: Option<String>,
@@ -127,6 +131,7 @@ impl App {
             wm_classes: Vec::new(),
             has_gui: false,
             icon: None,
+            category: None,
             part_of: desktop_of(source, name).map(str::to_string),
             program: None,
             program_link: None,

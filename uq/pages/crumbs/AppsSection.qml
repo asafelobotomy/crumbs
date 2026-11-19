@@ -1,6 +1,8 @@
-// Apps and their size: `apps` runs when the tab is first opened, and on Refresh. Each app shows
-// its icon; Uninstall… opens a preview of everything that would go (UninstallPreview), and
-// only its own button removes anything. The desktop's own packages say "Part of uQ" and have
+// Apps and their size: `apps` runs when the tab is first opened, and on Refresh. The apps are
+// sorted into menu categories (Internet, Games, ...), each a section that folds away; every app
+// is a tile (AppTile) with its icon, name, size and its own Uninstall… button right there, so a
+// button can't be mistaken for its neighbour's. Uninstall… opens a preview of everything that
+// would go (UninstallPreview), and only its own button removes anything. The desktop's own packages say "Part of uQ" and have
 // no button (crumBS would refuse anyway).
 import QtQuick
 import QtQuick.Controls as QQC2
@@ -17,6 +19,40 @@ ColumnLayout {
     property string problem: ""
     property var all: []
     readonly property var shown: Logic.filterApps(section.all, filter.text, 200)
+    readonly property var groups: Logic.groupApps(section.shown.rows)
+    /// The categories that are unfolded, by key. A search unfolds all.
+    property var folded: ({})
+    readonly property bool searching: filter.text.trim() !== ""
+    readonly property string totalText: {
+        var total = 0;
+        for (var i = 0; i < section.all.length; i++)
+            total += section.all[i].installSize || 0;
+        return Logic.size(total);
+    }
+
+    /// Whether category `key` shows its apps: unfolded by hand, or by a search.
+    function isOpen(key) {
+        return section.searching || section.folded[key] === true;
+    }
+
+    /// The first time the apps arrive, the biggest category is unfolded, so the tab opens on
+    /// something; after that only the person's own choices count.
+    function unfoldBiggest() {
+        if (Object.keys(section.folded).length > 0)
+            return;
+        let biggest = null;
+        for (const g of Logic.groupApps(section.all))
+            if (biggest === null || g.total > biggest.total)
+                biggest = g;
+        if (biggest !== null)
+            section.folded = { [biggest.key]: true };
+    }
+
+    function toggle(key) {
+        const next = Object.assign({}, section.folded);
+        next[key] = !section.isOpen(key);
+        section.folded = next;
+    }
     /// The id of the app whose preview is open, "" when none.
     property string previewing: ""
 
@@ -47,6 +83,7 @@ ColumnLayout {
             section.loaded = env.data !== null;
             section.problem = env.data !== null ? "" : (env.cli || env.error || "crumBS gave an answer this page can't read.");
             section.all = Logic.apps(env.data);
+            section.unfoldBiggest();
         });
     }
 
@@ -54,7 +91,7 @@ ColumnLayout {
 
     SettingRow {
         settingId: "apps"
-        label: "Apps and their size"
+        label: section.loaded ? Logic.plural(section.all.length, "app", "apps") + " · " + section.totalText : "Apps and their size"
         highlight: section.host ? section.host.highlight : ""
         Layout.fillWidth: true
 
@@ -107,62 +144,84 @@ ColumnLayout {
         opacity: 0.7
     }
     Repeater {
-        model: section.shown.rows
+        model: section.groups
 
         ColumnLayout {
-            id: row
+            id: group
 
             required property var modelData
-            readonly property string key: "app:" + row.modelData.id
+            readonly property bool open: section.isOpen(group.modelData.key)
 
-            spacing: 2
+            spacing: 8
             Layout.fillWidth: true
+            Layout.topMargin: 6
 
-            RowLayout {
-                spacing: 12
+            // The category's header: click anywhere on it to fold or unfold its apps.
+            Item {
+                implicitHeight: header.implicitHeight + 12
                 Layout.fillWidth: true
 
-                UqAppIcon {
-                    name: row.modelData.icon
-                    label: row.modelData.name
-                    size: 32
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: !section.searching
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: section.toggle(group.modelData.key)
                 }
-                UqLabel {
-                    text: row.modelData.name
-                    wrapMode: Text.Wrap
-                    Layout.fillWidth: true
-                }
-                UqLabel {
-                    text: row.modelData.sourceText + " · " + row.modelData.sizeText
-                    opacity: 0.7
-                }
-                UqLabel {
-                    text: row.modelData.partOf !== null ? "Part of " + row.modelData.partOf : ""
-                    visible: row.modelData.partOf !== null
-                }
-                QQC2.Button {
-                    text: section.previewing === row.modelData.id ? "Close" : "Uninstall…"
-                    visible: row.modelData.partOf === null
-                    enabled: !!section.host && !section.host.busy && row.modelData.canUninstall
-                    onClicked: section.previewing = section.previewing === row.modelData.id ? "" : row.modelData.id
+                RowLayout {
+                    id: header
+                    anchors.fill: parent
+                    anchors.topMargin: 6
+                    anchors.bottomMargin: 6
+                    spacing: 10
+
+                    UqLabel {
+                        text: group.open ? "▾" : "▸"
+                        opacity: section.searching ? 0.3 : 0.7
+                        Layout.preferredWidth: 14
+                    }
+                    UqAppIcon {
+                        name: group.modelData.icon
+                        label: group.modelData.title
+                        size: 20
+                    }
+                    UqLabel {
+                        text: group.modelData.title
+                        font.bold: true
+                    }
+                    UqLabel {
+                        text: group.modelData.countText + " · " + group.modelData.totalText
+                        opacity: 0.7
+                        Layout.fillWidth: true
+                    }
                 }
             }
-            UninstallPreview {
-                visible: section.previewing === row.modelData.id
-                active: visible
-                host: section.host
-                app: row.modelData
-                noteKey: row.key
-                after: () => {
-                    section.previewing = "";
-                    section.refresh();
+            GridLayout {
+                visible: group.open
+                // Two tiles to a line when each can be wide enough to read, one otherwise. An
+                // open preview takes the whole line (see AppTile).
+                columns: width >= 560 ? 2 : 1
+                columnSpacing: 12
+                rowSpacing: 12
+                Layout.fillWidth: true
+
+                Repeater {
+                    model: group.open ? group.modelData.rows : []
+
+                    AppTile {
+                        required property var modelData
+                        host: section.host
+                        app: modelData
+                        previewing: section.previewing === modelData.id
+                        onToggled: section.previewing = section.previewing === modelData.id ? "" : modelData.id
+                        onDone: {
+                            section.previewing = "";
+                            section.refresh();
+                        }
+                        Layout.fillWidth: true
+                        Layout.columnSpan: previewing ? 2 : 1
+                        Layout.alignment: Qt.AlignTop
+                    }
                 }
-                Layout.fillWidth: true
-            }
-            Outcome {
-                host: section.host
-                noteKey: row.key
-                Layout.fillWidth: true
             }
         }
     }

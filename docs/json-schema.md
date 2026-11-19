@@ -104,6 +104,7 @@ Commands that take an app accept an ID, a name, a desktop ID or a display name. 
 | `has_gui` | boolean |
 | `part_of` | `"uQ"` for a package that is part of the uQ desktop, else null |
 | `icon` | string or null: the icon name or absolute path from the first of the app's launchers that sets `Icon=`; a Flatpak app with none falls back to its `rdns_id`. Look it up in the icon theme; crumbs does not check that it exists. |
+| `category` | string or null: the menu group of the first launcher that has a `Categories=` line naming one: `Internet`, `Development`, `Games`, `Graphics`, `Multimedia`, `Office`, `System` or `Utilities`. Null when no launcher says (an app with no launcher, or only unknown categories). |
 
 **Finding** (a leftover or an orphan)
 
