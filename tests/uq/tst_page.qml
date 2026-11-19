@@ -226,7 +226,7 @@ Item {
             compare(root.runs("uninstall"), [["run", "uninstall", ["pacman:firefox"]]]);
             tryVerify(root.idle);
             // The preview stays open, with a button that closes the app first.
-            const row = root.findLabel(loader.item, "Firefox Web Browser").parent.parent;
+            const row = root.findLabel(loader.item, "Firefox Web Browser").parent.parent.parent;
             const close = root.findButton(row, "Close it and uninstall");
             verify(close !== null && close.visible, "an open app gets a Close it and uninstall button");
             c["uninstall-close"] = { code: 0, output: root.fixture("clean-ok") };
