@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.7.0
+
 - **Uninstalling an app that is open:** `uninstall --close-running` asks a running app to quit (SIGTERM, never SIGKILL), waits up to 10 seconds and refuses as before if it stays up. uQ's Storage and cleanup page keeps the uninstall preview open when crumBS refuses, says plainly that the app is open (a tray app such as CopyQ always is) and offers "Close it and uninstall", instead of closing the preview and leaving the person with nothing to do.
 
 - **Sizes on compressed btrfs:** btrfs reports compressed files at their uncompressed size, so a Rust `target` folder could be listed at three times the space it takes. `scan` now marks such sizes `≤` with a note, and `clean`, `uninstall` and `orphans --clean` previews say the space freed can be smaller. JSON: `size_uncompressed` on a BloatItem, `uncompressed_sizes` on a CategoryReport and `uncompressed` in a Finding's `size`, each present only when set. Running as root, crumbs reads the real on-disk size, as `compsize` does.
