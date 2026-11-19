@@ -57,6 +57,10 @@ pub struct ActFlags {
     /// Continue despite failed sources or a running app
     #[arg(long)]
     pub force: bool,
+    /// Ask a running app to quit (SIGTERM) and wait for it, instead of refusing; it is
+    /// never killed, and the run still refuses if the app stays up
+    #[arg(long, conflicts_with = "force")]
+    pub close_running: bool,
     /// Machine-readable output (needs --yes or --dry-run)
     #[arg(long)]
     pub json: bool,
@@ -233,6 +237,9 @@ pub fn apply(
         return out.no_rights(NO_RIGHTS, &manual, data, errors);
     }
 
+    if act.close_running {
+        close_running_apps(env, targets);
+    }
     let interactive = prompt::is_interactive();
     // The apps the user said to go on with although they are running.
     let mut confirmed: Vec<String> = Vec::new();

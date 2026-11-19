@@ -70,6 +70,9 @@ var PATTERNS = {
     "uninstall": { "app": APP_PATTERN },
     "uninstall-keep-data": { "app": APP_PATTERN },
     "uninstall-leftovers": { "app": APP_PATTERN },
+    "uninstall-close": { "app": APP_PATTERN },
+    "uninstall-keep-data-close": { "app": APP_PATTERN },
+    "uninstall-leftovers-close": { "app": APP_PATTERN },
     "preview-uninstall": { "app": APP_PATTERN },
     "preview-keep-data": { "app": APP_PATTERN },
     "preview-leftovers": { "app": APP_PATTERN },
@@ -379,8 +382,25 @@ function doneMessage(data) {
 
 /// What to say beside a row after a write: {message, manual, detail, failed}. `manual` holds the
 /// commands to run by hand (exit 5) and `detail` what failed, both for Advanced details.
+/// True when crumbs refused an uninstall because the app is open ("X is running (pid 1)").
+function isRunningRefusal(result) {
+    var env = envelope(result);
+    return env.code === 1 && env.cli !== null && /^.{1,200} is running \(pid [0-9, ]+\)/.test(env.cli);
+}
+
+/// crumbs refused or couldn't start (exit 1, 2 or 5, or no exit code): nothing was changed.
+function refusedOutright(result) {
+    var code = envelope(result).code;
+    return code === null || code === 1 || code === 2 || code === 5;
+}
+
 function outcome(result) {
     var env = envelope(result);
+    if (isRunningRefusal(result)) {
+        // crumbs' own text points at --force, which this page never uses.
+        var open = env.cli.replace(/;.*$/, "");
+        return { message: open + ". Close it, or let crumBS ask it to close.", manual: [], detail: [], failed: true };
+    }
     var res = { message: "", manual: [], detail: [], failed: false };
     if (isCancelled(result))
         return res;
@@ -638,9 +658,9 @@ function removalPreview(result, home) {
 
 /// The preview and the removal for each way of uninstalling.
 var UNINSTALL_MODES = {
-    "all": { preview: "preview-uninstall", run: "uninstall" },
-    "keep-data": { preview: "preview-keep-data", run: "uninstall-keep-data" },
-    "leftovers": { preview: "preview-leftovers", run: "uninstall-leftovers" }
+    "all": { preview: "preview-uninstall", run: "uninstall", close: "uninstall-close" },
+    "keep-data": { preview: "preview-keep-data", run: "uninstall-keep-data", close: "uninstall-keep-data-close" },
+    "leftovers": { preview: "preview-leftovers", run: "uninstall-leftovers", close: "uninstall-leftovers-close" }
 };
 
 function uninstallCommands(mode) {

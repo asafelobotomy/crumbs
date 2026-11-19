@@ -145,7 +145,14 @@ test("fixture uninstall-refused-desktop: crumBS's refusal, as it is", () => {
 
 test("fixture uninstall-running: the refusal verbatim", () => {
   const result = { code: 1, error: "exit 1: Firefox Web Browser is running", output: fx("uninstall-running") };
-  assert.equal(L.outcome(result).message, "Firefox Web Browser is running (pid 4242); close it first or re-run with --force");
+  const o = L.outcome(result);
+  assert.equal(o.message, "Firefox Web Browser is running (pid 4242). Close it, or let crumBS ask it to close.");
+  assert.equal(o.failed, true);
+  assert.equal(L.isRunningRefusal(result), true);
+  assert.equal(L.isRunningRefusal({ code: 1, error: "x", output: fx("uninstall-refused-desktop") }), false);
+  assert.equal(L.isRunningRefusal({ code: 0, output: fx("clean-ok") }), false);
+  assert.equal(L.refusedOutright(result), true);
+  assert.equal(L.refusedOutright({ code: 3, output: { data: null, errors: [] } }), false);
 });
 
 // ---- outcome and envelope --------------------------------------------------------------------
@@ -304,6 +311,7 @@ test("manifest: the page, its settings and its programs", () => {
     "config-set", "config-add", "config-remove", "config-reset",
     "clean", "clean-for-good", "clean-system", "orphan-trash", "orphan-delete-system", "restore",
     "uninstall", "uninstall-keep-data", "uninstall-leftovers",
+    "uninstall-close", "uninstall-keep-data-close", "uninstall-leftovers-close",
   ]);
   const argvTail = (id) => command(id).argv.slice(1).join(" ");
   assert.equal(argvTail("scan"), "scan --json");
@@ -320,6 +328,9 @@ test("manifest: the page, its settings and its programs", () => {
   assert.equal(argvTail("uninstall"), "uninstall --yes --json");
   assert.equal(argvTail("uninstall-keep-data"), "uninstall --keep-data --yes --json");
   assert.equal(argvTail("uninstall-leftovers"), "uninstall --leftovers-only --yes --json");
+  assert.equal(argvTail("uninstall-close"), "uninstall --close-running --yes --json");
+  assert.equal(argvTail("uninstall-keep-data-close"), "uninstall --keep-data --close-running --yes --json");
+  assert.equal(argvTail("uninstall-leftovers-close"), "uninstall --leftovers-only --close-running --yes --json");
   assert.equal(argvTail("preview-uninstall"), "uninstall --dry-run --json");
   assert.equal(argvTail("preview-keep-data"), "uninstall --keep-data --dry-run --json");
   assert.equal(argvTail("preview-leftovers"), "uninstall --leftovers-only --dry-run --json");
@@ -337,6 +348,7 @@ test("manifest: the page, its settings and its programs", () => {
     "orphans-system": 120000, config: 30000, "preview-uninstall": 120000, "preview-keep-data": 120000, "preview-leftovers": 120000,
     "config-set": 30000, "config-add": 30000, "config-remove": 30000, "config-reset": 30000,
     "orphan-delete-system": 300000, "uninstall-keep-data": 600000, "uninstall-leftovers": 600000,
+    "uninstall-close": 600000, "uninstall-keep-data-close": 600000, "uninstall-leftovers-close": 600000,
   });
 });
 
@@ -349,7 +361,7 @@ test("patterns_match_manifest", () => {
     }
     assert.equal((c.args ?? []).length, Object.keys(L.PATTERNS[c.id] ?? {}).length, `${c.id}: argument count differs`);
   }
-  assert.equal(seen.size, 19);
+  assert.equal(seen.size, 22);
   assert.equal(command("clean").args[0].pattern, `^(${L.USER_TRASH.join("|")})$`);
   assert.equal(command("clean-for-good").args[0].pattern, `^(${L.USER_FOR_GOOD.join("|")})$`);
   assert.equal(command("clean-system").args[0].pattern, `^(${L.SYSTEM.join("|")})$`);
@@ -400,6 +412,9 @@ test("confirms_match_plan", () => {
     restore: "Put back the files from this cleanup?",
     "uninstall-keep-data": "Uninstall %s and keep your settings and data? A removed package can't be put back by crumBS.",
     "uninstall-leftovers": "Remove the leftovers of %s? The app itself stays installed.",
+    "uninstall-close": "Close %s, then uninstall it and remove its leftovers? Unsaved work in it can be lost. A removed package can't be put back by crumBS.",
+    "uninstall-keep-data-close": "Close %s, then uninstall it and keep your settings and data? Unsaved work in it can be lost. A removed package can't be put back by crumBS.",
+    "uninstall-leftovers-close": "Close %s, then remove its leftovers? Unsaved work in it can be lost. The app itself stays installed.",
     "orphan-delete-system": "Delete %s for good? This needs your password and can't be undone.",
   };
   for (const c of manifest.command) assert.equal(c.confirm, plan[c.id], `${c.id}: confirm`);
@@ -448,7 +463,8 @@ test("removalPreview groups what goes, in order, and says what can come back", (
   assert.equal(many.groups[0].more, 30);
   for (const mode of ["all", "keep-data", "leftovers", "nope"]) {
     const c = L.uninstallCommands(mode);
-    assert.ok(command(c.preview) && command(c.run), `${mode}: commands exist`);
+    assert.ok(command(c.preview) && command(c.run) && command(c.close), `${mode}: commands exist`);
+    assert.ok(command(c.close).argv.includes("--close-running") && !command(c.run).argv.includes("--close-running"));
     assert.ok(command(c.preview).argv.includes("--dry-run") && !command(c.run).argv.includes("--dry-run"));
   }
   assert.equal(L.uninstallCommands("nope").run, "uninstall");
