@@ -6,6 +6,9 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # Started by tag-release.yml on the tag it creates (a tag made with GITHUB_TOKEN triggers no push
+  # event), or by hand on an existing tag.
+  workflow_dispatch:
 
 permissions:
   contents: write
