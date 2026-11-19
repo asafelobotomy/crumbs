@@ -206,7 +206,7 @@ Item {
             verify(root.findLabel(loader.item, manual) !== null);
             compare(root.findLabel(loader.item, manual).visible, false, "the commands are under Advanced details");
             // the System logs row's own button (every row has a hidden one)
-            const details = root.findButton(root.findLabel(loader.item, "System logs").parent.parent, "Advanced details");
+            const details = root.findButton(root.findLabel(loader.item, "System logs").parent.parent.parent.parent, "Advanced details");
             verify(details !== null);
             details.clicked();
             compare(root.findLabel(loader.item, manual).visible, true);

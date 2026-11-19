@@ -45,7 +45,7 @@ ColumnLayout {
         });
     }
 
-    spacing: 8
+    spacing: 12
 
     SettingRow {
         settingId: "leftovers"
@@ -92,14 +92,18 @@ ColumnLayout {
     Repeater {
         model: section.rows
 
-        ColumnLayout {
+        QQC2.Frame {
             id: row
 
             required property var modelData
             readonly property string key: "orphan:" + row.modelData.path
 
-            spacing: 2
+            padding: 12
             Layout.fillWidth: true
+
+          ColumnLayout {
+            anchors.fill: parent
+            spacing: 6
 
             RowLayout {
                 spacing: 12
@@ -107,6 +111,7 @@ ColumnLayout {
 
                 UqLabel {
                     text: row.modelData.shown
+                    font.bold: true
                     wrapMode: Text.WrapAnywhere
                     Layout.fillWidth: true
                 }
@@ -131,6 +136,7 @@ ColumnLayout {
                 noteKey: row.key
                 Layout.fillWidth: true
             }
+          }
         }
     }
 }
