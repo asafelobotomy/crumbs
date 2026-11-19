@@ -213,3 +213,29 @@ output = "json"
 timeout_ms = 600000
 args = [{ name = "app", pattern = '^(pacman|dpkg|rpm|snap|flatpak|appimage|unmanaged):[^\x00-\x1f\x7f]{1,400}$' }]
 confirm = "Remove the leftovers of %s? The app itself stays installed."
+
+# The same three, for an app that is open: crumbs asks it to quit (never kills it) and waits a
+# few seconds. The page offers these only after the plain ones were refused because the app runs.
+[[command]]
+id = "uninstall-close"
+argv = ["/usr/bin/crumbs", "uninstall", "--close-running", "--yes", "--json"]
+output = "json"
+timeout_ms = 600000
+args = [{ name = "app", pattern = '^(pacman|dpkg|rpm|snap|flatpak|appimage|unmanaged):[^\x00-\x1f\x7f]{1,400}$' }]
+confirm = "Close %s, then uninstall it and remove its leftovers? Unsaved work in it can be lost. A removed package can't be put back by crumBS."
+
+[[command]]
+id = "uninstall-keep-data-close"
+argv = ["/usr/bin/crumbs", "uninstall", "--keep-data", "--close-running", "--yes", "--json"]
+output = "json"
+timeout_ms = 600000
+args = [{ name = "app", pattern = '^(pacman|dpkg|rpm|snap|flatpak|appimage|unmanaged):[^\x00-\x1f\x7f]{1,400}$' }]
+confirm = "Close %s, then uninstall it and keep your settings and data? Unsaved work in it can be lost. A removed package can't be put back by crumBS."
+
+[[command]]
+id = "uninstall-leftovers-close"
+argv = ["/usr/bin/crumbs", "uninstall", "--leftovers-only", "--close-running", "--yes", "--json"]
+output = "json"
+timeout_ms = 600000
+args = [{ name = "app", pattern = '^(pacman|dpkg|rpm|snap|flatpak|appimage|unmanaged):[^\x00-\x1f\x7f]{1,400}$' }]
+confirm = "Close %s, then remove its leftovers? Unsaved work in it can be lost. The app itself stays installed."

@@ -40,6 +40,16 @@ pub fn process_using(env: &Env, in_system: &Path) -> Option<(u32, String)> {
         .min()
 }
 
+/// Asks process `pid` to quit with SIGTERM, which it may handle or ignore; never SIGKILL.
+/// True when the signal was sent (the process may still take a moment to go).
+pub fn ask_to_quit(pid: u32) -> bool {
+    use rustix::process::{Pid, Signal, kill_process};
+    i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .is_some_and(|pid| kill_process(pid, Signal::TERM).is_ok())
+}
+
 /// A running process whose current directory is `in_system` or below it
 /// (a build or a shell working there), as `(pid, command name)`; the
 /// lowest pid when there are several.
@@ -164,4 +174,25 @@ pub(super) fn strip_deleted(target: &Path) -> PathBuf {
             || target.to_path_buf(),
             |t| PathBuf::from(OsStr::from_bytes(t)),
         )
+}
+
+#[cfg(test)]
+mod quit_tests {
+    use super::ask_to_quit;
+
+    #[test]
+    fn ask_to_quit_ends_a_process_that_does_not_ignore_sigterm() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        assert!(ask_to_quit(child.id()));
+        let status = child.wait().unwrap();
+        assert!(!status.success(), "sleep was ended by SIGTERM");
+    }
+
+    #[test]
+    fn ask_to_quit_says_false_for_a_process_that_is_not_there() {
+        assert!(!ask_to_quit(u32::MAX));
+    }
 }

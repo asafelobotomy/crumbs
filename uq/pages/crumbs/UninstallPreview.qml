@@ -22,6 +22,8 @@ ColumnLayout {
     property var after
     property string mode: "all"
     property bool loading: false
+    /// The last Uninstall was refused because the app is open: offers to close it.
+    property bool appIsOpen: false
     property var view: null
     property string readFor: ""
 
@@ -50,8 +52,20 @@ ColumnLayout {
             preview.read();
     }
     onModeChanged: {
+        preview.appIsOpen = false;
         if (preview.active)
             preview.read();
+    }
+
+    /// After an uninstall that wasn't cancelled. A refusal (nothing changed) keeps this preview
+    /// open with its message under the row, and an app that is open also gets a button to close
+    /// it; anything else is the owner's `after`.
+    function finished(result) {
+        preview.appIsOpen = Logic.isRunningRefusal(result);
+        if (Logic.refusedOutright(result))
+            return;
+        if (preview.after)
+            preview.after(result);
     }
 
     spacing: 8
@@ -179,7 +193,13 @@ ColumnLayout {
             QQC2.Button {
                 text: preview.mode === "leftovers" ? "Remove leftovers" : "Uninstall"
                 enabled: !!preview.host && !preview.host.busy && preview.view !== null && !preview.view.empty
-                onClicked: preview.host.write(preview.noteKey, Logic.uninstallCommands(preview.mode).run, [preview.app.id], preview.after, "section:apps")
+                onClicked: preview.host.write(preview.noteKey, Logic.uninstallCommands(preview.mode).run, [preview.app.id], preview.finished, "section:apps")
+            }
+            QQC2.Button {
+                text: preview.mode === "leftovers" ? "Close it and remove leftovers" : "Close it and uninstall"
+                visible: preview.appIsOpen
+                enabled: !!preview.host && !preview.host.busy
+                onClicked: preview.host.write(preview.noteKey, Logic.uninstallCommands(preview.mode).close, [preview.app.id], preview.finished, "section:apps")
             }
             UqLabel {
                 text: "You'll be asked once more."

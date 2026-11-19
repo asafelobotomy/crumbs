@@ -74,6 +74,35 @@ pub(super) fn running_apps<'t>(env: &Env, targets: &'t [Target]) -> Vec<(&'t App
         .collect()
 }
 
+/// How long `--close-running` waits for an app to quit after asking it to.
+const QUIT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `--close-running`: asks every running target app to quit with SIGTERM (never SIGKILL) and
+/// waits up to [`QUIT_WAIT`] for it to go. An app that stays up is left to the usual
+/// "is running" refusal.
+pub(super) fn close_running_apps(env: &Env, targets: &[Target]) {
+    let apps: Vec<&App> = targets.iter().filter_map(|t| t.app.as_ref()).collect();
+    let mut any = false;
+    for app in &apps {
+        for pid in running_processes(env, app) {
+            any |= crumbs_core::executor::ask_to_quit(pid);
+        }
+    }
+    if !any {
+        return;
+    }
+    let deadline = std::time::Instant::now() + QUIT_WAIT;
+    while std::time::Instant::now() < deadline {
+        if apps
+            .iter()
+            .all(|app| running_processes(env, app).is_empty())
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 /// The `--dry-run --json` data: every plan, and no report.
 pub fn dry_run_data(targets: &[Target]) -> serde_json::Value {
     let plans: Vec<&Plan> = targets.iter().map(|t| &t.plan).collect();

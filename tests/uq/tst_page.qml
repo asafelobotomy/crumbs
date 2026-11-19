@@ -14,7 +14,7 @@ Item {
 
     FakeContext {
         id: fake
-        confirmed: ["clean", "clean-for-good", "clean-system", "orphan-trash", "orphan-delete-system", "restore", "uninstall", "uninstall-keep-data", "uninstall-leftovers"]
+        confirmed: ["clean", "clean-for-good", "clean-system", "orphan-trash", "orphan-delete-system", "restore", "uninstall", "uninstall-keep-data", "uninstall-leftovers", "uninstall-close", "uninstall-keep-data-close", "uninstall-leftovers-close"]
     }
 
     Loader {
@@ -48,6 +48,9 @@ Item {
             "uninstall": answer("clean-ok"),
             "uninstall-keep-data": answer("clean-ok"),
             "uninstall-leftovers": answer("clean-ok"),
+            "uninstall-close": answer("clean-ok"),
+            "uninstall-keep-data-close": answer("clean-ok"),
+            "uninstall-leftovers-close": answer("clean-ok"),
             "preview-uninstall": answer("uninstall-preview"),
             "preview-keep-data": answer("uninstall-preview"),
             "preview-leftovers": answer("uninstall-preview"),
@@ -212,8 +215,17 @@ Item {
             root.openTab("Apps");
             tryVerify(root.shows("Firefox Web Browser"));
             uninstallFirefox();
-            tryVerify(root.shows("Firefox Web Browser is running (pid 4242); close it first or re-run with --force"));
+            tryVerify(root.shows("Firefox Web Browser is running (pid 4242). Close it, or let crumBS ask it to close."));
             compare(root.runs("uninstall"), [["run", "uninstall", ["pacman:firefox"]]]);
+            tryVerify(root.idle);
+            // The preview stays open, with a button that closes the app first.
+            const row = root.findLabel(loader.item, "Firefox Web Browser").parent.parent;
+            const close = root.findButton(row, "Close it and uninstall");
+            verify(close !== null && close.visible, "an open app gets a Close it and uninstall button");
+            c["uninstall-close"] = { code: 0, output: root.fixture("clean-ok") };
+            close.clicked();
+            tryVerify(() => root.runs("uninstall-close").length === 1);
+            compare(root.runs("uninstall-close"), [["run", "uninstall-close", ["pacman:firefox"]]]);
             tryVerify(root.idle);
         }
 
