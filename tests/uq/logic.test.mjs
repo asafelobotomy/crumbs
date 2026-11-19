@@ -494,3 +494,22 @@ test("apps carry their icon name", () => {
   assert.equal(rows[0].icon, "firefox");
   assert.equal(rows[1].icon, "");
 });
+
+test("apps are sorted into menu categories, biggest first, empty groups left out", () => {
+  const app = (name, category, bytes) => ({ id: `pacman:${name}`, name, source: "pacman", install_size: bytes, category });
+  const rows = L.apps({ apps: [app("a", "Games", 10), app("b", "Internet", 5), app("c", "Games", 30), app("d", null, 1), app("e", "Nonsense", 2)] });
+  assert.equal(rows[2].category, "Games");
+  assert.equal(rows[3].category, "Other");
+  assert.equal(rows[4].category, "Other", "a category this page doesn't know is Other");
+  const groups = L.groupApps(rows);
+  assert.deepEqual(groups.map((g) => g.key), ["Internet", "Games", "Other"]);
+  assert.deepEqual(groups[1].rows.map((r) => r.name), ["c", "a"]);
+  assert.equal(groups[1].countText, "2 apps");
+  assert.equal(groups[1].total, 40);
+  assert.equal(groups[2].title, "Other apps");
+});
+
+test("with no categories at all (an older crumbs) apps are sorted by source instead", () => {
+  const rows = L.apps({ apps: [{ id: "flatpak:x", name: "x", source: "flatpak" }, { id: "pacman:y", name: "y", source: "pacman" }] });
+  assert.deepEqual(L.groupApps(rows).map((g) => g.title), ["Flatpak", "Package"]);
+});

@@ -12,6 +12,8 @@ pub struct DesktopEntry {
     pub name: Option<String>,
     /// `Icon`: a theme icon name or an absolute path.
     pub icon: Option<String>,
+    /// `Categories`: the semicolon-separated menu categories, as written.
+    pub categories: Vec<String>,
     pub exec: Option<String>,
     pub exec_program: Option<String>,
     pub exec_args: Vec<String>,
@@ -23,6 +25,36 @@ pub struct DesktopEntry {
     pub appimage_version: Option<String>,
     pub is_appimage_entry: bool,
     pub is_flatpak_entry: bool,
+}
+
+/// The menu group a launcher's `Categories` put an app in: one of Internet, Development, Games,
+/// Graphics, Multimedia, Office or System (the Desktop Entry spec's main categories, merged as
+/// a menu would), or `Utilities`. The first listed category that names a group decides, so
+/// `Categories=Utility;TextEditor;` is Utilities. `None` when none is set.
+pub fn menu_group(categories: &[String]) -> Option<&'static str> {
+    categories.iter().find_map(|c| {
+        Some(match c.as_str() {
+            "Network" | "WebBrowser" | "Email" | "Chat" | "InstantMessaging" | "FileTransfer"
+            | "P2P" | "IRCClient" | "Feed" | "News" => "Internet",
+            "Development" | "IDE" | "Debugger" | "RevisionControl" | "WebDevelopment"
+            | "GUIDesigner" | "Building" | "Profiling" | "ProjectManagement" => "Development",
+            "Game" | "ArcadeGame" | "BoardGame" | "CardGame" | "LogicGame" | "RolePlaying"
+            | "Simulation" | "SportsGame" | "StrategyGame" | "ActionGame" | "AdventureGame"
+            | "BlocksGame" | "KidsGame" | "Emulator" => "Games",
+            "Graphics" | "2DGraphics" | "3DGraphics" | "VectorGraphics" | "RasterGraphics"
+            | "Photography" | "Scanning" | "OCR" | "Viewer" => "Graphics",
+            "AudioVideo" | "Audio" | "Video" | "Player" | "Recorder" | "Music" | "Mixer"
+            | "Sequencer" | "Tuner" | "DiscBurning" | "AudioVideoEditing" | "Midi" => "Multimedia",
+            "Office" | "WordProcessor" | "Spreadsheet" | "Presentation" | "Calendar"
+            | "ContactManagement" | "Database" | "Dictionary" | "Finance" | "Publishing"
+            | "Science" | "Education" | "Math" => "Office",
+            "System" | "Settings" | "PackageManager" | "Security" | "Monitor" | "Filesystem"
+            | "TerminalEmulator" | "HardwareSettings" | "DesktopSettings" => "System",
+            "Utility" | "Accessibility" | "Archiving" | "Compression" | "Clock" | "TextEditor"
+            | "Calculator" | "FileManager" | "Documentation" => "Utilities",
+            _ => return None,
+        })
+    })
 }
 
 const FIELD_CODES: &str = "fFuUdDnNickvm";
@@ -73,6 +105,15 @@ pub fn parse_desktop(id: &str, path: &Path, bytes: &[u8]) -> DesktopEntry {
         path: path.to_path_buf(),
         name: get("Name"),
         icon: get("Icon").filter(|i| !i.is_empty()),
+        categories: get("Categories")
+            .map(|c| {
+                c.split(';')
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
         exec,
         exec_program,
         exec_args,
@@ -226,6 +267,22 @@ mod tests {
 
     fn parse(s: &str) -> DesktopEntry {
         parse_desktop("t.desktop", Path::new("/x/t.desktop"), s.as_bytes())
+    }
+
+    #[test]
+    fn menu_group_follows_the_first_known_category() {
+        let g = |s: &str| {
+            let e = parse(&format!(
+                "[Desktop Entry]\nType=Application\nCategories={s}\n"
+            ));
+            menu_group(&e.categories)
+        };
+        assert_eq!(g("Network;WebBrowser;"), Some("Internet"));
+        assert_eq!(g("GTK;Utility;TextEditor;"), Some("Utilities"));
+        assert_eq!(g("Qt;AudioVideo;Player;Video;"), Some("Multimedia"));
+        assert_eq!(g("Game;ArcadeGame;"), Some("Games"));
+        assert_eq!(g("X-Custom;"), None);
+        assert_eq!(g(""), None);
     }
 
     #[test]

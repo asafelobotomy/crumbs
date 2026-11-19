@@ -161,6 +161,7 @@ pub fn discover(
     }
 
     attach_icons(&mut apps, &desktop);
+    attach_categories(&mut apps, &desktop);
     apps.sort_by(|a, b| {
         a.display_name
             .to_lowercase()
@@ -192,6 +193,20 @@ fn attach_icons(apps: &mut [App], desktop: &[crate::desktop::DesktopEntry]) {
                     .then(|| app.rdns_id.clone())
                     .flatten()
             });
+    }
+}
+
+/// Sets each app's `category` from its launchers, in `desktop_ids` order.
+fn attach_categories(apps: &mut [App], desktop: &[crate::desktop::DesktopEntry]) {
+    let by_id: HashMap<&str, &str> = desktop
+        .iter()
+        .filter_map(|e| Some((e.id.as_str(), crate::desktop::menu_group(&e.categories)?)))
+        .collect();
+    for app in apps {
+        app.category = app
+            .desktop_ids
+            .iter()
+            .find_map(|id| by_id.get(id.as_str()).map(|s| s.to_string()));
     }
 }
 

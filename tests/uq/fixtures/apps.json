@@ -25,7 +25,8 @@
         ],
         "has_gui": true,
         "part_of": null,
-        "icon": "firefox"
+        "icon": "firefox",
+        "category": "Internet"
       },
       {
         "id": "pacman:uq",
@@ -48,7 +49,8 @@
           "uq"
         ],
         "has_gui": true,
-        "part_of": "uQ"
+        "part_of": "uQ",
+        "category": "System"
       },
       {
         "id": "flatpak:user/org.example.Notes",
@@ -71,7 +73,8 @@
           "org.example.Notes"
         ],
         "has_gui": true,
-        "part_of": null
+        "part_of": null,
+        "category": "Office"
       },
       {
         "id": "pacman:scdr",
@@ -94,7 +97,8 @@
           "scdr"
         ],
         "has_gui": true,
-        "part_of": "uQ"
+        "part_of": "uQ",
+        "category": "System"
       },
       {
         "id": "appimage:~/Downloads/GutCheck-0.19.0-x86_64.AppImage",
@@ -117,7 +121,8 @@
           "GutCheck"
         ],
         "has_gui": true,
-        "part_of": null
+        "part_of": null,
+        "category": "Games"
       },
       {
         "id": "unmanaged:foo.desktop",
@@ -140,7 +145,8 @@
           "foo"
         ],
         "has_gui": true,
-        "part_of": null
+        "part_of": null,
+        "category": null
       }
     ],
     "statuses": [

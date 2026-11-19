@@ -66,6 +66,12 @@ Item {
     function openTab(title) {
         const tab = loader.item.tabList.find(t => t.title === title);
         loader.item.show(tab);
+        if (title === "Apps") {
+            // Categories start folded but the biggest; the tests look at every app.
+            const apps = all(loader.item, []).find(i => i.folded !== undefined && i.toggle !== undefined);
+            if (apps)
+                apps.folded = { Internet: true, Multimedia: true, Graphics: true, Office: true, Games: true, Development: true, Utilities: true, System: true, Other: true };
+        }
         return tab;
     }
 
@@ -119,7 +125,8 @@ Item {
         function rowButton(labelText, buttonText) {
             const label = root.findLabel(loader.item, labelText);
             verify(label !== null, "a row labelled " + labelText);
-            const button = root.findButton(label.parent, buttonText);
+            // An app's button is in its tile's row, one level above the label's own column.
+            const button = root.findButton(label.parent, buttonText) || root.findButton(label.parent.parent, buttonText);
             verify(button !== null, labelText + " has a " + buttonText + " button");
             return button;
         }
@@ -128,7 +135,7 @@ Item {
         function uninstallFirefox() {
             rowButton("Firefox Web Browser", "Uninstall…").clicked();
             tryVerify(root.shows("Frees about 362.0 MB"));
-            const row = root.findLabel(loader.item, "Firefox Web Browser").parent.parent;
+            const row = root.findLabel(loader.item, "Firefox Web Browser").parent.parent.parent;
             const go = root.findButton(row, "Uninstall");
             verify(go !== null && go.visible, "the preview has an Uninstall button");
             go.clicked();
@@ -241,9 +248,10 @@ Item {
 
         function test_part_of_uq_has_no_button() {
             root.openTab("Apps");
-            tryVerify(root.shows("Part of uQ"));
-            const label = root.findLabel(loader.item, "Part of uQ");
-            verify(root.findButton(label.parent, "Uninstall…") === null || root.findButton(label.parent, "Uninstall…").visible === false);
+            const partOf = () => root.all(loader.item, []).find(i => typeof i.text === "string" && i.text.startsWith("Part of uQ") && !root.isButton(i));
+            tryVerify(() => partOf() !== undefined);
+            const label = partOf();
+            verify(root.findButton(label.parent.parent, "Uninstall…") === null || root.findButton(label.parent.parent, "Uninstall…").visible === false);
             compare(root.findButtons(loader.item, "Uninstall…").filter(b => b.visible).length, 4, "the other four apps can be uninstalled");
         }
 
@@ -396,7 +404,7 @@ Item {
             keep.clicked();
             tryVerify(() => root.runs("preview-keep-data").length === 1);
             tryVerify(root.shows("Frees about 362.0 MB"));
-            const row = root.findLabel(loader.item, "Firefox Web Browser").parent.parent;
+            const row = root.findLabel(loader.item, "Firefox Web Browser").parent.parent.parent;
             root.findButton(row, "Uninstall").clicked();
             tryVerify(root.idle);
             compare(root.runs("uninstall-keep-data"), [["run", "uninstall-keep-data", ["pacman:firefox"]]]);

@@ -497,6 +497,63 @@ function batches(data) {
     return out;
 }
 
+/// The menu groups the Apps tab sorts apps into, in the order shown (crumbs' `category` of an
+/// app, "Other" when it has none), each with the theme icon of its section header.
+var APP_GROUPS = {
+    "Internet": "applications-internet",
+    "Multimedia": "applications-multimedia",
+    "Graphics": "applications-graphics",
+    "Office": "applications-office",
+    "Games": "applications-games",
+    "Development": "applications-development",
+    "Utilities": "applications-utilities",
+    "System": "applications-system",
+    "Other": "applications-other"
+};
+var APP_GROUP_ORDER = ["Internet", "Multimedia", "Graphics", "Office", "Games", "Development", "Utilities", "System", "Other"];
+
+/// `rows` (from `apps`/`filterApps`) as sections: [{key, title, icon, count, countText, total,
+/// totalText, rows}] in APP_GROUP_ORDER, empty groups left out, each group's apps biggest first.
+/// An older crumbs says no category at all: then the apps are sorted by where they came from
+/// (Package, Flatpak, ...) instead, so the page never shows one heap called "Other".
+function groupApps(rows) {
+    var known = false;
+    for (var i = 0; i < rows.length; i++)
+        if (rows[i].category !== "Other")
+            known = true;
+    var buckets = {};
+    var order = [];
+    for (var j = 0; j < rows.length; j++) {
+        var r = rows[j];
+        var key = known ? r.category : r.sourceText;
+        if (!has(buckets, key)) {
+            buckets[key] = [];
+            order.push(key);
+        }
+        buckets[key].push(r);
+    }
+    if (known)
+        order = APP_GROUP_ORDER.filter(k => has(buckets, k));
+    else
+        order.sort();
+    return order.map(k => {
+        var list = buckets[k].slice().sort((a, b) => (b.installSize || 0) - (a.installSize || 0));
+        var total = 0;
+        for (var m = 0; m < list.length; m++)
+            total += list[m].installSize || 0;
+        return {
+            key: k,
+            title: k === "Other" ? "Other apps" : k,
+            icon: known ? APP_GROUPS[k] : "applications-other",
+            count: list.length,
+            countText: plural(list.length, "app", "apps"),
+            total: total,
+            totalText: size(total),
+            rows: list
+        };
+    });
+}
+
 /// The apps of an `apps list` answer: id, plain name, size and where it came from. `partOf` is
 /// "uQ" for the desktop's own packages, which the page never offers to remove.
 function apps(data) {
@@ -517,6 +574,7 @@ function apps(data) {
             sourceText: has(SOURCES, a.source) ? SOURCES[a.source] : "Other",
             partOf: part,
             icon: typeof a.icon === "string" ? clip(a.icon, 200) : "",
+            category: has(APP_GROUPS, a.category) ? a.category : "Other",
             canUninstall: part === null && argProblem("uninstall", "app", a.id) === ""
         });
     }
