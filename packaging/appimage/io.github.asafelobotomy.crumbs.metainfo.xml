@@ -32,6 +32,11 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.7.0" date="2026-11-19">
+      <description>
+        <p>New uninstall --close-running, used by uQ's Storage and cleanup page to close an open app (CopyQ, say) before removing it. Sizes on compressed btrfs are marked, and fewer false orphans.</p>
+      </description>
+    </release>
     <release version="0.6.0" date="2026-11-16">
       <description>
         <p>On the uQ desktop: a rebuilt Storage and cleanup page with tabs, app icons, progress, a preview of everything an uninstall removes, system leftovers and crumBS's settings. New crumbs config command.</p>
