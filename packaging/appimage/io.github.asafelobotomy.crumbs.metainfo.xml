@@ -32,6 +32,11 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.8.2" date="2026-11-20">
+      <description>
+        <p>Without a terminal, a run that needs your password gives up after 2 minutes with no answer, instead of waiting for ever (uQ's Storage page stayed on "Working…").</p>
+      </description>
+    </release>
     <release version="0.8.1" date="2026-11-20">
       <description>
         <p>System leftovers no longer offer software in /opt that is still linked, on your PATH or running. An installed snap's data is matched to it. uQ's Storage page says why a Put back found nothing.</p>
