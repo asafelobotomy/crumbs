@@ -541,3 +541,11 @@ test("a restore that put nothing back says why, not 'Something went wrong'", () 
   assert.equal(o.failed, true);
   assert.equal(o.message, "Couldn't put this back: no matching history entry");
 });
+
+test("rows that may ask for a password say so while they work", () => {
+  assert.equal(L.workingText("clean"), "Working…");
+  assert.equal(L.workingText(""), "Working…");
+  for (const id of ["uninstall", "uninstall-close", "clean-system", "orphan-delete-system"])
+    assert.match(L.workingText(id), /^Working… If a password dialog opened, enter your password there\.$/);
+  for (const id of L.NEEDS_PASSWORD) assert.ok(command(id), `${id} is a command`);
+});

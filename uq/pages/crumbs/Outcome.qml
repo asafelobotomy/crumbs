@@ -24,7 +24,7 @@ ColumnLayout {
 
     UqLabel {
         id: message
-        text: out.working ? Logic.WORKING : (out.note ? out.note.message : "")
+        text: out.working ? Logic.workingText(out.host.workingCommand) : (out.note ? out.note.message : "")
         visible: text !== ""
         wrapMode: Text.Wrap
         Layout.fillWidth: true

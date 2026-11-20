@@ -326,6 +326,18 @@ Item {
             compare(root.runs("orphan-trash"), [["run", "orphan-trash", [path]]]);
         }
 
+        function test_an_uninstall_says_where_the_password_goes() {
+            fake.hold = ["uninstall"];
+            root.openTab("Apps");
+            tryVerify(root.shows("Firefox Web Browser"));
+            uninstallFirefox();
+            verify(fake.held.uninstall !== undefined, "the uninstall is running");
+            tryVerify(root.shows("Working… If a password dialog opened, enter your password there."));
+            fake.held.uninstall({ code: 5, error: "exit 5", output: { schema_version: 1, command: "uninstall", errors: [{ source: "cli", message: "administrator rights were not granted; nothing that needs them was changed" }], data: { plans: [], report: null, manual_commands: [] } } });
+            tryVerify(root.shows("Couldn't get administrator rights"));
+            tryVerify(root.idle);
+        }
+
         function test_one_write_at_a_time() {
             tryVerify(root.shows("App caches"));
             fake.hold = ["clean"];

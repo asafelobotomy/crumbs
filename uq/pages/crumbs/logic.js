@@ -84,6 +84,15 @@ var PATTERNS = {
 
 /// Shown beside a row while its command runs.
 var WORKING = "Working…";
+/// The writes that may ask for your password (crumBS gives up after 2 minutes without an answer).
+var NEEDS_PASSWORD = ["clean-system", "orphan-delete-system", "uninstall", "uninstall-keep-data", "uninstall-leftovers", "uninstall-close", "uninstall-keep-data-close", "uninstall-leftovers-close"];
+
+/// What a row says while `command` runs.
+function workingText(command) {
+    return NEEDS_PASSWORD.indexOf(command) >= 0
+        ? WORKING + " If a password dialog opened, enter your password there."
+        : WORKING;
+}
 
 function has(table, key) {
     return typeof key === "string" && Object.prototype.hasOwnProperty.call(table, key);

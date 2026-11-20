@@ -17,6 +17,8 @@ SettingsPage {
     property string highlight
     /// The key of the row whose write is running, "" when none. Only one write runs at a time.
     property string workingKey: ""
+    /// The command id of the write that is running, "" when none.
+    property string workingCommand: ""
     readonly property bool busy: page.workingKey !== ""
     /// What each write said, by row key: {message, manual, detail, failed}.
     property var notes: ({})
@@ -52,8 +54,10 @@ SettingsPage {
         if (sectionKey)
             page.notes = Logic.withNote(page.notes, sectionKey, null);
         page.workingKey = key;
+        page.workingCommand = command;
         page.ctx.command.run(command, args, result => {
             page.workingKey = "";
+            page.workingCommand = "";
             if (Logic.isCancelled(result))
                 return;
             const note = Logic.outcome(result);
@@ -79,8 +83,10 @@ SettingsPage {
         }
         page.notes = Logic.withNote(page.notes, key, null);
         page.workingKey = key;
+        page.workingCommand = command;
         page.ctx.command.run(command, args, result => {
             page.workingKey = "";
+            page.workingCommand = "";
             const env = Logic.envelope(result);
             if (!env.ok) {
                 page.notes = Logic.withNote(page.notes, key, Logic.outcome(result));
