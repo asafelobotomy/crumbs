@@ -529,3 +529,15 @@ test("with no categories at all (an older crumbs) apps are sorted by source inst
   const rows = L.apps({ apps: [{ id: "flatpak:x", name: "x", source: "flatpak" }, { id: "pacman:y", name: "y", source: "pacman" }] });
   assert.deepEqual(L.groupApps(rows).map((g) => g.title), ["Flatpak", "Package"]);
 });
+
+test("a restore that put nothing back says why, not 'Something went wrong'", () => {
+  const env = {
+    schema_version: 1,
+    command: "restore",
+    data: { outcomes: [{ entry_id: "", error: "no matching history entry", ok: false, path: "999" }] },
+    errors: [],
+  };
+  const o = L.outcome({ code: 2, output: env });
+  assert.equal(o.failed, true);
+  assert.equal(o.message, "Couldn't put this back: no matching history entry");
+});

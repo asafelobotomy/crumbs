@@ -55,12 +55,12 @@ The page says `uq_api = 2`, so it has the tabs and cards of Settings' own pages;
 - `node --test 'tests/uq/*.test.mjs'`: `logic.js`, `page.toml` (commands, argument patterns, confirms,
   plain words) and what the packages install. `tests/uq/fixtures/` holds crumbs' `--json` answers.
 - `QML_XHR_ALLOW_FILE_READ=1 QT_QPA_PLATFORM=offscreen qmltestrunner -import tests/uq/stub -input tests/uq`:
-  the page against a fake `ctx` (`tests/uq/tst_page.qml`; needs Qt 6, so it runs in CI). The stub components
-  and `FakeContext.qml` are uQ's test kit as of v0.3.0-rc.1, plus the `uq_api = 2` layout
-  components (`SettingsPage`, `SettingsTab`, `SettingsCard`, `HelpTip`, `UqAppIcon`) from uq#69.
+  the page against a fake `ctx` (`tests/uq/tst_page.qml`; needs Qt 6). The stub components and
+  `FakeContext.qml` are uQ's test kit (`templates/settings-page-tests/`) as of v0.3.21, the release CI
+  builds `uqctl` from; `FakeContext.qml` also has `hold`, to keep an answer back while a test looks.
 - `scripts/test-packaging.sh uq_files` runs each AUR `package()` in a scratch tree and checks that what it
   installs under `usr/share/uq` equals this folder; `scripts/test-packaging.sh aur` checks the built packages.
-- `uqctl integrations check --no-programs uq/` (CI builds it from the uQ main commit that added `uq_api = 2`, until a release has it) checks the folder.
+- `uqctl integrations check --no-programs uq/` (CI builds it from the uQ release in `UQ_TAG`) checks the folder.
 - `cargo test --workspace`: the lookup (`crumbs-core`, `inventory/tests.rs`) and the command
   (`crumbs-cli/tests/cli.rs`, `uninstall_by_desktop_id_*`).
 - Without `--no-programs`, `uqctl integrations check uq/` also reports that `/usr/bin/crumbs` does not exist

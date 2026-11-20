@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **System leftovers no longer include software in use:** `orphans --system` (and uQ's "System leftovers") listed every unowned folder in `/opt`, so a hand-installed SDK or runtime linked from `/usr/local/bin` (`gcloud -> /opt/google-cloud-sdk/...`), named by a link in `/opt` itself (`/opt/gradle -> gradle-8.14.3`), on your `PATH` (`/opt/node22/bin`) or running right now was offered for deletion as root. Those are now left out.
+- **Snap data:** `~/snap/<name>` is matched to the installed snap of that name. Before, it was never matched: an installed snap's data was listed as an orphan ("does not match any installed app", with `--show-low`) and `uninstall snap:<name>` left it behind.
+- **uQ Settings:** a "Put back" that finds nothing to restore now says why ("Couldn't put this back: no matching history entry") instead of "Something went wrong". The page's tests follow uQ v0.3.21's test kit, and CI checks the page with that release's `uqctl`.
+
 ## 0.8.0
 
 - **uQ Settings, Apps tab redesigned:** apps are sorted into menu categories (Internet, Multimedia, Graphics, Office, Games, Development, Utilities, System, Other), each folding away with its app count and size; the biggest opens first and a search opens them all. Each app is a framed tile with its icon, name, source, size and its own Uninstall… button inside the frame (no more button at the far edge of a wide row, next to the wrong app), two tiles to a line on a wide window. An open preview takes the whole line. Needs crumbs with `category` (below); with an older crumbs the apps are sorted by source instead.
