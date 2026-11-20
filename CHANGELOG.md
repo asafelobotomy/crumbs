@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.2
+
+- **No more endless "Working…":** without a terminal (uQ's Storage page, `crumbs mcp`), a privileged run now gives up when the password prompt gets no answer within 2 minutes: the escalation program is stopped, polkit drops its dialog, and crumbs reports exit 5 ("no answer to the password prompt") instead of waiting for ever. Once the root shell runs, there is still no limit. While an uninstall or system cleanup runs, the page also says to enter your password in the dialog.
+
 ## 0.8.1
 
 - **System leftovers no longer include software in use:** `orphans --system` (and uQ's "System leftovers") listed every unowned folder in `/opt`, so a hand-installed SDK or runtime linked from `/usr/local/bin` (`gcloud -> /opt/google-cloud-sdk/...`), named by a link in `/opt` itself (`/opt/gradle -> gradle-8.14.3`), on your `PATH` (`/opt/node22/bin`) or running right now was offered for deletion as root. Those are now left out.

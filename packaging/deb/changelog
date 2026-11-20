@@ -1,3 +1,11 @@
+crumbs (0.8.2) unstable; urgency=medium
+
+  * A privileged run without a terminal gives up after 2 minutes when the
+    password prompt gets no answer. See
+    https://github.com/asafelobotomy/crumbs/blob/main/CHANGELOG.md.
+
+ -- asafelobotomy <213836723+asafelobotomy@users.noreply.github.com>  Fri, 20 Nov 2026 12:00:00 +0000
+
 crumbs (0.8.1) unstable; urgency=medium
 
   * System leftovers skip /opt software still in use; snap data matched. See
