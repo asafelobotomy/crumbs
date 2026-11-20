@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.1
 
 - **System leftovers no longer include software in use:** `orphans --system` (and uQ's "System leftovers") listed every unowned folder in `/opt`, so a hand-installed SDK or runtime linked from `/usr/local/bin` (`gcloud -> /opt/google-cloud-sdk/...`), named by a link in `/opt` itself (`/opt/gradle -> gradle-8.14.3`), on your `PATH` (`/opt/node22/bin`) or running right now was offered for deletion as root. Those are now left out.
 - **Snap data:** `~/snap/<name>` is matched to the installed snap of that name. Before, it was never matched: an installed snap's data was listed as an orphan ("does not match any installed app", with `--show-low`) and `uninstall snap:<name>` left it behind.
