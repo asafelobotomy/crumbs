@@ -3,10 +3,9 @@ Tests for the crumBS page in uQ Settings (uq/pages/crumbs/).
   logic.test.mjs     Node: logic.js, page.toml, packaging of the page (node --test 'tests/uq/*.test.mjs')
   tst_page.qml       QML: the page against a fake ctx (needs Qt 6; runs in CI)
   stub/ FakeContext.qml tst_components.qml
-                     the page test kit of uQ v0.3.0-rc.1 (templates/settings-page-tests/), plus
-                     the uq_api 2 stand-ins (SettingsPage, SettingsTab, SettingsCard, HelpTip,
-                     UqAppIcon) from uq#69, unchanged.
-                     Refresh them when moving to a newer uQ.
+                     the page test kit of uQ v0.3.21 (templates/settings-page-tests/), the
+                     release CI's UQ_TAG names; FakeContext.qml adds `hold`/`held`.
+                     Refresh them when CI moves to a newer uQ.
   fixtures/          crumbs --json answers; see fixtures/README
 
 Run the QML tests offscreen:

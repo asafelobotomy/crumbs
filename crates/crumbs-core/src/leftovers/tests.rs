@@ -607,7 +607,26 @@ fn other_apps_data_inside_makes_parent_shared() {
 }
 
 #[test]
-fn snap_data_never_matched() {
+fn snap_data_matched_by_its_snap_only() {
+    let t = FixtureTree::new();
+    t.mkdir("/home/user/snap/firefox/common");
+    t.mkdir("/home/user/snap/other/common");
+    let mut snap = App::new(SourceKind::Snap, "firefox");
+    snap.exec_names = vec!["firefox".into()];
+    let r = Run::new(&t, vec![snap.clone()]);
+    let fs = r.find(0, true);
+    let f = must(&fs, "snap/firefox");
+    assert_eq!(f.kind, FindingKind::SnapData);
+    assert_eq!(f.confidence, Confidence::High);
+    assert!(at(&fs, "snap/other").is_none(), "{fs:#?}");
+    // An installed snap's data is never an orphan.
+    let os = orphans(&t, vec![snap], true);
+    assert!(at(&os, "snap/firefox").is_none(), "{os:#?}");
+    assert!(at(&os, "snap/other").is_some(), "{os:#?}");
+}
+
+#[test]
+fn snap_data_never_matched_by_other_sources() {
     let t = FixtureTree::new();
     t.mkdir("/home/user/snap/firefox/common");
     let r = Run::new(&t, vec![pacman("firefox", &["firefox"])]);
@@ -1336,6 +1355,31 @@ mod system {
         assert_eq!(f.scope, Scope::SystemTree);
         assert_eq!(f.reason, "not owned by any package and matched by no app");
         assert_eq!(f.size.files, 1);
+    }
+
+    #[test]
+    fn system_orphan_skips_opt_dirs_still_linked_or_on_path() {
+        let t = FixtureTree::new();
+        for d in [
+            "sdk", "ruby-3.3", "gradle-8", "node22", "rel", "mine", "gone",
+        ] {
+            t.write(&format!("opt/{d}/bin/x"), b"x");
+        }
+        // A program linked into /usr/local/bin, through an absolute target.
+        t.symlink("usr/local/bin/gcloud", "/opt/sdk/bin/x");
+        t.symlink("usr/bin/gem", "/opt/ruby-3.3/bin/x");
+        // A versioned directory that a link in /opt itself names.
+        t.symlink("opt/gradle", "gradle-8");
+        // A relative target with `..`.
+        t.symlink("usr/local/sbin/rel", "../../../opt/rel/bin/x");
+        // The user's own link.
+        t.symlink("home/user/.local/bin/mine", "/opt/mine/bin/x");
+        // A dangling link to something that isn't there is no use of /opt/gone.
+        t.symlink("usr/local/bin/other", "/srv/nothing");
+        let mut s = sys(&t, Vec::new(), owned(&["/usr/bin/true"]), &[]);
+        s.env.path_dirs = vec![PathBuf::from("/opt/node22/bin"), PathBuf::from("/usr/bin")];
+        let paths: Vec<PathBuf> = sys_orphans(&s).into_iter().map(|f| f.path).collect();
+        assert_eq!(paths, vec![PathBuf::from("/opt/gone")]);
     }
 
     #[test]

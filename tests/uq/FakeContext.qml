@@ -22,7 +22,10 @@ QtObject {
     property bool confirms: true
     /// Command ids that have `confirm` in page.toml.
     property var confirmed: []
-    /// What the page asked for, in order: ["run", id, args], ["call", method, args, target],
+    /// Command id -> the events ctx.command.stream delivers before the end (a list, or a
+    /// function(args) returning one). The end is the id's entry in `commands`.
+    property var events: ({})
+    /// What the page asked for, in order: ["run", id, args], ["stream", id, args], ["call", method, args, target],
     /// ["get", property, target], ["openApp", desktopId], ["watch", id], ["unwatch", handle].
     property var calls: []
     /// Command ids whose answers are held back: run() keeps the callback in `held[id]` (the
@@ -63,10 +66,26 @@ QtObject {
         answer(callback, pick(fake.commands, id, args || [], { error: "unknown command" }));
     }
 
+    /// ctx.command.stream: the events of `events[id]` one after another, then the result of
+    /// `commands[id]` to onDone. A command with `confirm` that is declined sends no events.
+    function stream(id, args, onEvent, onDone) {
+        fake.calls.push(["stream", id, args || []]);
+        if (fake.confirmed.indexOf(id) >= 0 && !fake.confirms)
+            return answer(onDone, { error: "Cancelled", cancelled: true });
+        const list = pick(fake.events, id, args || [], []);
+        Qt.callLater(() => {
+            for (const e of list)
+                if (typeof onEvent === "function")
+                    onEvent(e);
+            onDone(pick(fake.commands, id, args || [], { error: "unknown command" }));
+        });
+    }
+
     readonly property var ctx: ({
             theme: fake.theme,
             command: {
                 run: (id, args, callback) => fake.run(id, args, callback),
+                stream: (id, args, onEvent, onDone) => fake.stream(id, args, onEvent, onDone),
                 watch: (id, callback) => {
                     fake.calls.push(["watch", id]);
                     const handle = ++fake.nextWatch;

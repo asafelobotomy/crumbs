@@ -183,6 +183,8 @@ fn score(
         Subject::Flatpak(id) => (app.source == SourceKind::Flatpak
             && app.rdns_id.as_deref() == Some(id))
         .then(|| (Confidence::High, format!("data of the Flatpak {id}"))),
+        Subject::Snap(name) => (app.source == SourceKind::Snap && app.name == *name)
+            .then(|| (Confidence::High, format!("data of the snap {name}"))),
         Subject::Launcher(e) => {
             let by_launcher = score_launcher(e, app, ids, appimage_launchers);
             // An autostart file is also named after its app. Not when it is
@@ -205,7 +207,7 @@ fn score(
             (ids.has_exec(base) || app.location.as_deref() == Some(Path::new(program)))
                 .then(|| (Confidence::Medium, format!("user service runs {program}")))
         }
-        Subject::Service(None) | Subject::Snap(_) | Subject::RuleOnly => None,
+        Subject::Service(None) | Subject::RuleOnly => None,
         Subject::Mime(lines) => lines
             .iter()
             .any(|l| l.desktop_ids.iter().any(|d| app.desktop_ids.contains(d)))

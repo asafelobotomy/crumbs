@@ -31,8 +31,7 @@ pub(crate) struct Candidate {
 pub(crate) enum Subject {
     /// A directory or file name (a dot entry's leading `.` stripped).
     Name(NameKey),
-    /// `~/snap/<name>`. Never matched in M2 (no snap source); orphans only.
-    #[allow(dead_code)]
+    /// `~/snap/<name>`: matched by the installed snap of that name only.
     Snap(String),
     /// `~/.var/app/<id>`.
     Flatpak(String),

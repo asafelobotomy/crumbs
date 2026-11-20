@@ -42,9 +42,9 @@ jobs:
     name: uQ Settings page
     runs-on: ubuntu-24.04
     env:
-      # The uQ commit whose `uqctl` and settings page test kit this repo follows: uq_api 2 (uq#69, merged),
-      # until a uQ release has it. Then this goes back to that release's tag (`--tag`).
-      UQ_REV: 6301f2a00c2c999b7596567e1163da6a6aac9c45
+      # The uQ release whose `uqctl` and settings page test kit (tests/uq/stub, FakeContext.qml)
+      # this repo follows.
+      UQ_TAG: v0.3.21
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Qt Quick and qmltestrunner
@@ -69,10 +69,10 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.uq
-          key: uqctl-${{ env.UQ_REV }}
+          key: uqctl-${{ env.UQ_TAG }}
       - name: Build uqctl
         if: steps.uqctl.outputs.cache-hit != 'true'
-        run: cargo install --locked --git https://github.com/asafelobotomy/uq --rev "$UQ_REV" uqctl --root "$HOME/.uq"
+        run: cargo install --locked --git https://github.com/asafelobotomy/uq --tag "$UQ_TAG" uqctl --root "$HOME/.uq"
       # `--no-programs` skips only the "program exists" check: crumbs isn't installed here. Paths
       # and everything else are still checked.
       - name: uQ integration check

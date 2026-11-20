@@ -380,8 +380,6 @@ function doneMessage(data) {
     return "Freed " + size(freedBy(data));
 }
 
-/// What to say beside a row after a write: {message, manual, detail, failed}. `manual` holds the
-/// commands to run by hand (exit 5) and `detail` what failed, both for Advanced details.
 /// True when crumbs refused an uninstall because the app is open ("X is running (pid 1)").
 function isRunningRefusal(result) {
     var env = envelope(result);
@@ -394,6 +392,18 @@ function refusedOutright(result) {
     return code === null || code === 1 || code === 2 || code === 5;
 }
 
+/// The first failure a `restore` answer reports, or null. A restore that put nothing back exits
+/// 2 with no `errors`, only its outcomes (a batch that is gone, say).
+function restoreFailure(data) {
+    var list = isRestore(data) ? data.outcomes : [];
+    for (var i = 0; i < list.length && i < ROW_LIMIT; i++)
+        if (list[i] && list[i].ok !== true && typeof list[i].error === "string" && list[i].error !== "")
+            return "Couldn't put this back: " + clip(list[i].error, MESSAGE_LIMIT);
+    return null;
+}
+
+/// What to say beside a row after a write: {message, manual, detail, failed}. `manual` holds the
+/// commands to run by hand (exit 5) and `detail` what failed, both for Advanced details.
 function outcome(result) {
     var env = envelope(result);
     if (isRunningRefusal(result)) {
@@ -404,7 +414,7 @@ function outcome(result) {
     var res = { message: "", manual: [], detail: [], failed: false };
     if (isCancelled(result))
         return res;
-    var fallback = env.cli || env.error || "Something went wrong";
+    var fallback = env.cli || restoreFailure(env.data) || env.error || "Something went wrong";
     if (env.code === 0) {
         res.message = doneMessage(env.data);
     } else if (env.code === 3) {

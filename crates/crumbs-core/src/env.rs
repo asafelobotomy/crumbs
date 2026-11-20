@@ -54,6 +54,10 @@ pub struct Env {
     pub data_home: PathBuf,
     pub state_home: PathBuf,
     pub data_dirs: Vec<PathBuf>,
+    /// The absolute entries of the user's `PATH`, in-system. Only read to
+    /// tell which `/opt` directories are still in use (never to run
+    /// anything: programs run with a fixed `PATH`). A fake root has none.
+    pub path_dirs: Vec<PathBuf>,
     pub uid: u32,
     pub distro: Distro,
     /// Added to the wall clock by [`Env::now`]. Always zero on the real
@@ -146,8 +150,17 @@ impl Env {
             }
         }
 
+        let path_dirs = std::env::var_os("PATH")
+            .map(|v| {
+                std::env::split_paths(&v)
+                    .filter(|p| p.is_absolute())
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let distro = load_distro(&root);
         Ok(Env {
+            path_dirs,
             root,
             home,
             config_home,
@@ -179,6 +192,7 @@ impl Env {
             data_home: home.join(".local/share"),
             state_home: home.join(".local/state"),
             data_dirs: vec![canon.join("usr/local/share"), canon.join("usr/share")],
+            path_dirs: Vec::new(),
             uid,
             system_owner_uid: uid,
             home,
