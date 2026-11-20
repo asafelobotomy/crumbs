@@ -10,11 +10,13 @@
 //! `@@crumbs` marker: only the script itself writes markers.
 
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 use crate::command::{CHILD_PATH, ENV_ALLOWLIST};
 use crate::error::CoreError;
@@ -41,11 +43,14 @@ __c() { __i=$1; shift; __o=$(\"$@\" </dev/null 2>&1); __s=$?; \
 case $__o in '') ;; *) \
 command printf '%s\\n' \"$__o\" | while IFS= read -r __l; do \
 command printf '|%s\\n' \"$__l\"; done ;; esac; \
-command printf '@@crumbs %d %d\\n' \"$__i\" \"$__s\"; }\n";
+command printf '@@crumbs %d %d\\n' \"$__i\" \"$__s\"; }\n\
+command printf '@@crumbs root\\n'\n";
 const OUTPUT_PREFIX: u8 = b'|';
 /// Largest script accepted; Linux limits one argv string to 128 KiB.
 const MAX_SCRIPT_BYTES: usize = 120 * 1024;
 const MARKER_PREFIX: &[u8] = b"@@crumbs ";
+/// The line the batch prints first, once the root shell runs: the password prompt was answered.
+pub const ROOT_LINE: &[u8] = b"@@crumbs root\n";
 /// Extra variables the escalation program needs to show its prompt.
 const DISPLAY_VARS: [&str; 3] = ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"];
 const SHELL: &str = "/bin/sh";

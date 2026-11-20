@@ -460,3 +460,58 @@ fn system_runner_refuses_in_tests_and_fake_roots() {
     assert!(escalation_refused(t.dir.path(), false).is_some());
     assert!(escalation_refused(Path::new("/"), true).is_some());
 }
+
+#[test]
+fn run_until_root_kills_a_child_that_never_reaches_root() {
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args(["-c", "echo waiting; sleep 30"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let started = std::time::Instant::now();
+    let run = run_until_root(cmd, Some(Duration::from_millis(300))).unwrap();
+    assert!(run.timed_out);
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "it did not wait for sleep"
+    );
+}
+
+#[test]
+fn run_until_root_has_no_limit_once_root_runs() {
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args([
+        "-c",
+        "printf '@@crumbs root\\n'; sleep 1; printf '@@crumbs 0 0\\n'",
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let run = run_until_root(cmd, Some(Duration::from_millis(300))).unwrap();
+    assert!(!run.timed_out);
+    assert_eq!(run.stdout, b"@@crumbs root\n@@crumbs 0 0\n");
+}
+
+#[test]
+fn run_until_root_returns_when_the_child_ends_without_root() {
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args(["-c", "echo denied >&2; exit 1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let run = run_until_root(cmd, Some(Duration::from_secs(30))).unwrap();
+    assert!(!run.timed_out);
+    assert_eq!(run.stderr, b"denied\n");
+}
+
+#[test]
+fn the_script_says_when_root_runs_and_markers_ignore_it() {
+    let script = build_script(&[]).unwrap();
+    assert!(
+        script
+            .windows(ROOT_LINE.len() - 1)
+            .any(|w| w == &ROOT_LINE[..ROOT_LINE.len() - 1])
+    );
+    let outcomes = parse_markers(b"@@crumbs root\n@@crumbs 0 0\n", 1);
+    assert_eq!(outcomes[0].status, Some(0));
+}

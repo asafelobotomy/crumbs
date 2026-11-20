@@ -162,31 +162,101 @@ impl PrivilegedRunner for SystemPrivilegedRunner {
         }
         cmd.env("PATH", CHILD_PATH).env("LC_ALL", "C");
         let (stdin, stderr) = stdio_modes(self.interaction);
-        let mut child = cmd
-            .stdin(stdin.stdio())
+        cmd.stdin(stdin.stdio())
             .stdout(Stdio::piped())
-            .stderr(stderr.stdio())
-            .spawn()
-            .map_err(fail)?;
-        let drain = |r: Option<Box<dyn Read + Send>>| {
-            r.map(|mut r| {
-                thread::spawn(move || {
-                    let mut buf = Vec::new();
-                    let _ = r.read_to_end(&mut buf);
-                    buf
-                })
-            })
-        };
-        let out = drain(child.stdout.take().map(|s| Box::new(s) as _));
-        let err = drain(child.stderr.take().map(|s| Box::new(s) as _));
-        // The exit status is not used: the markers say what ran.
-        child.wait().map_err(fail)?;
-        let join = |h: Option<thread::JoinHandle<Vec<u8>>>| {
-            h.and_then(|h| h.join().ok()).unwrap_or_default()
-        };
+            .stderr(stderr.stdio());
+        // With no terminal, the prompt is a desktop dialog that may never be answered (or never
+        // show): without a limit crumbs, and a page waiting on it, would wait for ever.
+        let limit = (self.interaction == Interaction::NoTerminal
+            || !std::io::stdin().is_terminal())
+        .then_some(PROMPT_TIMEOUT);
+        let run = run_until_root(cmd, limit).map_err(fail)?;
+        if run.timed_out {
+            return Err(CoreError::Command {
+                program: esc.program.display().to_string(),
+                message: format!(
+                    "no answer to the password prompt within {} seconds",
+                    PROMPT_TIMEOUT.as_secs()
+                ),
+            });
+        }
         Ok(PrivilegedRun {
-            stdout: join(out),
-            stderr: cap_stderr(join(err)),
+            stdout: run.stdout,
+            stderr: cap_stderr(run.stderr),
         })
     }
+}
+
+/// How long a privileged run without a terminal waits for the password prompt to be answered.
+pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// What [`run_until_root`] collected.
+pub(crate) struct RootRun {
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    /// [`ROOT_LINE`] didn't come within the limit: the child was killed.
+    pub(crate) timed_out: bool,
+}
+
+/// Runs `cmd` (stdout piped; stderr piped or not) to the end, reading both. With `limit`, a child
+/// that hasn't printed [`ROOT_LINE`] within it, nor closed its stdout, is killed: the
+/// escalation program, so polkit drops the request and its dialog. The batch itself, once
+/// running, has no limit.
+pub(crate) fn run_until_root(
+    mut cmd: Command,
+    limit: Option<Duration>,
+) -> std::io::Result<RootRun> {
+    let mut child = cmd.spawn()?;
+    let (tx, rx) = mpsc::channel::<()>();
+    let out = child.stdout.take().map(|mut r| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            let mut told = false;
+            loop {
+                match r.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                }
+                if !told && buf.windows(ROOT_LINE.len()).any(|w| w == ROOT_LINE) {
+                    told = true;
+                    let _ = tx.send(());
+                }
+            }
+            buf
+        })
+    });
+    let err = child.stderr.take().map(|mut r| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = r.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let mut timed_out = false;
+    if let Some(limit) = limit {
+        // Disconnected: stdout closed without the line (the child is ending on its own).
+        if let Err(mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(limit) {
+            timed_out = true;
+            let _ = child.kill();
+        }
+    }
+    // The exit status is not used: the markers say what ran.
+    child.wait()?;
+    if timed_out {
+        // Nothing ran as root. A process the killed one left behind may still hold the pipes,
+        // so they are not waited for (their threads end when it does).
+        return Ok(RootRun {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            timed_out,
+        });
+    }
+    let join =
+        |h: Option<thread::JoinHandle<Vec<u8>>>| h.and_then(|h| h.join().ok()).unwrap_or_default();
+    Ok(RootRun {
+        stdout: join(out),
+        stderr: join(err),
+        timed_out,
+    })
 }
