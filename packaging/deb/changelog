@@ -1,3 +1,10 @@
+crumbs (0.8.1) unstable; urgency=medium
+
+  * System leftovers skip /opt software still in use; snap data matched. See
+    https://github.com/asafelobotomy/crumbs/blob/main/CHANGELOG.md.
+
+ -- asafelobotomy <213836723+asafelobotomy@users.noreply.github.com>  Fri, 20 Nov 2026 13:15:00 +0000
+
 crumbs (0.8.0) unstable; urgency=medium
 
   * uQ Storage page redesigned; apps carry a category in JSON. See

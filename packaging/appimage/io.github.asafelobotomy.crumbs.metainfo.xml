@@ -32,6 +32,11 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.8.1" date="2026-11-20">
+      <description>
+        <p>System leftovers no longer offer software in /opt that is still linked, on your PATH or running. An installed snap's data is matched to it. uQ's Storage page says why a Put back found nothing.</p>
+      </description>
+    </release>
     <release version="0.8.0" date="2026-11-19">
       <description>
         <p>uQ's Storage and cleanup page redesigned: apps sorted by category with an Uninstall button inside each app's own tile, and the same tiles for cleanups, leftovers and history. Apps carry a category in the JSON.</p>
