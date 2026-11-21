@@ -5,5 +5,5 @@ Comment=Find and remove app leftovers, caches and system bloat
 Exec=crumbs
 Icon=crumbs
 Terminal=true
-Categories=System;Utility;
+Categories=System;Filesystem;
 Keywords=cleaner;uninstall;cache;leftovers;
