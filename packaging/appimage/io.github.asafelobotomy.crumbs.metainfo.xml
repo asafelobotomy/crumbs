@@ -25,7 +25,7 @@
   <url type="bugtracker">https://github.com/asafelobotomy/crumbs/issues</url>
   <categories>
     <category>System</category>
-    <category>Utility</category>
+    <category>Filesystem</category>
   </categories>
   <provides>
     <binary>crumbs</binary>
