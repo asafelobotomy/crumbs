@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.3
+
+- The desktop entry lists one main menu category (`System;Filesystem;`), so menus no longer show crumbs twice.
+
 ## 0.8.2
 
 - **No more endless "Working…":** without a terminal (uQ's Storage page, `crumbs mcp`), a privileged run now gives up when the password prompt gets no answer within 2 minutes: the escalation program is stopped, polkit drops its dialog, and crumbs reports exit 5 ("no answer to the password prompt") instead of waiting for ever. Once the root shell runs, there is still no limit. While an uninstall or system cleanup runs, the page also says to enter your password in the dialog.

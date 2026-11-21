@@ -1,3 +1,9 @@
+crumbs (0.8.3) unstable; urgency=medium
+
+  * The desktop entry lists one main menu category.
+
+ -- asafelobotomy <213836723+asafelobotomy@users.noreply.github.com>  Sat, 21 Nov 2026 16:00:00 +0000
+
 crumbs (0.8.2) unstable; urgency=medium
 
   * A privileged run without a terminal gives up after 2 minutes when the

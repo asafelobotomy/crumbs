@@ -32,6 +32,11 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.8.3" date="2026-11-21">
+      <description>
+        <p>The desktop entry lists one main menu category, so menus no longer show crumbs twice.</p>
+      </description>
+    </release>
     <release version="0.8.2" date="2026-11-20">
       <description>
         <p>Without a terminal, a run that needs your password gives up after 2 minutes with no answer, instead of waiting for ever (uQ's Storage page stayed on "Working…").</p>
