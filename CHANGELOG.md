@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.4
+
+- **uQ page:** Uninstall… opens a dialog that shows what goes (Everything, Keep Settings & Data, or Leftovers, with the files each removes), then a progress bar, then what was removed and what stayed. An open app is still never forced.
+- Tick several apps and use "Uninstall selected…" to remove them one after another, with "Stop after this one".
+- The overview shows a ring chart of the space you can free by kind, with sizes and shares.
+- The page refreshes when uQ shows it again from its cache.
+
 ## Unreleased
 
 - **uQ Settings, uninstalling in a dialog:** Uninstall… opens a dialog in two columns: on the left, under "Uninstall…", three choices (Everything, Keep Settings & Data, Leftovers), each with what it means; on the right, the app and the files the chosen one removes, listed straight away. Once you press Uninstall it shows a progress bar while crumBS works, then lists what was removed (grouped as the app, your files, settings, caches and menu entries) and anything that stayed, with why, and closes with OK. An app that is open is still never forced: the dialog says so and offers "Close it and uninstall".

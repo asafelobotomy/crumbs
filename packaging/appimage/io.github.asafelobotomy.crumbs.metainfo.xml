@@ -32,6 +32,11 @@
   </provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.8.4" date="2026-11-22">
+      <description>
+        <p>uQ page: an uninstall dialog with a progress bar and a summary, uninstalling several apps in a queue, and a ring chart of the space you can free.</p>
+      </description>
+    </release>
     <release version="0.8.3" date="2026-11-21">
       <description>
         <p>The desktop entry lists one main menu category, so menus no longer show crumbs twice.</p>
