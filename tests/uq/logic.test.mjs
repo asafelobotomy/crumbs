@@ -549,3 +549,87 @@ test("rows that may ask for a password say so while they work", () => {
     assert.match(L.workingText(id), /^Working… If a password dialog opened, enter your password there\.$/);
   for (const id of L.NEEDS_PASSWORD) assert.ok(command(id), `${id} is a command`);
 });
+
+// ---- the uninstall dialog and the overview's pie ---------------------------------------------
+
+const ran = (code, actions, results, extra = {}) => ({ code, output: { schema_version: 1, command: "uninstall", errors: extra.errors ?? [], data: {
+  plans: [{ app_id: "pacman:x", actions, notes: [], total_size: 0 }],
+  report: [{ batch: "1", freed: extra.freed ?? 3000, results }], ...(extra.data ?? {}) } } });
+
+test("removalReport lists what went, grouped like the preview, and what stayed", () => {
+  const actions = [
+    { action: { type: "package-remove", names: ["x"], source: "pacman" }, size: 0, group: "app" },
+    { action: { type: "trash", path: "/home/u/.cache/x" }, size: 2000, group: "cache" },
+    { action: { type: "trash", path: "/home/u/.config/x" }, size: 1000, group: "settings" },
+  ];
+  const results = [
+    { action: actions[0].action, ok: true, error: null },
+    { action: actions[1].action, ok: true, error: null },
+    { action: actions[2].action, ok: false, error: "busy\nnow" },
+  ];
+  const r = L.removalReport(ran(3, actions, results), "/home/u");
+  assert.equal(r.status, "partial");
+  assert.equal(r.failed, true);
+  assert.deepEqual(r.groups.map((g) => [g.title, g.items]), [["The app itself", ["Package x"]], ["Caches", ["~/.cache/x"]]]);
+  assert.deepEqual(r.failures, ["~/.config/x: busy now"]);
+  assert.equal(r.message, "Some items couldn't be removed · freed 3.0 kB");
+  const all = L.removalReport(ran(0, actions.slice(0, 2), results.slice(0, 2)), "");
+  assert.equal(all.status, "removed");
+  assert.equal(all.message, "Removed · freed 3.0 kB");
+  assert.equal(L.removalReport(ran(0, [], [])).message, "Nothing needed removing.");
+});
+
+test("removalReport: a no, an open app, a refusal and no password each say so", () => {
+  const no = L.removalReport({ error: "Cancelled", cancelled: true });
+  assert.equal(no.status, "cancelled");
+  assert.equal(no.failed, false);
+  const open = L.removalReport({ code: 1, output: fx("uninstall-running") });
+  assert.equal(open.status, "refused");
+  assert.equal(open.running, true);
+  assert.ok(!/--force/.test(open.message));
+  const refused = L.removalReport({ code: 2, output: fx("uninstall-refused-desktop") });
+  assert.equal(refused.status, "refused");
+  assert.equal(refused.running, false);
+  const five = L.removalReport({ code: 5, output: { data: { plans: [], report: null, manual_commands: ["sudo 'pacman' '-Rn' 'x'"] }, errors: [] } });
+  assert.equal(five.status, "failed");
+  assert.equal(five.message, "Couldn't get administrator rights");
+  assert.deepEqual(five.manual, ["sudo 'pacman' '-Rn' 'x'"]);
+  assert.equal(L.removalReport(null).failed, true, "junk never throws, and says it failed");
+});
+
+test("queueSummary counts the apps that went and the space freed", () => {
+  const gone = { status: "removed", freed: 1000 };
+  const part = { status: "partial", freed: 500 };
+  const no = { status: "cancelled", freed: 0 };
+  assert.equal(L.queueSummary([gone, part, no, null]), "Uninstalled 2 of 4 apps · freed 1.5 kB");
+  assert.equal(L.queueSummary([gone]), "Done · freed 1.0 kB");
+  assert.equal(L.queueSummary([no]), "Nothing was uninstalled");
+});
+
+test("pieSlices: biggest first, the rest in Everything else, angles add up", () => {
+  const rows = L.spaceView(ok("scan")).rows;
+  const s = L.pieSlices(rows, false);
+  assert.equal(s.length, 7);
+  assert.deepEqual(s.slice(0, 3).map((x) => x.label), ["App caches", "Browser caches", "Caches of web-based apps"]);
+  assert.equal(s[6].label, "Everything else");
+  assert.equal(s[6].color, L.PIE_COLORS.otherLight);
+  assert.equal(s[0].color, L.PIE_COLORS.light[0]);
+  assert.equal(L.pieSlices(rows, true)[0].color, L.PIE_COLORS.dark[0]);
+  assert.equal(s[0].start, 0);
+  assert.ok(Math.abs(s[6].end - 2 * Math.PI) < 1e-9);
+  assert.equal(s[0].percentText, "56%");
+  const few = L.pieSlices([{ label: "A", total: 3 }, { label: "B", total: 1 }, { label: "C", total: 0 }], false);
+  assert.deepEqual(few.map((x) => [x.label, x.percentText]), [["A", "75%"], ["B", "25%"]]);
+  assert.deepEqual(L.pieSlices([], false), []);
+  assert.deepEqual(L.pieSlices(null, false), []);
+});
+
+test("sliceAt finds the slice under the pointer, only on the ring", () => {
+  const s = L.pieSlices([{ label: "A", total: 3 }, { label: "B", total: 1 }], false);
+  assert.equal(L.sliceAt(s, 100, 10, 100, 100, 50, 100), 0, "straight up is the first slice");
+  assert.equal(L.sliceAt(s, 20, 100, 100, 100, 50, 100), 1, "the last quarter, to the left");
+  assert.equal(L.sliceAt(s, 100, 100, 100, 100, 50, 100), -1, "the hole in the middle");
+  assert.equal(L.isLightColor("#f0f0f0"), true);
+  assert.equal(L.isLightColor("#202020"), false);
+  assert.equal(L.isLightColor(undefined), false);
+});

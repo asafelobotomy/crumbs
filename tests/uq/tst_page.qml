@@ -126,21 +126,43 @@ Item {
 
         // The button that sits in the same row as the label `labelText`.
         function rowButton(labelText, buttonText) {
-            const label = root.findLabel(loader.item, labelText);
-            verify(label !== null, "a row labelled " + labelText);
-            // An app's button is in its tile's row, one level above the label's own column.
-            const button = root.findButton(label.parent, buttonText) || root.findButton(label.parent.parent, buttonText);
+            const labels = root.findLabels(loader.item, labelText);
+            verify(labels.length > 0, "a row labelled " + labelText);
+            // An app's button is in its tile's row, one level above the label's own column. The
+            // pie's legend repeats a category's name, without a button.
+            let button = null;
+            for (const label of labels)
+                button = button || root.findButton(label.parent, buttonText) || root.findButton(label.parent.parent, buttonText);
             verify(button !== null, labelText + " has a " + buttonText + " button");
             return button;
         }
 
-        /// Opens Firefox's uninstall preview, waits for the plan, and presses its Uninstall.
+        function appsSection() {
+            return root.all(loader.item, []).find(i => i.dialog !== undefined && i.queue !== undefined);
+        }
+
+        /// The uninstall dialog's content (a popup, so not under the page's own items).
+        function dialogBody() {
+            return appsSection().dialog.contentItem;
+        }
+
+        function inDialog(text) {
+            return () => root.findLabels(dialogBody(), text).some(l => l.visible);
+        }
+
+        function dialogButton(text) {
+            const b = root.findButtons(dialogBody(), text).find(i => i.visible);
+            verify(b !== undefined, "the dialog has a visible " + text + " button");
+            return b;
+        }
+
+        /// Opens Firefox's uninstall dialog, waits for the plan, and presses its Uninstall.
         function uninstallFirefox() {
             rowButton("Firefox Web Browser", "Uninstall…").clicked();
-            tryVerify(root.shows("Frees about 362.0 MB"));
-            const row = root.findLabel(loader.item, "Firefox Web Browser").parent.parent.parent;
-            const go = root.findButton(row, "Uninstall");
-            verify(go !== null && go.visible, "the preview has an Uninstall button");
+            tryVerify(() => appsSection().dialog.opened);
+            tryVerify(inDialog("Frees about 362.0 MB"));
+            const go = dialogButton("Uninstall");
+            tryVerify(() => go.enabled);
             go.clicked();
         }
 
@@ -209,8 +231,9 @@ Item {
             verify(root.findLabel(loader.item, manual) !== null);
             compare(root.findLabel(loader.item, manual).visible, false, "the commands are under Advanced details");
             // the System logs row's own button (every row has a hidden one)
-            const details = root.findButton(root.findLabel(loader.item, "System logs").parent.parent.parent.parent, "Advanced details");
-            verify(details !== null);
+            // (the pie's legend says "System logs" too; the row's label is the one with a button)
+            const details = root.findLabels(loader.item, "System logs").map(l => root.findButton(l.parent.parent.parent.parent, "Advanced details")).find(b => b !== null);
+            verify(details !== undefined);
             details.clicked();
             compare(root.findLabel(loader.item, manual).visible, true);
         }
@@ -222,21 +245,19 @@ Item {
             root.openTab("Apps");
             tryVerify(root.shows("Firefox Web Browser"));
             uninstallFirefox();
-            tryVerify(root.shows("Firefox Web Browser is running (pid 4242). Close it, or let crumBS ask it to close."));
+            tryVerify(inDialog("Firefox Web Browser is running (pid 4242). Close it, or let crumBS ask it to close."));
             compare(root.runs("uninstall"), [["run", "uninstall", ["pacman:firefox"]]]);
             tryVerify(root.idle);
-            // The preview stays open, with a button that closes the app first.
-            const row = root.findLabel(loader.item, "Firefox Web Browser").parent.parent.parent;
-            const close = root.findButton(row, "Close it and uninstall");
-            verify(close !== null && close.visible, "an open app gets a Close it and uninstall button");
-            c["uninstall-close"] = { code: 0, output: root.fixture("clean-ok") };
-            close.clicked();
+            tryVerify(inDialog("Nothing was uninstalled"));
+            // The dialog stays open, with a button that closes the app first.
+            dialogButton("Close it and uninstall").clicked();
             tryVerify(() => root.runs("uninstall-close").length === 1);
             compare(root.runs("uninstall-close"), [["run", "uninstall-close", ["pacman:firefox"]]]);
             tryVerify(root.idle);
+            tryVerify(inDialog("Removed · freed 1.2 GB"));
         }
 
-        function test_partial_uninstall_keeps_its_message() {
+        function test_partial_uninstall_lists_what_went_and_what_stayed() {
             let listed = 0;
             const c = root.defaults();
             c["apps"] = () => {
@@ -253,9 +274,13 @@ Item {
             root.openTab("Apps");
             tryVerify(root.shows("Firefox Web Browser"));
             uninstallFirefox();
+            tryVerify(inDialog("Some items couldn't be removed · freed 1.2 GB"));
+            verify(inDialog("/home/user/.cache/foo\n/home/user/.cache/bar")(), "what was removed is listed");
+            verify(inDialog("/home/user/.mozilla: busy")(), "what stayed is listed, with why");
+            compare(root.runs("apps").length, 1, "the list waits for OK");
+            dialogButton("OK").clicked();
+            tryVerify(() => !appsSection().dialog.visible);
             tryVerify(() => root.findLabel(loader.item, "Firefox Web Browser") === null);
-            tryVerify(() => root.findLabels(loader.item, "Some items couldn't be removed").length > 0);
-            verify(root.findLabels(loader.item, "Some items couldn't be removed").some(l => l.visible), "the message is still shown");
         }
 
         function test_part_of_uq_has_no_button() {
@@ -332,9 +357,12 @@ Item {
             tryVerify(root.shows("Firefox Web Browser"));
             uninstallFirefox();
             verify(fake.held.uninstall !== undefined, "the uninstall is running");
-            tryVerify(root.shows("Working… If a password dialog opened, enter your password there."));
+            tryVerify(inDialog("Uninstalling Firefox Web Browser…"));
+            verify(inDialog("Working… If a password dialog opened, enter your password there.")());
+            verify(root.all(dialogBody(), []).some(i => i.indeterminate === true && i.visible), "a moving progress bar");
+            compare(root.findButtons(dialogBody(), "OK").filter(b => b.visible).length, 0, "no way to close it while it runs");
             fake.held.uninstall({ code: 5, error: "exit 5", output: { schema_version: 1, command: "uninstall", errors: [{ source: "cli", message: "administrator rights were not granted; nothing that needs them was changed" }], data: { plans: [], report: null, manual_commands: [] } } });
-            tryVerify(root.shows("Couldn't get administrator rights"));
+            tryVerify(inDialog("Couldn't get administrator rights"));
             tryVerify(root.idle);
         }
 
@@ -416,23 +444,122 @@ Item {
             root.openTab("Apps");
             tryVerify(root.shows("Firefox Web Browser"));
             rowButton("Firefox Web Browser", "Uninstall…").clicked();
-            tryVerify(root.shows("Frees about 362.0 MB"));
+            tryVerify(inDialog("Frees about 362.0 MB"));
             compare(root.runs("preview-uninstall"), [["run", "preview-uninstall", ["pacman:firefox"]]]);
-            for (const t of ["The app itself", "Your files and data", "Caches", "Menu entries, icons and file types"])
-                verify(root.findLabel(loader.item, t) !== null, t);
-            verify(root.findLabel(loader.item, "Removed for good") !== null);
+            for (const t of ["Uninstall Firefox Web Browser", "The app itself", "Your files and data", "Caches", "Menu entries, icons and file types", "Removed for good"])
+                verify(inDialog(t)(), t);
             compare(root.runs("uninstall").length, 0, "nothing is removed by looking");
             // keep settings and data: a new plan, and that choice is what runs
-            const keep = root.all(loader.item, []).filter(i => i.text === "The app and its caches; keep my settings and data" && i.visible)[0];
+            // the sidebar: three ways, each with what it means; the chosen one is highlighted
+            for (const t of ["Uninstall…", "Everything", "The app, its settings, data and caches", "Keep Settings & Data", "Leftovers", "Only what it left behind; the app stays installed"])
+                verify(inDialog(t)(), t);
+            verify(inDialog("/home/user/.cache/mozilla")(), "the files are listed without unfolding anything");
+            const keep = root.findButtons(dialogBody(), "Keep Settings & Data").find(i => i.visible);
             verify(keep !== undefined);
+            compare(keep.highlighted, false);
             keep.clicked();
+            tryVerify(() => keep.highlighted);
             tryVerify(() => root.runs("preview-keep-data").length === 1);
-            tryVerify(root.shows("Frees about 362.0 MB"));
-            const row = root.findLabel(loader.item, "Firefox Web Browser").parent.parent.parent;
-            root.findButton(row, "Uninstall").clicked();
+            tryVerify(inDialog("Frees about 362.0 MB"));
+            tryVerify(() => dialogButton("Uninstall").enabled);
+            dialogButton("Uninstall").clicked();
             tryVerify(root.idle);
             compare(root.runs("uninstall-keep-data"), [["run", "uninstall-keep-data", ["pacman:firefox"]]]);
             compare(root.runs("uninstall").length, 0);
+            tryVerify(inDialog("Done · freed 1.2 GB"));
+            // Cancel on a fresh dialog changes nothing.
+            dialogButton("OK").clicked();
+            tryVerify(() => !appsSection().dialog.visible);
+        }
+
+        function test_selected_apps_are_uninstalled_one_after_another() {
+            root.openTab("Apps");
+            tryVerify(root.shows("Firefox Web Browser"));
+            const boxes = root.all(loader.item, []).filter(i => i.checkable === true && i.visible && /^Add .* to the apps to uninstall$/.test(i.Accessible.name || ""));
+            compare(boxes.length, 4, "every app crumBS may remove has a tick box; Part of uQ has none");
+            for (const name of ["Firefox Web Browser", "Notes"]) {
+                const box = boxes.find(b => b.Accessible.name === "Add " + name + " to the apps to uninstall");
+                box.toggle();
+                box.toggled();
+            }
+            tryVerify(root.shows("2 apps selected · 413.0 MB"));
+            fake.hold = ["uninstall"];
+            rowButton("2 apps selected · 413.0 MB", "Uninstall selected…").clicked();
+            tryVerify(() => appsSection().dialog.opened);
+            verify(inDialog("Uninstall 2 apps")());
+            dialogButton("Uninstall 2 apps").clicked();
+            tryVerify(() => fake.held.uninstall !== undefined);
+            verify(inDialog("Uninstalling Firefox Web Browser (1 of 2)…")());
+            verify(inDialog("Waiting")(), "Notes waits its turn");
+            const first = fake.held.uninstall;
+            fake.held = {};
+            first(root.answer("clean-ok"));
+            tryVerify(() => fake.held.uninstall !== undefined);
+            tryVerify(inDialog("Uninstalling Notes (2 of 2)…"));
+            verify(inDialog("Removed · freed 1.2 GB")(), "Firefox says how it went");
+            fake.held.uninstall(root.answer("clean-ok"));
+            tryVerify(inDialog("Uninstalled 2 of 2 apps · freed 2.4 GB"));
+            compare(root.runs("uninstall"), [["run", "uninstall", ["pacman:firefox"]], ["run", "uninstall", ["flatpak:user/org.example.Notes"]]]);
+            dialogButton("OK").clicked();
+            tryVerify(() => root.runs("apps").length === 2);
+            tryVerify(() => root.findLabel(loader.item, "2 apps selected · 413.0 MB") === null);
+        }
+
+        function test_a_queue_goes_on_when_one_is_declined_and_can_stop() {
+            root.openTab("Apps");
+            tryVerify(root.shows("Firefox Web Browser"));
+            const section = appsSection();
+            section.selected = { "pacman:firefox": true, "flatpak:user/org.example.Notes": true, "appimage:~/Downloads/GutCheck-0.19.0-x86_64.AppImage": true };
+            fake.confirms = false;
+            section.dialog.openFor(section.queue);
+            tryVerify(() => section.dialog.opened);
+            dialogButton("Uninstall 3 apps").clicked();
+            tryVerify(inDialog("Uninstalled 0 of 3 apps · freed 0 B"));
+            compare(root.runs("uninstall").length, 3, "a no for one app doesn't stop the others");
+            verify(inDialog("Not uninstalled: you said no.")());
+            dialogButton("OK").clicked();
+            tryVerify(() => !section.dialog.visible);
+            compare(root.runs("apps").length, 1, "nothing changed, nothing is read again");
+            // Stop after this one: the app that runs finishes, the rest are skipped.
+            fake.confirms = true;
+            fake.hold = ["uninstall"];
+            section.dialog.openFor(section.queue);
+            tryVerify(() => section.dialog.opened);
+            dialogButton("Uninstall 3 apps").clicked();
+            tryVerify(() => fake.held.uninstall !== undefined);
+            dialogButton("Stop after this one").clicked();
+            fake.held.uninstall(root.answer("clean-ok"));
+            tryVerify(inDialog("Uninstalled 1 of 3 apps · freed 1.2 GB"));
+            compare(root.findLabels(dialogBody(), "Skipped: the queue was stopped").length, 2);
+            compare(root.runs("uninstall").length, 4);
+        }
+
+        function test_shown_again_reads_again() {
+            tryVerify(root.shows("App caches"));
+            tryVerify(() => root.runs("scan").length === 1);
+            loader.item.refresh();
+            tryVerify(() => root.runs("scan").length === 2);
+            compare(root.runs("apps").length, 0, "apps not listed yet are not read");
+            root.openTab("Apps");
+            tryVerify(() => root.runs("apps").length === 1);
+            tryVerify(root.shows("Firefox Web Browser"));
+            loader.item.refresh();
+            tryVerify(() => root.runs("apps").length === 2);
+            tryVerify(() => root.runs("scan").length === 3);
+            compare(root.runs("scan-system").length, 0, "the system is still read only when asked");
+        }
+
+        function test_overview_pie_shares_out_the_space() {
+            tryVerify(root.shows("App caches"));
+            const pie = root.all(loader.item, []).find(i => i.slices !== undefined && i.hovered !== undefined);
+            verify(pie !== undefined && pie.visible, "the overview has a pie");
+            compare(pie.slices.length, 7, "six categories and Everything else");
+            compare(pie.slices[0].label, "App caches");
+            compare(pie.slices[6].label, "Everything else");
+            verify(root.findLabel(pie, "1.5 GB · 56%") !== null, "the legend says size and share");
+            verify(root.findLabel(pie, "2.6 GB") !== null, "the middle says the total");
+            pie.hovered = 1;
+            tryVerify(() => root.findLabel(pie, "Browser caches") !== null && root.findLabels(pie, "730.0 MB").length === 1);
         }
 
         function test_system_leftovers_are_deleted_only_when_chosen() {

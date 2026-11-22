@@ -1,7 +1,8 @@
 // One app on the Apps tab: a framed tile with its icon, name, where it came from and its size,
 // and its Uninstall… button inside the same frame, so no button can be taken for a neighbour's.
 // The desktop's own packages say "Part of uQ" and have no button (crumBS would refuse anyway).
-// Uninstall… opens the preview in the tile (UninstallPreview); the tile then spans its whole line.
+// Uninstall… opens the uninstall dialog; the tick box puts the app in the queue the Apps tab
+// uninstalls one after another.
 import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
@@ -14,12 +15,14 @@ QQC2.Frame {
     property var host
     /// One entry of Logic.apps().
     property var app
-    property bool previewing: false
+    /// Selected for the queue.
+    property bool selected: false
     readonly property string key: "app:" + (tile.app ? tile.app.id : "")
 
-    signal toggled
-    /// The app was removed (or its leftovers): the list reads again.
-    signal done
+    /// Uninstall… was pressed.
+    signal uninstallAsked
+    /// The tick box was changed by hand.
+    signal selectToggled(bool on)
 
     padding: 12
 
@@ -31,6 +34,13 @@ QQC2.Frame {
             spacing: 12
             Layout.fillWidth: true
 
+            QQC2.CheckBox {
+                checked: tile.selected
+                visible: tile.app.partOf === null
+                enabled: !!tile.host && !tile.host.busy && tile.app.canUninstall
+                Accessible.name: "Add " + tile.app.name + " to the apps to uninstall"
+                onToggled: tile.selectToggled(checked)
+            }
             UqAppIcon {
                 name: tile.app.icon
                 label: tile.app.name
@@ -54,20 +64,11 @@ QQC2.Frame {
                 }
             }
             QQC2.Button {
-                text: tile.previewing ? "Close" : "Uninstall…"
+                text: "Uninstall…"
                 visible: tile.app.partOf === null
                 enabled: !!tile.host && !tile.host.busy && tile.app.canUninstall
-                onClicked: tile.toggled()
+                onClicked: tile.uninstallAsked()
             }
-        }
-        UninstallPreview {
-            visible: tile.previewing
-            active: visible
-            host: tile.host
-            app: tile.app
-            noteKey: tile.key
-            after: () => tile.done()
-            Layout.fillWidth: true
         }
         Outcome {
             host: tile.host

@@ -70,6 +70,26 @@ SettingsPage {
         });
     }
 
+    /// Runs one write for the uninstall dialog, which shows the answer itself: `done(result)`
+    /// always follows, a cancel included. Like write(), it holds every other change button.
+    function runOne(key, command, args, done) {
+        if (page.busy || !page.ctx)
+            return false;
+        const why = Logic.argsProblem(command, args);
+        if (why !== "") {
+            done({ error: why });
+            return true;
+        }
+        page.workingKey = key;
+        page.workingCommand = command;
+        page.ctx.command.run(command, args, result => {
+            page.workingKey = "";
+            page.workingCommand = "";
+            done(result);
+        });
+        return true;
+    }
+
     /// Runs settings changes one after another (`steps` from Logic.categorySteps, or one
     /// [command, args] pair), stopping at the first that crumBS refuses; then `done()`.
     function change(key, steps, done) {
@@ -99,6 +119,18 @@ SettingsPage {
             else if (done)
                 done();
         });
+    }
+
+    /// uQ keeps Settings pages open in the background and calls this when the page is shown
+    /// again: what may have changed meanwhile is read again. The space you can free always, the
+    /// apps only if their tab has listed them (and no uninstall dialog is open). The history
+    /// follows its file already, and the system reads stay "only when asked".
+    function refresh() {
+        if (!page.ctx || page.ctx !== page.openedWith)
+            return;
+        space.reread();
+        if (appList.loaded && !appList.dialog.visible)
+            appList.reread();
     }
 
     // Read the cheap things now: the space you can free, and (followed from then on) the history.
@@ -154,6 +186,7 @@ SettingsPage {
             Layout.fillWidth: true
 
             AppsSection {
+                id: appList
                 host: page
                 Layout.fillWidth: true
             }
