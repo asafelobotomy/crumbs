@@ -19,6 +19,8 @@ ColumnLayout {
     /// How much goes: "all", "keep-data" or "leftovers" (Logic.uninstallCommands); the dialog
     /// holds the choice.
     property string mode: "all"
+    /// The lists of files start unfolded (one app) or folded (each app of a queue).
+    property bool unfolded: false
     property bool loading: false
     property var view: null
     /// The plan is in, and it removes something.
@@ -93,7 +95,7 @@ ColumnLayout {
                 id: group
 
                 required property var modelData
-                property bool open: false
+                property bool open: preview.unfolded
 
                 spacing: 2
                 Layout.fillWidth: true

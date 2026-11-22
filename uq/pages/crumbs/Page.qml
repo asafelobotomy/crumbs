@@ -121,6 +121,18 @@ SettingsPage {
         });
     }
 
+    /// uQ keeps Settings pages open in the background and calls this when the page is shown
+    /// again: what may have changed meanwhile is read again. The space you can free always, the
+    /// apps only if their tab has listed them (and no uninstall dialog is open). The history
+    /// follows its file already, and the system reads stay "only when asked".
+    function refresh() {
+        if (!page.ctx || page.ctx !== page.openedWith)
+            return;
+        space.reread();
+        if (appList.loaded && !appList.dialog.visible)
+            appList.reread();
+    }
+
     // Read the cheap things now: the space you can free, and (followed from then on) the history.
     // The rest is read when its tab is opened or when asked.
     onCtxChanged: {
@@ -174,6 +186,7 @@ SettingsPage {
             Layout.fillWidth: true
 
             AppsSection {
+                id: appList
                 host: page
                 Layout.fillWidth: true
             }

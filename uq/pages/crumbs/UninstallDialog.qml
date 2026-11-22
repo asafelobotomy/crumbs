@@ -1,6 +1,7 @@
 // The uninstall dialog, for one app (its Uninstall… button) or for the apps ticked on the Apps tab
 // (a queue). It goes through three steps:
-//   review:  how much should go, and what that removes (UninstallPreview, read with --dry-run);
+//   review:  how much should go, as a sidebar of three choices (ModeSidebar), and beside it what
+//            the chosen one removes (UninstallPreview, read with --dry-run);
 //   working: a progress bar while crumBS uninstalls, one app after another;
 //   done:    what was removed and what stayed (RemovalResult), and OK to close.
 // Each uninstall is its own confirmed command (page.toml), so uQ asks once for each app, and an
@@ -100,7 +101,7 @@ QQC2.Dialog {
     anchors.centerIn: parent
     modal: true
     padding: 16
-    width: Math.min(parent ? parent.width - 32 : 640, 640)
+    width: Math.min(parent ? parent.width - 32 : 860, dialog.stage === "review" ? 860 : 640)
     closePolicy: dialog.stage === "working" ? QQC2.Popup.NoAutoClose : QQC2.Popup.CloseOnEscape
     onClosed: {
         if (dialog.changed) {
@@ -129,183 +130,186 @@ QQC2.Dialog {
             Layout.fillWidth: true
             Layout.preferredHeight: Math.min(body.implicitHeight, dialog.parent ? dialog.parent.height * 0.7 : 520)
 
-            ColumnLayout {
+            RowLayout {
                 id: body
                 width: scroll.availableWidth
-                spacing: 10
+                spacing: 20
 
-                // ---- review: the app (or the queue), how much should go, and what that removes
-                RowLayout {
-                    visible: dialog.single && dialog.stage === "review"
-                    spacing: 12
+                // ---- review: how much should go, on the left; what that removes, on the right
+                ModeSidebar {
+                    visible: dialog.stage === "review"
+                    host: dialog.host
+                    mode: dialog.mode
+                    onPicked: m => dialog.mode = m
+                    Layout.preferredWidth: 240
+                    Layout.maximumWidth: 240
+                    Layout.fillWidth: false
+                    Layout.alignment: Qt.AlignTop
+                }
+                Rectangle {
+                    visible: dialog.stage === "review"
+                    width: 1
+                    color: dialog.host ? dialog.host.accentColor() : "steelblue"
+                    opacity: 0.25
+                    Layout.fillHeight: true
+                }
+
+                ColumnLayout {
+                    spacing: 10
                     Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignTop
 
-                    UqAppIcon {
-                        name: dialog.single ? dialog.entries[0].app.icon : ""
-                        label: dialog.single ? dialog.entries[0].app.name : ""
-                        size: 40
+                    // ---- review: the app (or the queue), and what the chosen way removes
+                    RowLayout {
+                        visible: dialog.single && dialog.stage === "review"
+                        spacing: 12
+                        Layout.fillWidth: true
+
+                        UqAppIcon {
+                            name: dialog.single ? dialog.entries[0].app.icon : ""
+                            label: dialog.single ? dialog.entries[0].app.name : ""
+                            size: 40
+                        }
+                        UqLabel {
+                            text: dialog.single ? dialog.entries[0].app.sourceText + " · " + dialog.entries[0].app.sizeText : ""
+                            opacity: 0.7
+                            Layout.fillWidth: true
+                        }
                     }
                     UqLabel {
-                        text: dialog.single ? dialog.entries[0].app.sourceText + " · " + dialog.entries[0].app.sizeText : ""
+                        text: "They are uninstalled one after another, and each asks once more before it goes."
+                        visible: !dialog.single && dialog.stage === "review"
+                        wrapMode: Text.Wrap
                         opacity: 0.7
                         Layout.fillWidth: true
                     }
-                }
-                UqLabel {
-                    text: "They are uninstalled one after another, and each asks once more before it goes."
-                    visible: !dialog.single && dialog.stage === "review"
-                    wrapMode: Text.Wrap
-                    opacity: 0.7
-                    Layout.fillWidth: true
-                }
-                UqLabel {
-                    text: "How much should go?"
-                    visible: dialog.stage === "review"
-                    font.bold: true
-                }
-                QQC2.ButtonGroup {
-                    id: modes
-                }
-                Repeater {
-                    model: dialog.stage === "review" ? [
-                        { mode: "all", text: "The app, its settings, data and caches" },
-                        { mode: "keep-data", text: "The app and its caches; keep my settings and data" },
-                        { mode: "leftovers", text: "Only what it left behind; the app stays installed" }
-                    ] : []
-
-                    QQC2.RadioButton {
-                        required property var modelData
-                        text: modelData.text
-                        checked: dialog.mode === modelData.mode
-                        QQC2.ButtonGroup.group: modes
-                        onClicked: dialog.mode = modelData.mode
-                    }
-                }
-                UninstallPreview {
-                    id: onlyPreview
-                    visible: dialog.single && dialog.stage === "review"
-                    active: dialog.opened && visible
-                    host: dialog.host
-                    app: dialog.single ? dialog.entries[0].app : null
-                    mode: dialog.mode
-                    Layout.fillWidth: true
-                }
-
-                // ---- the queue: one line per app, with its plan (review) or how it went
-                Repeater {
-                    model: dialog.single ? [] : dialog.entries
-
-                    QQC2.Frame {
-                        id: line
-
-                        required property var modelData
-                        required property int index
-                        property bool open: false
-
-                        padding: 8
+                    UninstallPreview {
+                        id: onlyPreview
+                        visible: dialog.single && dialog.stage === "review"
+                        active: dialog.opened && visible
+                        host: dialog.host
+                        app: dialog.single ? dialog.entries[0].app : null
+                        mode: dialog.mode
+                        unfolded: true
                         Layout.fillWidth: true
+                    }
 
-                        ColumnLayout {
-                            anchors.fill: parent
-                            spacing: 6
+                    // ---- the queue: one line per app, with its plan (review) or how it went
+                    Repeater {
+                        model: dialog.single ? [] : dialog.entries
 
-                            RowLayout {
-                                spacing: 10
-                                Layout.fillWidth: true
+                        QQC2.Frame {
+                            id: line
 
-                                UqAppIcon {
-                                    name: line.modelData.app.icon
-                                    label: line.modelData.app.name
-                                    size: 24
-                                }
-                                ColumnLayout {
-                                    spacing: 0
+                            required property var modelData
+                            required property int index
+                            property bool open: false
+
+                            padding: 8
+                            Layout.fillWidth: true
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                spacing: 6
+
+                                RowLayout {
+                                    spacing: 10
                                     Layout.fillWidth: true
 
-                                    UqLabel {
-                                        text: line.modelData.app.name
-                                        font.bold: true
-                                        elide: Text.ElideRight
-                                        Layout.fillWidth: true
+                                    UqAppIcon {
+                                        name: line.modelData.app.icon
+                                        label: line.modelData.app.name
+                                        size: 24
                                     }
-                                    UqLabel {
-                                        id: lineStatus
-                                        text: dialog.stage === "review" ? line.modelData.app.sourceText + " · " + line.modelData.app.sizeText : dialog.statusText(line.modelData)
-                                        wrapMode: Text.Wrap
-                                        opacity: line.modelData.state === "running" ? 1 : 0.7
+                                    ColumnLayout {
+                                        spacing: 0
                                         Layout.fillWidth: true
+
+                                        UqLabel {
+                                            text: line.modelData.app.name
+                                            font.bold: true
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                        }
+                                        UqLabel {
+                                            id: lineStatus
+                                            text: dialog.stage === "review" ? line.modelData.app.sourceText + " · " + line.modelData.app.sizeText : dialog.statusText(line.modelData)
+                                            wrapMode: Text.Wrap
+                                            opacity: line.modelData.state === "running" ? 1 : 0.7
+                                            Layout.fillWidth: true
+                                        }
+                                        Binding {
+                                            target: lineStatus
+                                            property: "color"
+                                            value: dialog.host ? dialog.host.errorColor() : "red"
+                                            when: dialog.stage === "done" && !!line.modelData.report && line.modelData.report.failed
+                                        }
                                     }
-                                    Binding {
-                                        target: lineStatus
-                                        property: "color"
-                                        value: dialog.host ? dialog.host.errorColor() : "red"
-                                        when: dialog.stage === "done" && !!line.modelData.report && line.modelData.report.failed
+                                    QQC2.Button {
+                                        text: line.open ? "Hide" : (dialog.stage === "review" ? "What goes" : "What went")
+                                        visible: dialog.stage === "review" || (dialog.stage === "done" && !!line.modelData.report && line.modelData.report.groups.length + line.modelData.report.failures.length > 0)
+                                        flat: true
+                                        onClicked: line.open = !line.open
                                     }
                                 }
-                                QQC2.Button {
-                                    text: line.open ? "Hide" : (dialog.stage === "review" ? "What goes" : "What went")
-                                    visible: dialog.stage === "review" || (dialog.stage === "done" && !!line.modelData.report && line.modelData.report.groups.length + line.modelData.report.failures.length > 0)
-                                    flat: true
-                                    onClicked: line.open = !line.open
+                                UninstallPreview {
+                                    visible: line.open && dialog.stage === "review"
+                                    active: dialog.opened && visible
+                                    host: dialog.host
+                                    app: line.modelData.app
+                                    mode: dialog.mode
+                                    Layout.fillWidth: true
                                 }
-                            }
-                            UninstallPreview {
-                                visible: line.open && dialog.stage === "review"
-                                active: dialog.opened && visible
-                                host: dialog.host
-                                app: line.modelData.app
-                                mode: dialog.mode
-                                Layout.fillWidth: true
-                            }
-                            RemovalResult {
-                                visible: line.open && dialog.stage === "done"
-                                host: dialog.host
-                                report: line.modelData.report
-                                unfolded: false
-                                showMessage: false
-                                Layout.fillWidth: true
+                                RemovalResult {
+                                    visible: line.open && dialog.stage === "done"
+                                    host: dialog.host
+                                    report: line.modelData.report
+                                    unfolded: false
+                                    showMessage: false
+                                    Layout.fillWidth: true
+                                }
                             }
                         }
                     }
-                }
 
-                // ---- working: what runs now, and how far the queue is
-                ColumnLayout {
-                    visible: dialog.stage === "working"
-                    spacing: 6
-                    Layout.fillWidth: true
+                    // ---- working: what runs now, and how far the queue is
+                    ColumnLayout {
+                        visible: dialog.stage === "working"
+                        spacing: 6
+                        Layout.fillWidth: true
 
-                    UqLabel {
-                        text: dialog.running === null ? "" : "Uninstalling " + dialog.running.app.name + (dialog.single ? "…" : " (" + (dialog.finishedCount + 1) + " of " + dialog.entries.length + ")…")
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
+                        UqLabel {
+                            text: dialog.running === null ? "" : "Uninstalling " + dialog.running.app.name + (dialog.single ? "…" : " (" + (dialog.finishedCount + 1) + " of " + dialog.entries.length + ")…")
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
+                        }
+                        QQC2.ProgressBar {
+                            indeterminate: true
+                            Layout.fillWidth: true
+                        }
+                        QQC2.ProgressBar {
+                            visible: !dialog.single
+                            from: 0
+                            to: Math.max(1, dialog.entries.length)
+                            value: dialog.finishedCount
+                            Layout.fillWidth: true
+                        }
+                        UqLabel {
+                            text: dialog.host && dialog.host.busy ? Logic.workingText(dialog.host.workingCommand) : ""
+                            visible: text !== ""
+                            wrapMode: Text.Wrap
+                            opacity: 0.7
+                            Layout.fillWidth: true
+                        }
                     }
-                    QQC2.ProgressBar {
-                        indeterminate: true
-                        Layout.fillWidth: true
-                    }
-                    QQC2.ProgressBar {
-                        visible: !dialog.single
-                        from: 0
-                        to: Math.max(1, dialog.entries.length)
-                        value: dialog.finishedCount
-                        Layout.fillWidth: true
-                    }
-                    UqLabel {
-                        text: dialog.host && dialog.host.busy ? Logic.workingText(dialog.host.workingCommand) : ""
-                        visible: text !== ""
-                        wrapMode: Text.Wrap
-                        opacity: 0.7
-                        Layout.fillWidth: true
-                    }
-                }
 
-                // ---- done, one app: what was removed, right there
-                RemovalResult {
-                    visible: dialog.single && dialog.stage === "done"
-                    host: dialog.host
-                    report: dialog.single ? dialog.entries[0].report : null
-                    Layout.fillWidth: true
+                    // ---- done, one app: what was removed, right there
+                    RemovalResult {
+                        visible: dialog.single && dialog.stage === "done"
+                        host: dialog.host
+                        report: dialog.single ? dialog.entries[0].report : null
+                        Layout.fillWidth: true
+                    }
                 }
             }
         }

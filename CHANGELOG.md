@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-- **uQ Settings, uninstalling in a dialog:** Uninstall… opens a dialog with the app, the choice of how much goes and everything that would be removed. Once you press Uninstall it shows a progress bar while crumBS works, then lists what was removed (grouped as the app, your files, settings, caches and menu entries) and anything that stayed, with why, and closes with OK. An app that is open is still never forced: the dialog says so and offers "Close it and uninstall".
+- **uQ Settings, uninstalling in a dialog:** Uninstall… opens a dialog in two columns: on the left, under "Uninstall…", three choices (Everything, Keep Settings & Data, Leftovers), each with what it means; on the right, the app and the files the chosen one removes, listed straight away. Once you press Uninstall it shows a progress bar while crumBS works, then lists what was removed (grouped as the app, your files, settings, caches and menu entries) and anything that stayed, with why, and closes with OK. An app that is open is still never forced: the dialog says so and offers "Close it and uninstall".
 - **uQ Settings, uninstalling several apps:** every app that can be removed has a tick box. "Uninstall selected…" opens the same dialog for all of them: one choice of how much goes, each app's plan behind "What goes", then they are uninstalled one after another with a progress bar for the queue ("Uninstalling Notes (2 of 3)…"), and a summary of what went for each. uQ still asks once for each app; a no skips that app and the queue goes on, and "Stop after this one" skips the rest.
+- **uQ Settings, shown again:** the page has a `refresh()`, which a uQ that keeps Settings pages open in the background calls when the page is shown again: the space you can free is read again, and the app list too once it has been listed.
 - **uQ Settings, Overview:** "Space you can free" (and "System space", once checked) opens with a ring chart of the space by kind, the biggest six and "Everything else", with a legend giving each one's size and share.
 
 ## 0.8.3

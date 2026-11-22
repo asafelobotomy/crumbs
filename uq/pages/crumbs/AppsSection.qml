@@ -89,6 +89,11 @@ ColumnLayout {
         }
     }
 
+    /// The page's refresh() when uQ shows it again: the same read as Refresh.
+    function reread() {
+        section.refresh();
+    }
+
     function refresh() {
         if (!section.host || !section.host.ctx || section.loading)
             return;

@@ -450,9 +450,15 @@ Item {
                 verify(inDialog(t)(), t);
             compare(root.runs("uninstall").length, 0, "nothing is removed by looking");
             // keep settings and data: a new plan, and that choice is what runs
-            const keep = root.all(dialogBody(), []).filter(i => i.text === "The app and its caches; keep my settings and data" && i.visible)[0];
+            // the sidebar: three ways, each with what it means; the chosen one is highlighted
+            for (const t of ["Uninstall…", "Everything", "The app, its settings, data and caches", "Keep Settings & Data", "Leftovers", "Only what it left behind; the app stays installed"])
+                verify(inDialog(t)(), t);
+            verify(inDialog("/home/user/.cache/mozilla")(), "the files are listed without unfolding anything");
+            const keep = root.findButtons(dialogBody(), "Keep Settings & Data").find(i => i.visible);
             verify(keep !== undefined);
+            compare(keep.highlighted, false);
             keep.clicked();
+            tryVerify(() => keep.highlighted);
             tryVerify(() => root.runs("preview-keep-data").length === 1);
             tryVerify(inDialog("Frees about 362.0 MB"));
             tryVerify(() => dialogButton("Uninstall").enabled);
@@ -526,6 +532,21 @@ Item {
             tryVerify(inDialog("Uninstalled 1 of 3 apps · freed 1.2 GB"));
             compare(root.findLabels(dialogBody(), "Skipped: the queue was stopped").length, 2);
             compare(root.runs("uninstall").length, 4);
+        }
+
+        function test_shown_again_reads_again() {
+            tryVerify(root.shows("App caches"));
+            tryVerify(() => root.runs("scan").length === 1);
+            loader.item.refresh();
+            tryVerify(() => root.runs("scan").length === 2);
+            compare(root.runs("apps").length, 0, "apps not listed yet are not read");
+            root.openTab("Apps");
+            tryVerify(() => root.runs("apps").length === 1);
+            tryVerify(root.shows("Firefox Web Browser"));
+            loader.item.refresh();
+            tryVerify(() => root.runs("apps").length === 2);
+            tryVerify(() => root.runs("scan").length === 3);
+            compare(root.runs("scan-system").length, 0, "the system is still read only when asked");
         }
 
         function test_overview_pie_shares_out_the_space() {
