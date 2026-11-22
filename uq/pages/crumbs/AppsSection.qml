@@ -1,9 +1,10 @@
 // Apps and their size: `apps` runs when the tab is first opened, and on Refresh. The apps are
 // sorted into menu categories (Internet, Games, ...), each a section that folds away; every app
 // is a tile (AppTile) with its icon, name, size and its own Uninstall… button right there, so a
-// button can't be mistaken for its neighbour's. Uninstall… opens a preview of everything that
-// would go (UninstallPreview), and only its own button removes anything. The desktop's own packages say "Part of uQ" and have
-// no button (crumBS would refuse anyway).
+// button can't be mistaken for its neighbour's. Uninstall… opens the uninstall dialog
+// (UninstallDialog): what would go, then a progress bar, then what was removed. Selecting apps
+// (their tick boxes) gathers a queue that the same dialog uninstalls one after another. The desktop's own packages
+// say "Part of uQ" and have no button or tick box (crumBS would refuse anyway).
 import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
@@ -53,8 +54,25 @@ ColumnLayout {
         next[key] = !section.isOpen(key);
         section.folded = next;
     }
-    /// The id of the app whose preview is open, "" when none.
-    property string previewing: ""
+    /// The selected apps, by id: the queue.
+    property var selected: ({})
+    readonly property var queue: section.all.filter(a => section.selected[a.id] === true && a.canUninstall)
+    readonly property string queueSize: {
+        var total = 0;
+        for (var i = 0; i < section.queue.length; i++)
+            total += section.queue[i].installSize || 0;
+        return Logic.size(total);
+    }
+    property alias dialog: dialog
+
+    function select(id, on) {
+        const next = Object.assign({}, section.selected);
+        if (on)
+            next[id] = true;
+        else
+            delete next[id];
+        section.selected = next;
+    }
 
     /// Reads when the tab is first shown, also when Settings opens the page on this tab.
     function autoload() {
@@ -83,6 +101,12 @@ ColumnLayout {
             section.loaded = env.data !== null;
             section.problem = env.data !== null ? "" : (env.cli || env.error || "crumBS gave an answer this page can't read.");
             section.all = Logic.apps(env.data);
+            // An app that is gone drops out of the queue.
+            const kept = {};
+            for (const a of section.all)
+                if (section.selected[a.id] === true)
+                    kept[a.id] = true;
+            section.selected = kept;
             section.unfoldBiggest();
         });
     }
@@ -137,6 +161,42 @@ ColumnLayout {
         placeholderText: "Filter by name"
         visible: section.loaded
         Layout.fillWidth: true
+    }
+    // The queue: how many are ticked, and the button that uninstalls them one after another.
+    QQC2.Frame {
+        visible: section.queue.length > 0
+        padding: 8
+        Layout.fillWidth: true
+
+        RowLayout {
+            anchors.fill: parent
+            spacing: 8
+
+            UqLabel {
+                text: Logic.plural(section.queue.length, "app", "apps") + " selected · " + section.queueSize
+                font.bold: true
+                Layout.fillWidth: true
+            }
+            QQC2.Button {
+                text: "Clear"
+                flat: true
+                enabled: !!section.host && !section.host.busy
+                onClicked: section.selected = {}
+            }
+            QQC2.Button {
+                text: "Uninstall selected…"
+                enabled: !!section.host && !section.host.busy
+                onClicked: dialog.openFor(section.queue)
+            }
+        }
+    }
+    UninstallDialog {
+        id: dialog
+        host: section.host
+        onFinished: {
+            section.selected = {};
+            section.refresh();
+        }
     }
     UqLabel {
         text: "No apps match."
@@ -197,8 +257,7 @@ ColumnLayout {
             }
             GridLayout {
                 visible: group.open
-                // Two tiles to a line when each can be wide enough to read, one otherwise. An
-                // open preview takes the whole line (see AppTile).
+                // Two tiles to a line when each can be wide enough to read, one otherwise.
                 columns: width >= 560 ? 2 : 1
                 columnSpacing: 12
                 rowSpacing: 12
@@ -211,14 +270,10 @@ ColumnLayout {
                         required property var modelData
                         host: section.host
                         app: modelData
-                        previewing: section.previewing === modelData.id
-                        onToggled: section.previewing = section.previewing === modelData.id ? "" : modelData.id
-                        onDone: {
-                            section.previewing = "";
-                            section.refresh();
-                        }
+                        selected: section.selected[modelData.id] === true
+                        onSelectToggled: on => section.select(modelData.id, on)
+                        onUninstallAsked: dialog.openFor([modelData])
                         Layout.fillWidth: true
-                        Layout.columnSpan: previewing ? 2 : 1
                         Layout.alignment: Qt.AlignTop
                     }
                 }

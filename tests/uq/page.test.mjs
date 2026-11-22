@@ -63,7 +63,8 @@ test("every QML file stays under 400 lines, and the page folder holds what it sh
   for (const f of files(".qml")) assert.ok(read(f).split("\n").length <= 400, `${f} is over 400 lines`);
   assert.deepEqual(readdirSync(pageDir).sort(), [
     "AppTile.qml", "AppsSection.qml", "CategoryRow.qml", "HistorySection.qml", "LeftoversSection.qml", "Outcome.qml",
-    "Page.qml", "PreferencesSection.qml", "SpaceSection.qml", "SystemLeftovers.qml", "SystemSection.qml",
+    "Page.qml", "PreferencesSection.qml", "RemovalResult.qml", "SpacePie.qml", "SpaceSection.qml", "SystemLeftovers.qml", "SystemSection.qml",
+    "UninstallDialog.qml",
     "UninstallPreview.qml", "logic.js", "page.toml",
   ]);
 });

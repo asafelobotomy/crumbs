@@ -744,6 +744,165 @@ function uninstallCommands(mode) {
     return has(UNINSTALL_MODES, mode) ? UNINSTALL_MODES[mode] : UNINSTALL_MODES["all"];
 }
 
+/// What one finished uninstall did, for the uninstall dialog: {status, message, failed, running,
+/// freed, groups, failures, manual}. `status` is "removed" (all of it went), "partial" (some
+/// items stayed), "refused" (crumbs changed nothing: the app is open, say), "failed" (no
+/// administrator rights, or crumbs couldn't run) or "cancelled" (the person said no). `groups`
+/// are what was removed, sorted like the preview; `failures` what stayed, with why.
+function removalReport(result, home) {
+    var env = envelope(result);
+    var rep = { status: "", message: "", failed: false, running: false, freed: 0, freedText: "", groups: [], failures: [], manual: [] };
+    if (isCancelled(result)) {
+        rep.status = "cancelled";
+        rep.message = "Not uninstalled: you said no.";
+        return rep;
+    }
+    if (isRunningRefusal(result)) {
+        rep.status = "refused";
+        rep.running = true;
+        rep.failed = true;
+        rep.message = outcome(result).message;
+        return rep;
+    }
+    var plans = env.data && Array.isArray(env.data.plans) ? env.data.plans : [];
+    var plan = plans.length > 0 && plans[0] && typeof plans[0] === "object" ? plans[0] : null;
+    var actions = plan && Array.isArray(plan.actions) ? plan.actions : [];
+    var reports = reportsOf(env.data);
+    var results = reports.length > 0 && Array.isArray(reports[0].results) ? reports[0].results : [];
+    var byKey = {};
+    for (var i = 0; i < results.length && i < ROW_LIMIT; i++) {
+        var r = results[i];
+        if (!r || typeof r !== "object")
+            continue;
+        var text = actionText(r.action, home);
+        if (r.ok !== true) {
+            if (rep.failures.length < 20)
+                rep.failures.push((text !== "" ? text + ": " : "") + clip(typeof r.error === "string" ? r.error : "not removed", MESSAGE_LIMIT));
+            continue;
+        }
+        var planned = actions[i] && typeof actions[i] === "object" ? actions[i] : {};
+        var key = typeof planned.group === "string" && GROUPS.some(g => g.key === planned.group) ? planned.group : "other";
+        if (!byKey[key])
+            byKey[key] = { count: 0, items: [] };
+        byKey[key].count++;
+        if (text !== "" && byKey[key].items.length < PREVIEW_ITEMS)
+            byKey[key].items.push(text);
+    }
+    for (var k = 0; k < GROUPS.length; k++) {
+        var grp = byKey[GROUPS[k].key];
+        if (grp)
+            rep.groups.push({ key: GROUPS[k].key, title: GROUPS[k].title, countText: plural(grp.count, "item", "items"), items: grp.items, more: grp.count - grp.items.length });
+    }
+    rep.freed = freedBy(env.data);
+    rep.freedText = size(rep.freed);
+    if (env.code === 0) {
+        rep.status = "removed";
+        rep.message = rep.groups.length > 0 ? "Removed · freed " + rep.freedText : "Nothing needed removing.";
+    } else if (env.code === 3) {
+        rep.status = "partial";
+        rep.failed = true;
+        rep.message = "Some items couldn't be removed · freed " + rep.freedText;
+    } else {
+        rep.status = refusedOutright(result) && env.code !== 5 ? "refused" : "failed";
+        rep.failed = true;
+        rep.message = outcome(result).message;
+        rep.manual = manualOf(env.data);
+    }
+    return rep;
+}
+
+/// The words over a finished queue: how many apps went, and the space freed.
+function queueSummary(reports) {
+    var gone = 0;
+    var freed = 0;
+    for (var i = 0; i < reports.length; i++) {
+        if (!reports[i])
+            continue;
+        if (reports[i].status === "removed" || reports[i].status === "partial")
+            gone++;
+        freed += reports[i].freed || 0;
+    }
+    if (reports.length === 1)
+        return gone === 1 ? "Done · freed " + size(freed) : "Nothing was uninstalled";
+    return "Uninstalled " + gone + " of " + plural(reports.length, "app", "apps") + " · freed " + size(freed);
+}
+
+// ---- the overview's pie chart -------------------------------------------------------------
+
+/// The slice colours, in the order slices take them (biggest first), for a light and a dark
+/// theme; the last is the neutral grey of "Everything else". Checked for colour blindness with
+/// the dataviz palette validator.
+var PIE_COLORS = {
+    light: ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"],
+    dark: ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#0ca30c", "#9085e9"],
+    otherLight: "#a3a29b",
+    otherDark: "#6e6d66"
+};
+var PIE_SLICES = 7;
+
+/// True for a light text colour ("#e0e0e0"), which means a dark theme.
+function isLightColor(color) {
+    var m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(typeof color === "string" ? color : "");
+    if (!m)
+        return false;
+    var lum = 0.2126 * parseInt(m[1], 16) + 0.7152 * parseInt(m[2], 16) + 0.0722 * parseInt(m[3], 16);
+    return lum > 140;
+}
+
+/// The slices of a space view's rows (Logic.spaceView): the biggest categories, each with its
+/// share, angles (radians from the top, clockwise) and colour; past PIE_SLICES - 1 of them the
+/// rest join one "Everything else" slice. Empty when nothing has a size.
+function pieSlices(rows, dark) {
+    var list = (Array.isArray(rows) ? rows : []).filter(r => r && number(r.total) !== null && r.total > 0);
+    list.sort((a, b) => b.total - a.total);
+    var total = 0;
+    for (var i = 0; i < list.length; i++)
+        total += list[i].total;
+    var parts = list;
+    if (list.length > PIE_SLICES) {
+        var rest = 0;
+        for (var j = PIE_SLICES - 1; j < list.length; j++)
+            rest += list[j].total;
+        parts = list.slice(0, PIE_SLICES - 1).concat([{ label: "Everything else", total: rest, other: true }]);
+    }
+    var colors = dark ? PIE_COLORS.dark : PIE_COLORS.light;
+    var out = [];
+    var at = 0;
+    for (var k = 0; k < parts.length && total > 0; k++) {
+        var share = parts[k].total / total;
+        var pct = share * 100;
+        out.push({
+            label: clip(parts[k].label, 80),
+            total: parts[k].total,
+            sizeText: size(parts[k].total),
+            percentText: pct < 1 ? "<1%" : Math.round(pct) + "%",
+            share: share,
+            start: at * 2 * Math.PI,
+            end: (at + share) * 2 * Math.PI,
+            color: parts[k].other === true ? (dark ? PIE_COLORS.otherDark : PIE_COLORS.otherLight) : colors[k]
+        });
+        at += share;
+    }
+    return out;
+}
+
+/// Which slice the point (x, y) is on, for a ring centred at (cx, cy) between radii `inner` and
+/// `outer`, or -1.
+function sliceAt(slices, x, y, cx, cy, inner, outer) {
+    var dx = x - cx;
+    var dy = y - cy;
+    var r = Math.sqrt(dx * dx + dy * dy);
+    if (r < inner || r > outer)
+        return -1;
+    var angle = Math.atan2(dx, -dy);
+    if (angle < 0)
+        angle += 2 * Math.PI;
+    for (var i = 0; i < slices.length; i++)
+        if (angle >= slices[i].start && angle < slices[i].end)
+            return i;
+    return -1;
+}
+
 // ---- preferences (`crumbs config`) ---------------------------------------------------------
 
 var KEY_TEXT = {

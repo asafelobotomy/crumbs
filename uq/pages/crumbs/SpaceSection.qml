@@ -1,5 +1,6 @@
 // Space you can free (your own files): `scan` runs when the page opens and on Refresh. The total
-// heads the card; each category has a bar for its size next to the biggest one.
+// heads the card, a ring chart shares it out by category (SpacePie), and each category has a bar
+// for its size next to the biggest one.
 import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
@@ -72,6 +73,12 @@ ColumnLayout {
         detail: section.view.problem
         visible: section.view.problem !== ""
         Layout.fillWidth: true
+    }
+    SpacePie {
+        host: section.host
+        view: section.view
+        Layout.fillWidth: true
+        Layout.bottomMargin: 4
     }
     Repeater {
         model: section.view.rows

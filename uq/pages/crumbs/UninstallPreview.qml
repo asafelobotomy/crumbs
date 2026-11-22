@@ -1,7 +1,7 @@
 // What uninstalling one app would remove, before anything is removed: crumbs plans the removal
 // with --dry-run, and the plan is shown grouped (the app itself, your files, settings, caches,
-// menu entries), each group saying whether it goes to the trash or for good. The person picks
-// how much goes; the Uninstall button runs that same choice, which crumBS confirms again.
+// menu entries), each group saying whether it goes to the trash or for good. It sits in the
+// uninstall dialog (UninstallDialog), which holds the buttons and runs the chosen `mode`.
 import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
@@ -14,17 +14,15 @@ ColumnLayout {
     property var host
     /// One entry of Logic.apps().
     property var app
-    /// The row's key in the page's notes.
-    property string noteKey
     /// Only an open preview reads; closing it keeps what it read.
     property bool active: false
-    /// Called after an uninstall that wasn't cancelled.
-    property var after
+    /// How much goes: "all", "keep-data" or "leftovers" (Logic.uninstallCommands); the dialog
+    /// holds the choice.
     property string mode: "all"
     property bool loading: false
-    /// The last Uninstall was refused because the app is open: offers to close it.
-    property bool appIsOpen: false
     property var view: null
+    /// The plan is in, and it removes something.
+    readonly property bool ready: !preview.loading && preview.view !== null && preview.view.problem === "" && !preview.view.empty
     property string readFor: ""
 
     function read() {
@@ -52,47 +50,11 @@ ColumnLayout {
             preview.read();
     }
     onModeChanged: {
-        preview.appIsOpen = false;
         if (preview.active)
             preview.read();
     }
 
-    /// After an uninstall that wasn't cancelled. A refusal (nothing changed) keeps this preview
-    /// open with its message under the row, and an app that is open also gets a button to close
-    /// it; anything else is the owner's `after`.
-    function finished(result) {
-        preview.appIsOpen = Logic.isRunningRefusal(result);
-        if (Logic.refusedOutright(result))
-            return;
-        if (preview.after)
-            preview.after(result);
-    }
-
     spacing: 8
-
-    UqLabel {
-        text: "How much should go?"
-        font.bold: true
-    }
-    QQC2.ButtonGroup {
-        id: modes
-    }
-    Repeater {
-        model: [
-            { mode: "all", text: "The app, its settings, data and caches" },
-            { mode: "keep-data", text: "The app and its caches; keep my settings and data" },
-            { mode: "leftovers", text: "Only what it left behind; the app stays installed" }
-        ]
-
-        QQC2.RadioButton {
-            required property var modelData
-            text: modelData.text
-            checked: preview.mode === modelData.mode
-            enabled: !preview.loading
-            QQC2.ButtonGroup.group: modes
-            onClicked: preview.mode = modelData.mode
-        }
-    }
 
     ColumnLayout {
         visible: preview.loading
@@ -185,25 +147,6 @@ ColumnLayout {
                 wrapMode: Text.Wrap
                 opacity: 0.7
                 Layout.fillWidth: true
-            }
-        }
-        RowLayout {
-            spacing: 8
-
-            QQC2.Button {
-                text: preview.mode === "leftovers" ? "Remove leftovers" : "Uninstall"
-                enabled: !!preview.host && !preview.host.busy && preview.view !== null && !preview.view.empty
-                onClicked: preview.host.write(preview.noteKey, Logic.uninstallCommands(preview.mode).run, [preview.app.id], preview.finished, "section:apps")
-            }
-            QQC2.Button {
-                text: preview.mode === "leftovers" ? "Close it and remove leftovers" : "Close it and uninstall"
-                visible: preview.appIsOpen
-                enabled: !!preview.host && !preview.host.busy
-                onClicked: preview.host.write(preview.noteKey, Logic.uninstallCommands(preview.mode).close, [preview.app.id], preview.finished, "section:apps")
-            }
-            UqLabel {
-                text: "You'll be asked once more."
-                opacity: 0.7
             }
         }
     }

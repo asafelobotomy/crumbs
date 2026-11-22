@@ -69,6 +69,12 @@ ColumnLayout {
         visible: section.view.problem !== ""
         Layout.fillWidth: true
     }
+    SpacePie {
+        host: section.host
+        view: section.view
+        Layout.fillWidth: true
+        Layout.bottomMargin: 4
+    }
     Repeater {
         model: section.view.rows
 

@@ -70,6 +70,26 @@ SettingsPage {
         });
     }
 
+    /// Runs one write for the uninstall dialog, which shows the answer itself: `done(result)`
+    /// always follows, a cancel included. Like write(), it holds every other change button.
+    function runOne(key, command, args, done) {
+        if (page.busy || !page.ctx)
+            return false;
+        const why = Logic.argsProblem(command, args);
+        if (why !== "") {
+            done({ error: why });
+            return true;
+        }
+        page.workingKey = key;
+        page.workingCommand = command;
+        page.ctx.command.run(command, args, result => {
+            page.workingKey = "";
+            page.workingCommand = "";
+            done(result);
+        });
+        return true;
+    }
+
     /// Runs settings changes one after another (`steps` from Logic.categorySteps, or one
     /// [command, args] pair), stopping at the first that crumBS refuses; then `done()`.
     function change(key, steps, done) {
