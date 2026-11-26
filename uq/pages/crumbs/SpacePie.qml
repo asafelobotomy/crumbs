@@ -1,4 +1,4 @@
-// A ring chart of what a space section found, by category (Logic.pieSlices): the biggest
+// A ring chart of what a space section found, by category (Overview.pieSlices): the biggest
 // categories each get a slice and the rest join "Everything else". The legend beside it names
 // every slice with its size and share, so no slice is told apart by colour alone; pointing at a
 // slice (or its legend line) shows it in the middle of the ring.
@@ -8,6 +8,7 @@ import QtQuick.Layouts
 import org.uq.settings
 import "logic.js" as Logic
 
+import "overview.js" as Overview
 RowLayout {
     id: pie
 
@@ -16,9 +17,9 @@ RowLayout {
     property var view
     readonly property bool dark: {
         const colors = pie.host && pie.host.ctx && pie.host.ctx.theme ? pie.host.ctx.theme.colors : null;
-        return Logic.isLightColor(colors ? colors.text : "");
+        return Overview.isLightColor(colors ? colors.text : "");
     }
-    readonly property var slices: Logic.pieSlices(pie.view ? pie.view.rows : [], pie.dark)
+    readonly property var slices: Overview.pieSlices(pie.view ? pie.view.rows : [], pie.dark)
     /// The slice pointed at, -1 for none.
     property int hovered: -1
 
@@ -75,7 +76,7 @@ RowLayout {
         MouseArea {
             anchors.fill: parent
             hoverEnabled: true
-            onPositionChanged: mouse => pie.hovered = Logic.sliceAt(pie.slices, mouse.x, mouse.y, width / 2, height / 2, chart.inner, chart.outer)
+            onPositionChanged: mouse => pie.hovered = Overview.sliceAt(pie.slices, mouse.x, mouse.y, width / 2, height / 2, chart.inner, chart.outer)
             onExited: pie.hovered = -1
         }
         ColumnLayout {

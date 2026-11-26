@@ -12,7 +12,11 @@ import { parseToml } from "./toml-lite.mjs";
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..", "..");
 const pageDir = join(repo, "uq", "pages", "crumbs");
-const L = loadLogic(join(pageDir, "logic.js"));
+// logic.js holds the shared helpers and patterns; apps.js, uninstall.js and overview.js were split
+// from it and import it. MODULES is each by its QML import name; L is all of them, for the tests.
+const JS = ["logic.js", "apps.js", "uninstall.js", "overview.js"];
+const MODULES = Object.fromEntries(["Logic", "Apps", "Uninstall", "Overview"].map((name, i) => [name, loadLogic(join(pageDir, JS[i]))]));
+const L = Object.assign({}, ...Object.values(MODULES));
 const manifest = parseToml(readFileSync(join(pageDir, "page.toml"), "utf8"));
 const fx = (name) => JSON.parse(readFileSync(join(here, "fixtures", `${name}.json`), "utf8"));
 const ok = (name) => ({ code: 0, output: fx(name) });
@@ -20,11 +24,11 @@ const files = (ext) => readdirSync(pageDir).filter((f) => f.endsWith(ext));
 const read = (f) => readFileSync(join(pageDir, f), "utf8");
 const command = (id) => manifest.command.find((c) => c.id === id);
 
-test("tst_page.qml lists the commands that confirm", () => {
+test("StorageHarness.qml lists the commands that confirm", () => {
   const plan = manifest.command.filter((c) => c.confirm).map((c) => c.id).sort();
-  const test = readFileSync(join(here, "tst_page.qml"), "utf8");
+  const test = readFileSync(join(here, "StorageHarness.qml"), "utf8");
   const listed = /confirmed:\s*\[([^\]]*)\]/.exec(test);
-  assert.ok(listed, "tst_page.qml does not list the commands that confirm");
+  assert.ok(listed, "StorageHarness.qml does not list the commands that confirm");
   assert.deepEqual([...listed[1].matchAll(/"([a-z-]+)"/g)].map((m) => m[1]).sort(), plan);
 });
 
@@ -43,8 +47,8 @@ test("page_strings_are_plain", () => {
       if (/\btext:|placeholderText:|title:|detail:|confirm/.test(line)) found.push(...literals(line));
     }
   }
-  // the sentences logic.js can hand to the page
-  for (const line of read("logic.js").split("\n")) {
+  // the sentences logic.js and the files split from it can hand to the page
+  for (const line of JS.flatMap((f) => read(f).split("\n"))) {
     if (/^\s*\/\//.test(line) || /PATTERNS|pattern|RegExp|\.test\(|\.exec\(/.test(line)) continue;
     found.push(...literals(line).filter((s) => /^[A-Z].* /.test(s) || /…/.test(s)));
   }
@@ -65,16 +69,15 @@ test("every QML file stays under 400 lines, and the page folder holds what it sh
     "AppTile.qml", "AppsSection.qml", "CategoryRow.qml", "HistorySection.qml", "LeftoversSection.qml", "ModeSidebar.qml", "Outcome.qml",
     "Page.qml", "PreferencesSection.qml", "RemovalResult.qml", "SpacePie.qml", "SpaceSection.qml", "SystemLeftovers.qml", "SystemSection.qml",
     "UninstallDialog.qml",
-    "UninstallPreview.qml", "logic.js", "page.toml",
+    "UninstallPreview.qml", "apps.js", "logic.js", "overview.js", "page.toml", "uninstall.js",
   ]);
 });
 
-test("the QML files use only what logic.js and page.toml provide", () => {
-  const exported = new Set(Object.keys(L));
+test("the QML files use only what the .js files and page.toml provide", () => {
   const ids = new Set(manifest.command.map((c) => c.id));
   for (const f of files(".qml")) {
     const text = read(f);
-    for (const m of text.matchAll(/\bLogic\.([A-Za-z_]+)/g)) assert.ok(exported.has(m[1]), `${f}: Logic.${m[1]} does not exist`);
+    for (const m of text.matchAll(/\b(Logic|Apps|Uninstall|Overview)\.([A-Za-z_]+)/g)) assert.ok(m[2] in MODULES[m[1]], `${f}: ${m[1]}.${m[2]} does not exist`);
     for (const m of text.matchAll(/(?:\.write\([^,]+,\s*|command\.(?:run|watch)\()"([a-z-]+)"/g)) assert.ok(ids.has(m[1]), `${f}: no command ${m[1]}`);
     assert.ok(!/\bText\s*\{|\bLabel\s*\{|Qt\.createQmlObject/.test(text.replace(/UqLabel\s*\{/g, "")), `${f}: stock text item`);
   }

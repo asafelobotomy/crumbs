@@ -12,6 +12,7 @@ import QtQuick.Layouts
 import org.uq.settings
 import "logic.js" as Logic
 
+import "uninstall.js" as Uninstall
 QQC2.Dialog {
     id: dialog
 
@@ -65,10 +66,10 @@ QQC2.Dialog {
             return;
         }
         const entry = dialog.entries[i];
-        const commands = Logic.uninstallCommands(dialog.mode);
+        const commands = Uninstall.uninstallCommands(dialog.mode);
         dialog.setEntry(i, { state: "running" });
         const started = dialog.host.runOne("dialog:" + entry.app.id, entry.close ? commands.close : commands.run, [entry.app.id], result => {
-            const report = Logic.removalReport(result, "");
+            const report = Uninstall.removalReport(result, "");
             if (report.status === "removed" || report.status === "partial")
                 dialog.changed = true;
             dialog.setEntry(i, { state: "done", report: report });
@@ -114,7 +115,7 @@ QQC2.Dialog {
         spacing: 12
 
         UqLabel {
-            text: dialog.stage === "done" ? Logic.queueSummary(dialog.entries.map(e => e.report))
+            text: dialog.stage === "done" ? Uninstall.queueSummary(dialog.entries.map(e => e.report))
                 : dialog.single ? "Uninstall " + dialog.entries[0].app.name
                 : "Uninstall " + Logic.plural(dialog.entries.length, "app", "apps")
             font.bold: true

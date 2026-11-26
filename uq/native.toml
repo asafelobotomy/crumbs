@@ -1,0 +1,5 @@
+# uQ kits this repo vendors unchanged (uQ's native/README.md). CI: scripts/check-uq-native.sh
+
+[uq-loc]
+version = "1.0.0"
+files = ["scripts/check-loc.sh"]

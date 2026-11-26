@@ -376,5 +376,5 @@ fn last_changed_days(dir: &Path, now: SystemTime) -> u64 {
 }
 
 #[cfg(test)]
-#[path = "build_tests.rs"]
+#[path = "build_tests/mod.rs"]
 mod tests;

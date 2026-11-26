@@ -11,6 +11,7 @@ import QtQuick.Layouts
 import org.uq.settings
 import "logic.js" as Logic
 
+import "apps.js" as Apps
 ColumnLayout {
     id: section
 
@@ -19,8 +20,8 @@ ColumnLayout {
     property bool loaded: false
     property string problem: ""
     property var all: []
-    readonly property var shown: Logic.filterApps(section.all, filter.text, 200)
-    readonly property var groups: Logic.groupApps(section.shown.rows)
+    readonly property var shown: Apps.filterApps(section.all, filter.text, 200)
+    readonly property var groups: Apps.groupApps(section.shown.rows)
     /// The categories that are unfolded, by key. A search unfolds all.
     property var folded: ({})
     readonly property bool searching: filter.text.trim() !== ""
@@ -42,7 +43,7 @@ ColumnLayout {
         if (Object.keys(section.folded).length > 0)
             return;
         let biggest = null;
-        for (const g of Logic.groupApps(section.all))
+        for (const g of Apps.groupApps(section.all))
             if (biggest === null || g.total > biggest.total)
                 biggest = g;
         if (biggest !== null)
@@ -105,7 +106,7 @@ ColumnLayout {
             const env = Logic.envelope(result);
             section.loaded = env.data !== null;
             section.problem = env.data !== null ? "" : (env.cli || env.error || "crumBS gave an answer this page can't read.");
-            section.all = Logic.apps(env.data);
+            section.all = Apps.apps(env.data);
             // An app that is gone drops out of the queue.
             const kept = {};
             for (const a of section.all)

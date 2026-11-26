@@ -8,15 +8,17 @@ import QtQuick.Layouts
 import org.uq.settings
 import "logic.js" as Logic
 
+import "apps.js" as Apps
+import "uninstall.js" as Uninstall
 ColumnLayout {
     id: preview
 
     property var host
-    /// One entry of Logic.apps().
+    /// One entry of Apps.apps().
     property var app
     /// Only an open preview reads; closing it keeps what it read.
     property bool active: false
-    /// How much goes: "all", "keep-data" or "leftovers" (Logic.uninstallCommands); the dialog
+    /// How much goes: "all", "keep-data" or "leftovers" (Uninstall.uninstallCommands); the dialog
     /// holds the choice.
     property string mode: "all"
     /// The lists of files start unfolded (one app) or folded (each app of a queue).
@@ -32,14 +34,14 @@ ColumnLayout {
             return;
         const args = [preview.app.id];
         // From the mode itself: a binding on it may not have caught up inside onModeChanged.
-        const command = Logic.uninstallCommands(preview.mode).preview;
+        const command = Uninstall.uninstallCommands(preview.mode).preview;
         if (Logic.argsProblem(command, args) !== "")
             return;
         const want = preview.mode + "\n" + preview.app.id;
         preview.loading = true;
         preview.host.ctx.command.run(command, args, result => {
             preview.loading = false;
-            preview.view = Logic.removalPreview(result, "");
+            preview.view = Uninstall.removalPreview(result, "");
             preview.readFor = want;
             // The choice changed while that ran: read the plan for the new one.
             if (preview.active && preview.readFor !== preview.mode + "\n" + preview.app.id)
