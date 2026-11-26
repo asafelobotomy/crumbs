@@ -9,6 +9,7 @@ pkgbase = crum-bs-bin
 	provides = crum-bs=0.8.4
 	conflicts = crum-bs
 	conflicts = crumbs
+	conflicts = uq<0.3.41
 	options = !strip
 	options = !debug
 	source = crumbs-0.8.4.tar.gz::https://github.com/asafelobotomy/crumbs/releases/download/v0.8.4/crumbs-0.8.4.tar.gz

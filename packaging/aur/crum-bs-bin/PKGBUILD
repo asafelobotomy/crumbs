@@ -21,6 +21,8 @@ source_x86_64=("$_pkgname-$pkgver-$CARCH-linux-musl::$url/releases/download/v$pk
 sha256sums=('SKIP') # filled in by scripts/release.sh
 sha256sums_x86_64=('SKIP') # filled in by scripts/release.sh
 
+conflicts+=('uq<0.3.41')  # uq-compat: from uQ's compat/family.toml
+
 package() {
     install -Dm755 "$_pkgname-$pkgver-$CARCH-linux-musl" "$pkgdir/usr/bin/$_pkgname"
     cd "$_pkgname-$pkgver"
