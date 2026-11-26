@@ -8,6 +8,7 @@ import QtQuick.Layouts
 import org.uq.settings
 import "logic.js" as Logic
 
+import "overview.js" as Overview
 ColumnLayout {
     id: section
 
@@ -18,7 +19,7 @@ ColumnLayout {
     function show(result) {
         if (Logic.isCancelled(result) || (result && result.error === "already running"))
             return;
-        section.view = Logic.configView(result);
+        section.view = Overview.configView(result);
     }
 
     function start() {
@@ -66,7 +67,7 @@ ColumnLayout {
             Layout.fillWidth: true
         }
         Repeater {
-            model: section.view !== null && section.view.problem === "" ? Logic.userCategories() : []
+            model: section.view !== null && section.view.problem === "" ? Overview.userCategories() : []
 
             ColumnLayout {
                 id: cat
@@ -80,14 +81,14 @@ ColumnLayout {
                 QQC2.Switch {
                     id: toggle
                     text: cat.modelData.label
-                    checked: Logic.categoryOn(cat.modelData.category, section.view)
+                    checked: Overview.categoryOn(cat.modelData.category, section.view)
                     enabled: !!section.host && !section.host.busy
                     onToggled: {
                         const want = toggle.checked;
                         // Show crumBS's answer, not the click: the file is followed, so the
                         // switch moves once the change is written.
-                        toggle.checked = Qt.binding(() => Logic.categoryOn(cat.modelData.category, section.view));
-                        section.host.change(cat.key, Logic.categorySteps(cat.modelData.category, want, section.view));
+                        toggle.checked = Qt.binding(() => Overview.categoryOn(cat.modelData.category, section.view));
+                        section.host.change(cat.key, Overview.categorySteps(cat.modelData.category, want, section.view));
                     }
                 }
                 Outcome {

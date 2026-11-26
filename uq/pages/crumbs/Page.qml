@@ -8,6 +8,7 @@ import QtQuick.Layouts
 import org.uq.settings
 import "logic.js" as Logic
 
+import "overview.js" as Overview
 SettingsPage {
     id: page
 
@@ -90,7 +91,7 @@ SettingsPage {
         return true;
     }
 
-    /// Runs settings changes one after another (`steps` from Logic.categorySteps, or one
+    /// Runs settings changes one after another (`steps` from Overview.categorySteps, or one
     /// [command, args] pair), stopping at the first that crumBS refuses; then `done()`.
     function change(key, steps, done) {
         if (page.busy || !page.ctx || steps.length === 0)

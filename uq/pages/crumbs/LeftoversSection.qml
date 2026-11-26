@@ -6,6 +6,7 @@ import QtQuick.Layouts
 import org.uq.settings
 import "logic.js" as Logic
 
+import "apps.js" as Apps
 ColumnLayout {
     id: section
 
@@ -41,7 +42,7 @@ ColumnLayout {
             const env = Logic.envelope(result);
             section.loaded = env.data !== null;
             section.problem = env.data !== null ? "" : (env.cli || env.error || "crumBS gave an answer this page can't read.");
-            section.rows = Logic.orphansList(env.data);
+            section.rows = Apps.orphansList(env.data);
         });
     }
 

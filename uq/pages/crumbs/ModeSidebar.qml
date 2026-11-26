@@ -8,7 +8,7 @@ import org.uq.settings
 ColumnLayout {
     id: sidebar
 
-    /// "all", "keep-data" or "leftovers" (Logic.uninstallCommands).
+    /// "all", "keep-data" or "leftovers" (Uninstall.uninstallCommands).
     property string mode: "all"
     property var host
 

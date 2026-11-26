@@ -6,6 +6,7 @@ import QtQuick.Layouts
 import org.uq.settings
 import "logic.js" as Logic
 
+import "apps.js" as Apps
 ColumnLayout {
     id: section
 
@@ -23,7 +24,7 @@ ColumnLayout {
         section.loaded = env.data !== null;
         section.problem = env.data !== null ? "" : (env.cli || env.error || "crumBS gave an answer this page can't read.");
         if (env.data !== null)
-            section.rows = Logic.batches(env.data);
+            section.rows = Apps.batches(env.data);
     }
 
     function start() {

@@ -1,17 +1,16 @@
-// What one uninstall in the dialog did, once it is over (Logic.removalReport): crumBS's answer in
+// What one uninstall in the dialog did, once it is over (Uninstall.removalReport): crumBS's answer in
 // plain words, then what was removed, grouped like the preview, and what stayed and why.
 // Commands to run by hand sit behind Advanced details.
 import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.uq.settings
-import "logic.js" as Logic
-
+import "uninstall.js" as Uninstall
 ColumnLayout {
     id: result
 
     property var host
-    /// Logic.removalReport().
+    /// Uninstall.removalReport().
     property var report
     /// The lists start unfolded (one app) or folded (a queue).
     property bool unfolded: true

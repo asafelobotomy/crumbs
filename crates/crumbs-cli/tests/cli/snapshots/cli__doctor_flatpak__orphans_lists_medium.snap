@@ -1,0 +1,9 @@
+---
+source: crates/crumbs-cli/tests/cli/doctor_flatpak.rs
+expression: text
+---
+CONF    SIZE     KIND          PATH                     REASON
+medium  4.0 KiB  dot-dir       ~/.thunderbird           looks like thunderbird data; thunderbird was not detected as installed
+medium  0 B      flatpak-data  ~/.var/app/org.gone.App  data of the Flatpak org.gone.App, which is not installed
+
+2 orphans, 4.0 KiB

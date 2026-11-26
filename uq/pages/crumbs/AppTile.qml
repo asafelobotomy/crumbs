@@ -7,13 +7,12 @@ import QtQuick
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.uq.settings
-import "logic.js" as Logic
-
+import "apps.js" as Apps
 QQC2.Frame {
     id: tile
 
     property var host
-    /// One entry of Logic.apps().
+    /// One entry of Apps.apps().
     property var app
     /// Selected for the queue.
     property bool selected: false

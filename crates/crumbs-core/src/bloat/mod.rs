@@ -12,7 +12,7 @@ mod dev;
 mod flatpak;
 mod logs;
 #[cfg(test)]
-#[path = "tests.rs"]
+#[path = "tests/mod.rs"]
 mod scanner_tests;
 mod system;
 pub(crate) mod temp;
