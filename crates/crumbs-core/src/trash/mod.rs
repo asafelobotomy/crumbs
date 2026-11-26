@@ -217,7 +217,7 @@ pub fn move_to_trash(env: &Env, in_system: &Path) -> Result<Trashed, CoreError> 
     let content = format!(
         "[Trash Info]\nPath={}\nDeletionDate={}\n",
         encode_path(in_system),
-        jiff::Zoned::now().strftime("%Y-%m-%dT%H:%M:%S")
+        jiff::ZonedDateTime::now().strftime("%Y-%m-%dT%H:%M:%S")
     );
 
     let mut n = 1u32;
