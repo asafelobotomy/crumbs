@@ -20,6 +20,8 @@ options=('!lto')
 source=("$url/releases/download/v$pkgver/$_pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP') # filled in by scripts/release.sh
 
+conflicts+=('uq<0.3.41')  # uq-compat: from uQ's compat/family.toml
+
 prepare() {
     cd "$_pkgname-$pkgver"
     export RUSTUP_TOOLCHAIN=stable
