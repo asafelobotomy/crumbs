@@ -16,6 +16,7 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     container: archlinux:latest
     env:
       CARGO_TERM_COLOR: always
